@@ -59,6 +59,8 @@ struct e1000_info;
 /* How many Tx Descriptors do we need to call netif_wake_queue ? */
 /* How many Rx Buffers do we bundle into one write to the hardware ? */
 #define E1000_RX_BUFFER_WRITE		16 /* Must be power of 2 */
+/* How many XDP XMIT buffers to bundle into one xmit transaction */
+#define E1000_XDP_XMIT_BUNDLE_MAX E1000_RX_BUFFER_WRITE
 
 #define AUTO_ALL_MODES			0
 #define E1000_EEPROM_APME		0x0400
@@ -127,6 +129,7 @@ struct e1000_ps_page {
 struct e1000_buffer {
 	dma_addr_t dma;
 	struct sk_buff *skb;
+	struct page *page;
 	union {
 		/* Tx */
 		struct {
@@ -141,9 +144,13 @@ struct e1000_buffer {
 		struct {
 			/* arrays of page information for packet split */
 			struct e1000_ps_page *ps_pages;
-			struct page *page;
 		};
 	};
+};
+
+struct e1000_buffer_bundle{
+	struct e1000_buffer *buffer;
+	u32 length;
 };
 
 struct e1000_ring {
@@ -169,7 +176,26 @@ struct e1000_ring {
 	int set_itr;
 
 	struct sk_buff *rx_skb_top;
+
+	/*array of XDP buffer information structs*/
+	struct e1000_buffer_bundle *xdp_buffer;
 };
+
+#define E1000_DESC_UNUSED(R)                                            \
+({                                                                      \
+        unsigned int clean = smp_load_acquire(&(R)->next_to_clean);     \
+        unsigned int use = READ_ONCE((R)->next_to_use);                 \
+        (clean > use ? 0 : (R)->count) + clean - use - 1;               \
+})
+
+#define E1000_RX_DESC_EXT(R, i)                                         \
+        (&(((union e1000_rx_desc_extended *)((R).desc))[i]))
+#define E1000_GET_DESC(R, i, type)      (&(((struct type *)((R).desc))[i]))
+#define E1000_RX_DESC(R, i)             E1000_GET_DESC(R, i, e1000_rx_desc)
+#define E1000_TX_DESC(R, i)             E1000_GET_DESC(R, i, e1000_tx_desc)
+#define E1000_CONTEXT_DESC(R, i)        E1000_GET_DESC(R, i, e1000_context_desc)
+
+
 
 /* PHY register snapshot values */
 struct e1000_phy_regs {
@@ -253,6 +279,8 @@ struct e1000_adapter {
 	void (*alloc_rx_buf)(struct e1000_ring *ring, int cleaned_count,
 			     gfp_t gfp);
 	struct e1000_ring *rx_ring;
+
+	struct bpf_prog *prog;
 
 	u32 rx_int_delay;
 	u32 rx_abs_int_delay;
