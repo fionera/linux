@@ -209,6 +209,13 @@ struct usb_hcd {
 	 * (ohci 32, uhci 1024, ehci 256/512/1024).
 	 */
 
+	/* for port test mode used (rtk-hack) */
+	int (*port_test_mode)(struct usb_device *udev, int port1, int mode);
+	struct usb_device *udev_in_test;
+
+	/* prevent usb device(root hub, normal device..) from auto suspending(RPM) */
+	bool force_disable_auto_suspend;
+
 	/* The HC driver's private data is stored at the end of
 	 * this structure.
 	 */

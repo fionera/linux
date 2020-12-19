@@ -3735,12 +3735,31 @@ static const struct pr_ops dm_pr_ops = {
 	.pr_clear	= dm_pr_clear,
 };
 
+static void dm_blk_slot_free_notify(struct block_device *bdev,
+				    unsigned long index)
+{
+	int srcu_idx;
+	struct mapped_device *md = bdev->bd_disk->private_data;
+	struct dm_table *map = dm_get_live_table(md, &srcu_idx);
+	struct dm_target *ti = dm_table_find_target(map, index);
+
+	if (!dm_target_is_valid(ti))
+		goto out;
+
+	if (ti->type->slot_free_notify)
+		ti->type->slot_free_notify(ti->private, index);
+
+out:
+	dm_put_live_table(md, srcu_idx);
+}
+
 static const struct block_device_operations dm_blk_dops = {
 	.open = dm_blk_open,
 	.release = dm_blk_close,
 	.ioctl = dm_blk_ioctl,
 	.getgeo = dm_blk_getgeo,
 	.pr_ops = &dm_pr_ops,
+	.swap_slot_free_notify = dm_blk_slot_free_notify,
 	.owner = THIS_MODULE
 };
 

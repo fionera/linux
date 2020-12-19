@@ -37,8 +37,9 @@ typedef int __bitwise suspend_state_t;
 #define PM_SUSPEND_FREEZE	((__force suspend_state_t) 1)
 #define PM_SUSPEND_STANDBY	((__force suspend_state_t) 2)
 #define PM_SUSPEND_MEM		((__force suspend_state_t) 3)
+#define PM_SUSPEND_EMCU_ON	((__force suspend_state_t) 4)	// RTK_patch: add emcu_on option
 #define PM_SUSPEND_MIN		PM_SUSPEND_FREEZE
-#define PM_SUSPEND_MAX		((__force suspend_state_t) 4)
+#define PM_SUSPEND_MAX		((__force suspend_state_t) 5)	// RTK_patch: add emcu_on option
 
 enum suspend_stat_step {
 	SUSPEND_FREEZE = 1,
@@ -373,6 +374,15 @@ static inline void __init register_nosave_region_late(unsigned long b, unsigned 
 {
 	__register_nosave_region(b, e, 1);
 }
+#ifdef CONFIG_LG_SNAPSHOT_BOOT
+extern int __register_cma_forbidden_region(unsigned long start_pfn, unsigned long end_pfn);
+static inline void __init register_cma_forbidden_region(unsigned long start_pfn, unsigned long size)
+{
+	__register_cma_forbidden_region(start_pfn, start_pfn + (size >> PAGE_SHIFT));
+}
+extern void free_cma_forbidden_memory(void);
+extern void cma_page_set_forbidden(void);
+#endif
 extern int swsusp_page_is_forbidden(struct page *);
 extern void swsusp_set_page_free(struct page *);
 extern void swsusp_unset_page_free(struct page *);

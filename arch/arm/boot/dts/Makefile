@@ -777,10 +777,19 @@ dtb-$(CONFIG_ARCH_MEDIATEK) += \
 	mt8127-moose.dtb \
 	mt8135-evbp1.dtb
 dtb-$(CONFIG_ARCH_ZX) += zx296702-ad1.dtb
+
+# RTK_patch: add our machine dts
+dtb-$(CONFIG_ARCH_RTK288O) += rtd288o.dtb
 endif
 
 dtstree		:= $(srctree)/$(src)
 dtb-$(CONFIG_OF_ALL_DTBS) := $(patsubst $(dtstree)/%.dts,%.dtb, $(wildcard $(dtstree)/*.dts))
+
+# RTK_patch: add target embedded_dtb
+embedded_dtb: $(addprefix $(obj)/, $(dtb-y))
+ifneq ($(CONFIG_BUILD_ARM_APPENDED_DTB_IMAGE_NAMES_EXT),)
+	$(Q)cp $(obj)/$(CONFIG_BUILD_ARM_APPENDED_DTB_IMAGE_NAMES_EXT) embedded_dtb
+endif
 
 always		:= $(dtb-y)
 clean-files	:= *.dtb

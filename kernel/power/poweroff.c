@@ -43,4 +43,4 @@ static int __init pm_sysrq_init(void)
 	return 0;
 }
 
-subsys_initcall(pm_sysrq_init);
+//subsys_initcall(pm_sysrq_init); //FIXME!

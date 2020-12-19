@@ -814,6 +814,15 @@ static void do_emergency_remount(struct work_struct *work)
 	spin_unlock(&sb_lock);
 	kfree(work);
 	printk("Emergency Remount complete\n");
+	/*GPU work around patch for Q9823 & Q8781
+		background: AP request draw task make GPU full fill work queue.
+		work queue handle GPU work affect remount ro work finish time.
+                that will make micom timeout error.
+                solution:disable GPU interrupt before start emergency remount.
+                		enable GPU int after finish emergency remount
+	*/
+	rtd_outl(0xb810E050, 0x1);
+	/*end*/
 }
 
 void emergency_remount(void)
@@ -823,6 +832,14 @@ void emergency_remount(void)
 	work = kmalloc(sizeof(*work), GFP_ATOMIC);
 	if (work) {
 		INIT_WORK(work, do_emergency_remount);
+		/*GPU work around patch for Q9823 & Q8781
+		background: AP request draw task make GPU full fill work queue.
+		work queue handle GPU work affect remount ro work finish time.
+                that will make micom timeout error.
+                solution:disable GPU interrupt before start emergency remount.
+		*/
+		rtd_outl(0xb810E050, 0x0);
+		/*end*/
 		schedule_work(work);
 	}
 }

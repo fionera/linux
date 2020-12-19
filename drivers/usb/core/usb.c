@@ -444,6 +444,10 @@ struct usb_device *usb_alloc_dev(struct usb_device *parent,
 	dev->dev.type = &usb_device_type;
 	dev->dev.groups = usb_device_groups;
 	dev->dev.dma_mask = bus->controller->dma_mask;
+#ifdef CONFIG_PM_SLEEP
+	if(bus->controller->power.is_userresume == true)
+		dev->dev.power.is_userresume = true;
+#endif	/* CONFIG_PM_SLEEP */
 	set_dev_node(&dev->dev, dev_to_node(bus->controller));
 	dev->state = USB_STATE_ATTACHED;
 	dev->lpm_disable_count = 1;

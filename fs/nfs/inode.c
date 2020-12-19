@@ -721,7 +721,7 @@ static struct nfs_lock_context *__nfs_find_lock_context(struct nfs_open_context 
 struct nfs_lock_context *nfs_get_lock_context(struct nfs_open_context *ctx)
 {
 	struct nfs_lock_context *res, *new = NULL;
-	struct inode *inode = d_inode(ctx->dentry);
+	struct inode *inode = ctx->inode;
 
 	spin_lock(&inode->i_lock);
 	res = __nfs_find_lock_context(ctx);
@@ -749,7 +749,7 @@ EXPORT_SYMBOL_GPL(nfs_get_lock_context);
 void nfs_put_lock_context(struct nfs_lock_context *l_ctx)
 {
 	struct nfs_open_context *ctx = l_ctx->open_context;
-	struct inode *inode = d_inode(ctx->dentry);
+	struct inode *inode = ctx->inode;
 
 	if (!atomic_dec_and_lock(&l_ctx->count, &inode->i_lock))
 		return;
@@ -778,7 +778,7 @@ void nfs_close_context(struct nfs_open_context *ctx, int is_sync)
 		return;
 	if (!is_sync)
 		return;
-	inode = d_inode(ctx->dentry);
+	inode = ctx->inode;
 	nfsi = NFS_I(inode);
 	if (inode->i_mapping->nrpages == 0)
 		return;
@@ -793,7 +793,7 @@ void nfs_close_context(struct nfs_open_context *ctx, int is_sync)
 }
 EXPORT_SYMBOL_GPL(nfs_close_context);
 
-struct nfs_open_context *alloc_nfs_open_context(struct dentry *dentry, fmode_t f_mode)
+struct nfs_open_context *alloc_nfs_open_context(struct dentry *dentry, struct inode *inode, fmode_t f_mode)
 {
 	struct nfs_open_context *ctx;
 	struct rpc_cred *cred = rpc_lookup_cred();
@@ -805,8 +805,9 @@ struct nfs_open_context *alloc_nfs_open_context(struct dentry *dentry, fmode_t f
 		put_rpccred(cred);
 		return ERR_PTR(-ENOMEM);
 	}
-	nfs_sb_active(dentry->d_sb);
+	nfs_sb_active(inode->i_sb);
 	ctx->dentry = dget(dentry);
+	ctx->inode = inode;
 	ctx->cred = cred;
 	ctx->state = NULL;
 	ctx->mode = f_mode;
@@ -830,8 +831,8 @@ EXPORT_SYMBOL_GPL(get_nfs_open_context);
 
 static void __put_nfs_open_context(struct nfs_open_context *ctx, int is_sync)
 {
-	struct inode *inode = d_inode(ctx->dentry);
-	struct super_block *sb = ctx->dentry->d_sb;
+	struct inode *inode = ctx->inode;
+	struct super_block *sb = ctx->inode->i_sb;
 
 	if (!list_empty(&ctx->list)) {
 		if (!atomic_dec_and_lock(&ctx->lock_context.count, &inode->i_lock))
@@ -867,7 +868,7 @@ static void put_nfs_open_context_sync(struct nfs_open_context *ctx)
  */
 void nfs_inode_attach_open_context(struct nfs_open_context *ctx)
 {
-	struct inode *inode = d_inode(ctx->dentry);
+	struct inode *inode = ctx->inode;
 	struct nfs_inode *nfsi = NFS_I(inode);
 
 	spin_lock(&inode->i_lock);
@@ -910,7 +911,7 @@ void nfs_file_clear_open_context(struct file *filp)
 	struct nfs_open_context *ctx = nfs_file_open_context(filp);
 
 	if (ctx) {
-		struct inode *inode = d_inode(ctx->dentry);
+		struct inode *inode = ctx->inode;
 
 		filp->private_data = NULL;
 		spin_lock(&inode->i_lock);
@@ -927,7 +928,7 @@ int nfs_open(struct inode *inode, struct file *filp)
 {
 	struct nfs_open_context *ctx;
 
-	ctx = alloc_nfs_open_context(file_dentry(filp), filp->f_mode);
+	ctx = alloc_nfs_open_context(file_dentry(filp), inode, filp->f_mode);
 	if (IS_ERR(ctx))
 		return PTR_ERR(ctx);
 	nfs_file_set_open_context(filp, ctx);

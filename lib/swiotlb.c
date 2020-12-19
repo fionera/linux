@@ -121,7 +121,7 @@ unsigned long swiotlb_nr_tbl(void)
 EXPORT_SYMBOL_GPL(swiotlb_nr_tbl);
 
 /* default to 64MB */
-#define IO_TLB_DEFAULT_SIZE (64UL<<20)
+#define IO_TLB_DEFAULT_SIZE (2UL<<20)
 unsigned long swiotlb_size_or_default(void)
 {
 	unsigned long size;
@@ -766,6 +766,10 @@ dma_addr_t swiotlb_map_page(struct device *dev, struct page *page,
 	/* Ensure that the address returned is DMA'ble */
 	if (!dma_capable(dev, dev_addr, size)) {
 		swiotlb_tbl_unmap_single(dev, map, size, dir);
+		if (!dev->dma_mask)
+			pr_err("swiotlb: you need to set device dma_mask first...\n");
+		else
+			pr_err("swiotlb: addr: %llx mask: %llx \n",(long long unsigned int) dev_addr, *dev->dma_mask);
 		return phys_to_dma(dev, io_tlb_overflow_buffer);
 	}
 

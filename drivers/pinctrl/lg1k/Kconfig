@@ -1,0 +1,10 @@
+config PINCTRL_LG1K
+	bool "Pin controller drivers for LG1K DTV SoCs"
+	depends on ARCH_LG1K
+	select PINMUX
+	select PINCONF
+	select GENERIC_PINCONF
+	help
+	  Select this to enable the pin controller drivers for LG1K
+	  DTV SoCs. Currently supports LG1211, LG1212, LG1313, and
+	  LG1314.

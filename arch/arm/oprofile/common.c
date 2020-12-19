@@ -39,8 +39,10 @@ static struct op_perf_name {
 	{ "armv6_1156",		"arm/armv6"	},
 	{ "armv6_1176",		"arm/armv6"	},
 	{ "armv6_11mpcore",	"arm/mpcore"	},
+	{ "armv7_cortex_a7",	"arm/armv7-ca7"	},
 	{ "armv7_cortex_a8",	"arm/armv7"	},
 	{ "armv7_cortex_a9",	"arm/armv7-ca9"	},
+	{ "armv7_cortex_a15",	"arm/armv7-ca15" },
 };
 
 char *op_name_from_perf_id(void)

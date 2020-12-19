@@ -29,6 +29,7 @@
 #include <linux/io.h>
 #include <linux/slab.h>
 #include <linux/stop_machine.h>
+#include <linux/romempool.h>
 
 #include <asm/cputype.h>
 #include <asm/fixmap.h>
@@ -62,6 +63,12 @@ pgprot_t phys_mem_access_prot(struct file *file, unsigned long pfn,
 }
 EXPORT_SYMBOL(phys_mem_access_prot);
 
+#ifdef CONFIG_EKP
+static __always_inline void __init *early_alloc(unsigned long sz)
+{
+	return ekp_early_alloc(sz);
+}
+#else
 static void __init *early_alloc(unsigned long sz)
 {
 	phys_addr_t phys;
@@ -73,6 +80,7 @@ static void __init *early_alloc(unsigned long sz)
 	memset(ptr, 0, sz);
 	return ptr;
 }
+#endif
 
 /*
  * remap a PMD into pages
@@ -168,8 +176,16 @@ static void alloc_init_pmd(struct mm_struct *mm, pud_t *pud,
 				flush_tlb_all();
 				if (pmd_table(old_pmd)) {
 					phys_addr_t table = __pa(pte_offset_map(&old_pmd, 0));
-					if (!WARN_ON_ONCE(slab_is_available()))
-						memblock_free(table, PAGE_SIZE);
+					/*
+					 * When CONFIG_EKP_ROMEMPOOL=y, all page tables
+					 * used at boot time are from the romempool, so
+					 * we should free that memory to the romempool,
+					 * not the buddy system.
+					 */
+					if (!romempool_free_init_pgtable(table)) {
+						if (!WARN_ON_ONCE(slab_is_available()))
+							memblock_free(table, PAGE_SIZE);
+					}
 				}
 			}
 		} else {
@@ -229,8 +245,16 @@ static void alloc_init_pud(struct mm_struct *mm, pgd_t *pgd,
 				flush_tlb_all();
 				if (pud_table(old_pud)) {
 					phys_addr_t table = __pa(pmd_offset(&old_pud, 0));
-					if (!WARN_ON_ONCE(slab_is_available()))
-						memblock_free(table, PAGE_SIZE);
+					/*
+					 * When CONFIG_EKP_ROMEMPOOL=y, all page tables
+					 * used at boot time are from the romempool, so
+					 * we should free that memory to the romempool,
+					 * not the buddy system.
+					 */
+					if (!romempool_free_init_pgtable(table)) {
+						if (!WARN_ON_ONCE(slab_is_available()))
+							memblock_free(table, PAGE_SIZE);
+					}
 				}
 			}
 		} else {
@@ -267,7 +291,9 @@ static void *late_alloc(unsigned long size)
 	void *ptr;
 
 	BUG_ON(size > PAGE_SIZE);
-	ptr = (void *)__get_free_page(PGALLOC_GFP);
+	ptr = (void *)romempool_alloc(PGALLOC_GFP, RMP_SPECIAL, 0);
+	if (!ptr)
+		ptr = (void *)__get_free_page(PGALLOC_GFP);
 	BUG_ON(!ptr);
 	return ptr;
 }
@@ -431,12 +457,68 @@ void mark_rodata_ro(void)
 }
 #endif
 
+static inline pmd_t *pmd_off_k(unsigned long virt)
+{
+        return pmd_offset(pud_offset(pgd_offset_k(virt), virt), virt);
+}
+
+#ifdef CONFIG_REALTEK_LOGBUF
+static void __init create_page_mapping(unsigned long _start, unsigned long _size)
+{
+    unsigned long addr, start, end;
+
+    start = round_down(_start, PMD_SIZE);
+    end = start + PMD_SIZE;
+
+    /*
+     * Clear previous low-memory mapping to ensure that the
+     * TLB does not see any conflicting entries.
+     */
+    for (addr = __phys_to_virt(start); addr < __phys_to_virt(end); addr += PMD_SIZE)
+        pmd_clear(pmd_off_k(addr));
+
+    /* Use type non section mapping for page (PTE) mapping */
+    create_mapping(start, __phys_to_virt(start), end - start, PAGE_KERNEL);
+}
+#endif
+
+__attribute__((weak)) unsigned long rtdlog_get_buffer_size(void)
+{
+        return 0;
+}
+void create_rtdlog_mapping (void)
+{
+#ifdef CONFIG_REALTEK_LOGBUF
+    unsigned long addr, size;
+    pgprot_t rtdlog_prot = PAGE_KERNEL;
+
+    addr = 0x1ca00000;
+    size = rtdlog_get_buffer_size();
+
+    create_page_mapping(addr, size);
+    rtdlog_prot = pgprot_writecombine(rtdlog_prot);
+    create_mapping(addr, __phys_to_virt(addr), size, rtdlog_prot);
+#endif
+}
+
 void fixup_init(void)
 {
 	create_mapping_late(__pa(__init_begin), (unsigned long)__init_begin,
 			(unsigned long)__init_end - (unsigned long)__init_begin,
 			PAGE_KERNEL);
 }
+
+#ifdef CONFIG_EKP_ROMEMPOOL
+void arch_mark_romempool_ro(unsigned long start, unsigned long size)
+{
+	create_mapping_late(__pa(start), start, size, PAGE_KERNEL_RO);
+}
+
+void arch_mark_romempool_rw(unsigned long start, unsigned long size)
+{
+	create_mapping_late(__pa(start), start, size, PAGE_KERNEL);
+}
+#endif
 
 /*
  * paging_init() sets up the page tables, initialises the zone memory
@@ -448,6 +530,8 @@ void __init paging_init(void)
 
 	map_mem();
 	fixup_executable();
+
+        create_rtdlog_mapping();
 
 	/* allocate the zero page. */
 	zero_page = early_alloc(PAGE_SIZE);
@@ -466,6 +550,17 @@ void __init paging_init(void)
 	cpu_set_reserved_ttbr0();
 	local_flush_tlb_all();
 	cpu_set_default_tcr_t0sz();
+}
+
+/*
+ * Enable the identity mapping to allow the MMU disabling.
+ */
+void setup_mm_for_reboot(void)
+{
+	cpu_set_reserved_ttbr0();
+	flush_tlb_all();
+	cpu_set_idmap_tcr_t0sz();
+	cpu_switch_mm(idmap_pg_dir, &init_mm);
 }
 
 /*
@@ -552,10 +647,17 @@ void vmemmap_free(unsigned long start, unsigned long end)
 }
 #endif	/* CONFIG_SPARSEMEM_VMEMMAP */
 
+#ifdef CONFIG_EKP_ROMEMPOOL
+extern pte_t bm_pte[PTRS_PER_PTE];
+#if CONFIG_PGTABLE_LEVELS > 2
+extern pmd_t bm_pmd[PTRS_PER_PMD];
+#endif
+#else	/* CONFIG_EKP_ROMEMPOOL */
 static pte_t bm_pte[PTRS_PER_PTE] __page_aligned_bss;
 #if CONFIG_PGTABLE_LEVELS > 2
 static pmd_t bm_pmd[PTRS_PER_PMD] __page_aligned_bss;
 #endif
+#endif	/* CONFIG_EKP_ROMEMPOOL */
 #if CONFIG_PGTABLE_LEVELS > 3
 static pud_t bm_pud[PTRS_PER_PUD] __page_aligned_bss;
 #endif
@@ -587,12 +689,32 @@ static inline pte_t * fixmap_pte(unsigned long addr)
 	return pte_offset_kernel(pmd, addr);
 }
 
+#ifdef CONFIG_EKP_ROMEMPOOL
+/*
+ * When CONFIG_EKP_ROMEMPOOL=y, fixmap page tables (such as bm_pte,
+ * bm_pmd, and bm_pud) are located after BSS section.
+ *
+ * Thus, fixmap page tables must be initialized to zero explicitly.
+ */
+static void __init fixmap_page_tables_clear(void)
+{
+	unsigned long start = (unsigned long)bm_pte;
+	unsigned long end = (unsigned long)__static_pgtab_end;
+
+	memset(bm_pte, 0, end - start);
+}
+#else
+static void inline __init fixmap_page_tables_clear(void) { }
+#endif
+
 void __init early_fixmap_init(void)
 {
 	pgd_t *pgd;
 	pud_t *pud;
 	pmd_t *pmd;
 	unsigned long addr = FIXADDR_START;
+
+	fixmap_page_tables_clear();
 
 	pgd = pgd_offset_k(addr);
 	pgd_populate(&init_mm, pgd, bm_pud);
@@ -697,3 +819,64 @@ void *__init fixmap_remap_fdt(phys_addr_t dt_phys)
 
 	return dt_virt;
 }
+
+#ifdef CONFIG_EARLY_PRINTK
+/*
+ * Create an early I/O mapping using the pgd/pmd entries already populated
+ * in head.S as this function is called too early to allocated any memory. The
+ * mapping size is 2MB with 4KB pages or 64KB or 64KB pages.
+ */
+void __iomem * __init early_io_map(phys_addr_t phys, unsigned long virt)
+{
+        unsigned long size, mask,index,saved_phys,i=0;
+        bool page64k = IS_ENABLED(CONFIG_ARM64_64K_PAGES);
+        saved_phys=phys;
+        pgd_t *pgd;
+        pud_t *pud;
+        pmd_t *pmd;
+        pte_t *pte;
+
+#define SW_WA_64K_PAGES
+#ifdef SW_WA_64K_PAGES 
+        phys&=0xFFFFFFFFFFF00000UL;
+#endif
+        /*
+         * No early pte entries with !ARM64_64K_PAGES configuration, so using
+         * sections (pmd).
+         */
+        size = page64k ? PAGE_SIZE : SECTION_SIZE;
+        mask = ~(size - 1);
+
+        pgd = pgd_offset_k(virt);
+        pud = pud_offset(pgd, virt);
+        if (pud_none(*pud))
+                return NULL;
+        pmd = pmd_offset(pud, virt);
+
+        if (page64k) {
+#ifdef SW_WA_64K_PAGES 
+            for(i=0;i<0x100000;i+=0x10000) {
+                pgd = pgd_offset_k(virt+i);
+                pud = pud_offset(pgd, virt+i);
+                if (pud_none(*pud))
+                        return NULL;
+                pmd = pmd_offset(pud, virt+i);
+                if (pmd_none(*pmd))
+                        return NULL;
+                pte = pte_offset_kernel(pmd, virt+i);
+                set_pte(pte, __pte(((phys+i) & mask) | PROT_DEVICE_nGnRE));
+            }
+            mask= ~(0xfffff);
+#else
+            if (pmd_none(*pmd))
+                return NULL;
+            pte = pte_offset_kernel(pmd, virt+i);
+            set_pte(pte, __pte(((phys+i) & mask) | PROT_DEVICE_nGnRE));
+#endif
+        } else {
+                set_pmd(pmd, __pmd((phys & mask) | PROT_SECT_DEVICE_nGnRE));
+        }
+
+        return (void __iomem *)((virt & mask) + (saved_phys & ~mask));
+}
+#endif

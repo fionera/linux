@@ -1875,8 +1875,12 @@ static const struct of_device_id armv7_pmu_of_device_ids[] = {
 };
 
 static const struct pmu_probe_info armv7_pmu_probe_table[] = {
+	ARM_PMU_PROBE(ARM_CPU_PART_CORTEX_A7, armv7_a7_pmu_init),
 	ARM_PMU_PROBE(ARM_CPU_PART_CORTEX_A8, armv7_a8_pmu_init),
 	ARM_PMU_PROBE(ARM_CPU_PART_CORTEX_A9, armv7_a9_pmu_init),
+	ARM_PMU_PROBE(ARM_CPU_PART_CORTEX_A15, armv7_a15_pmu_init),
+	ARM_PMU_PROBE(ARM_CPU_PART_CORTEX_A53, armv7_a15_pmu_init),
+	ARM_PMU_PROBE(ARM_CPU_PART_CORTEX_A55, armv7_a15_pmu_init),
 	{ /* sentinel value */ }
 };
 

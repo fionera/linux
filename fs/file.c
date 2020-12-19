@@ -22,6 +22,9 @@
 #include <linux/spinlock.h>
 #include <linux/rcupdate.h>
 #include <linux/workqueue.h>
+#ifdef CONFIG_FAULT_NOTIFIER
+#include <linux/fault_notifier.h>
+#endif
 
 int sysctl_nr_open __read_mostly = 1024*1024;
 int sysctl_nr_open_min = BITS_PER_LONG;
@@ -548,6 +551,31 @@ repeat:
 
 out:
 	spin_unlock(&files->file_lock);
+#ifdef CONFIG_FAULT_NOTIFIER
+	if (fd >= end) {
+		struct task_struct *ts;
+		char pcomm[TASK_COMM_LEN], tcomm[TASK_COMM_LEN];
+		pid_t tgid=0, pid;
+
+		rcu_read_lock();
+		ts = find_task_by_vpid(current->tgid);
+		if (ts)
+			get_task_struct(ts);
+		rcu_read_unlock();
+		if (!ts)
+			return error;
+		memcpy(pcomm, ts->comm, TASK_COMM_LEN);
+		memcpy(tcomm, current->comm, TASK_COMM_LEN);
+		tgid = ts->pid;
+		pid = current->pid;
+		put_task_struct(ts);
+
+		fn_kernel_notify(FN_TYPE_FD_LEAK,
+				"fd leak is happened on \"process = %s(%d), thread = %s(%d), max = %d\"",
+				pcomm, tgid, tcomm, pid, rlimit(RLIMIT_NOFILE));
+	}
+#endif
+
 	return error;
 }
 

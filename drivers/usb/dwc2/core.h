@@ -891,6 +891,7 @@ enum dwc2_halt_status {
  * The following functions support initialization of the core driver component
  * and the DWC_otg controller
  */
+extern int dwc2_core_reset(struct dwc2_hsotg *hsotg);
 extern void dwc2_core_host_init(struct dwc2_hsotg *hsotg);
 extern int dwc2_enter_hibernation(struct dwc2_hsotg *hsotg);
 extern int dwc2_exit_hibernation(struct dwc2_hsotg *hsotg, bool restore);
@@ -928,7 +929,7 @@ extern void dwc2_read_packet(struct dwc2_hsotg *hsotg, u8 *dest, u16 bytes);
 extern void dwc2_flush_tx_fifo(struct dwc2_hsotg *hsotg, const int num);
 extern void dwc2_flush_rx_fifo(struct dwc2_hsotg *hsotg);
 
-extern int dwc2_core_init(struct dwc2_hsotg *hsotg, bool select_phy, int irq);
+extern int dwc2_core_init(struct dwc2_hsotg *hsotg, bool initial_setup);
 extern void dwc2_enable_global_interrupts(struct dwc2_hsotg *hcd);
 extern void dwc2_disable_global_interrupts(struct dwc2_hsotg *hcd);
 
@@ -1181,15 +1182,23 @@ static inline int dwc2_hsotg_set_test_mode(struct dwc2_hsotg *hsotg,
 
 #if IS_ENABLED(CONFIG_USB_DWC2_HOST) || IS_ENABLED(CONFIG_USB_DWC2_DUAL_ROLE)
 extern int dwc2_hcd_get_frame_number(struct dwc2_hsotg *hsotg);
-extern void dwc2_hcd_disconnect(struct dwc2_hsotg *hsotg);
+extern void dwc2_hcd_connect(struct dwc2_hsotg *hsotg);
+extern void dwc2_hcd_disconnect(struct dwc2_hsotg *hsotg, bool force);
 extern void dwc2_hcd_start(struct dwc2_hsotg *hsotg);
+extern int dwc2_hcd_suspend(struct dwc2_hsotg *dwc2);
+extern int dwc2_hcd_resume(struct dwc2_hsotg *dwc2);
 #else
 static inline int dwc2_hcd_get_frame_number(struct dwc2_hsotg *hsotg)
 { return 0; }
-static inline void dwc2_hcd_disconnect(struct dwc2_hsotg *hsotg) {}
+static inline void dwc2_hcd_connect(struct dwc2_hsotg *hsotg) {}
+static inline void dwc2_hcd_disconnect(struct dwc2_hsotg *hsotg, bool force) {}
 static inline void dwc2_hcd_start(struct dwc2_hsotg *hsotg) {}
 static inline void dwc2_hcd_remove(struct dwc2_hsotg *hsotg) {}
 static inline int dwc2_hcd_init(struct dwc2_hsotg *hsotg, int irq)
+{ return 0; }
+static inline int dwc2_hcd_suspend(struct dwc2_hsotg *dwc2)
+{ return 0; }
+static inline int dwc2_hcd_resume(struct dwc2_hsotg *dwc2)
 { return 0; }
 #endif
 

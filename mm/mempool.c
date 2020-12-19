@@ -117,7 +117,7 @@ static void kasan_unpoison_element(mempool_t *pool, void *element)
 	if (pool->alloc == mempool_alloc_slab)
 		kasan_slab_alloc(pool->pool_data, element);
 	if (pool->alloc == mempool_kmalloc)
-		kasan_krealloc(element, (size_t)pool->pool_data);
+		kasan_krealloc(element, (size_t)pool->pool_data, GFP_NOWAIT);
 	if (pool->alloc == mempool_alloc_pages)
 		kasan_alloc_pages(element, (unsigned long)pool->pool_data);
 }

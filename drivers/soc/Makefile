@@ -4,6 +4,7 @@
 
 obj-$(CONFIG_SOC_BRCMSTB)	+= brcmstb/
 obj-$(CONFIG_MACH_DOVE)		+= dove/
+obj-$(CONFIG_ARCH_LG1K)		+= lg1k/
 obj-$(CONFIG_ARCH_MEDIATEK)	+= mediatek/
 obj-$(CONFIG_ARCH_QCOM)		+= qcom/
 obj-$(CONFIG_ARCH_ROCKCHIP)		+= rockchip/

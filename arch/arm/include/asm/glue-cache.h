@@ -17,7 +17,7 @@
  *	===========
  */
 #undef _CACHE
-#undef MULTI_CACHE
+#undef MULTI_CACHE	// RTK_patch: doesn't use multi-cache
 
 #if defined(CONFIG_CPU_CACHE_V4)
 # ifdef _CACHE
@@ -159,6 +159,7 @@ static inline void nop_dma_unmap_area(const void *s, size_t l, int f) { }
 #define __cpuc_flush_dcache_area	__glue(_CACHE,_flush_kern_dcache_area)
 
 #define dmac_flush_range		__glue(_CACHE,_dma_flush_range)
+#define dmac_inv_range          __glue(_CACHE,_dma_inv_range)	// RTK_patch: add invalidate api
 #endif
 
 #endif

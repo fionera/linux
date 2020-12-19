@@ -546,4 +546,38 @@ config MTD_NAND_HISI504
 	help
 	  Enables support for NAND controller on Hisilicon SoC Hip04.
 
+config MTD_NAND_RTK
+  bool "Realtek NAND Flash Driver"
+	depends on MTD_NAND	
+        help
+          This is Nand flash driver for Realtek.
+          
+config MTD_NAND_RTK_HW_SEMAPHORE
+  bool "Realtek NAND Flash Driver HW semaphore"
+	depends on MTD_NAND_RTK	
+        help
+          This is Nand flash driver HW semaphore protect for Ros & Linux kernel.         
+
+config MTD_NAND_RTK_SETTING
+	bool "RTK NAND SETTING"
+	help
+	  Normally, you should say 'N'.
+	  
+config MTD_NAND_IBT
+	bool "Support rtk NAND IBT "
+	help
+	  Normally, you should say 'Y'.
+	  
+config MTD_NAND_BBT_SHARE
+	bool "Support rtk NAND BBT share "
+	help
+	  NAND BBT can be shared between different CPUS, normally, you should say 'N'.	  
+	
+config MTD_NAND_RTK_RBA_PERCENT
+	int "RTK_RBA_percentage (5 = 5%, 10 = 10%)"
+	depends on MTD_NAND_RTK_SETTING
+	default "5"
+			help
+          Setting percentage of RBA(remapping block ares).
+
 endif # MTD_NAND

@@ -265,8 +265,31 @@ static int blk_complete_sghdr_rq(struct request *rq, struct sg_io_hdr *hdr,
 	hdr->host_status = host_byte(rq->errors);
 	hdr->driver_status = driver_byte(rq->errors);
 	hdr->info = 0;
-	if (hdr->masked_status || hdr->host_status || hdr->driver_status)
-		hdr->info |= SG_INFO_CHECK;
+#if 1  /* RTK hacked for WOSQRTK-11720 */
+	if (hdr->masked_status || hdr->host_status || hdr->driver_status) {
+		if (hdr->host_status == DID_OK && hdr->driver_status == DRIVER_SENSE) {
+			char *sense_bytes = (char *)rq->sense;
+			/*
+			 * Media changed
+			 * sense_len should always be 18(byte) in this case.
+			 * [2]: Sense Key
+			 * [12]: ASC (Additional Sense Code)
+			 */
+			if (rq->sense_len > 12 &&
+					sense_bytes[2] == UNIT_ATTENTION &&
+					sense_bytes[12] == 0x28 &&
+					rq->rq_disk->sense_debounce < DEBOUNCE_TIMES_MEDIA_CHANGED_SENSE) {
+				// we should try again.
+				rq->rq_disk->sense_debounce++;
+				ret = -EAGAIN;
+			} else {
+				hdr->info |= SG_INFO_CHECK;
+			}
+		} else {
+			hdr->info |= SG_INFO_CHECK;
+		}
+	}
+#endif
 	hdr->resid = rq->resid_len;
 	hdr->sb_len_wr = 0;
 
@@ -297,6 +320,8 @@ static int sg_io(struct request_queue *q, struct gendisk *bd_disk,
 	char sense[SCSI_SENSE_BUFFERSIZE];
 	struct bio *bio;
 
+	bd_disk->sense_debounce = 0;
+again:
 	if (hdr->interface_id != 'S')
 		return -EINVAL;
 
@@ -372,6 +397,7 @@ static int sg_io(struct request_queue *q, struct gendisk *bd_disk,
 
 	hdr->duration = jiffies_to_msecs(jiffies - start_time);
 
+	rq->rq_disk = bd_disk; /* inorder to know which disk this request to */
 	ret = blk_complete_sghdr_rq(rq, hdr, bio);
 
 out_free_cdb:
@@ -379,6 +405,12 @@ out_free_cdb:
 		kfree(rq->cmd);
 out_put_request:
 	blk_put_request(rq);
+
+	if (ret == -EAGAIN) {
+		dev_warn(&bd_disk->part0.__dev, "Sense: disk(%s) media changed. try again.\n", bd_disk->disk_name);
+		goto again;
+	}
+
 	return ret;
 }
 

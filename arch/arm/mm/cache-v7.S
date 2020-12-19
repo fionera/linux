@@ -349,7 +349,11 @@ ENDPROC(v7_flush_kern_dcache_area)
  *	- start   - virtual start address of region
  *	- end     - virtual end address of region
  */
+#if 0 /* RTK_patch: add dma_inv_range api */
 v7_dma_inv_range:
+#else
+ENTRY(v7_dma_inv_range)
+#endif
 	dcache_line_size r2, r3
 	sub	r3, r2, #1
 	tst	r0, r3

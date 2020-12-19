@@ -303,6 +303,8 @@ int security_kernel_module_request(char *kmod_name);
 int security_kernel_module_from_file(struct file *file);
 int security_task_fix_setuid(struct cred *new, const struct cred *old,
 			     int flags);
+int security_task_fix_setgid(struct cred *new, const struct cred *old,
+			     int flags);
 int security_task_setpgid(struct task_struct *p, pid_t pgid);
 int security_task_getpgid(struct task_struct *p);
 int security_task_getsid(struct task_struct *p);
@@ -870,6 +872,13 @@ static inline int security_task_fix_setuid(struct cred *new,
 					   int flags)
 {
 	return cap_task_fix_setuid(new, old, flags);
+}
+
+static inline int security_task_fix_setgid(struct cred *new,
+					   const struct cred *old,
+					   int flags)
+{
+	return 0;
 }
 
 static inline int security_task_setpgid(struct task_struct *p, pid_t pgid)

@@ -1,0 +1,95 @@
+if ARCH_RTK288O
+
+menu "RTK288O specific features"
+	depends on ARCH_RTK288O
+
+config REALTEK_FPGA
+	bool "Support Realtek FPGA"
+	default n
+
+config BW_96B_ALIGNED
+        bool "Support 96byte address alignment for BW"
+        default y
+        help
+          If platform had 3DDR or 2DDR access with DCx1, please select it
+
+config REALTEK_SECURE
+	bool "Enable Secure Solution"
+	default n
+	help
+		Provide realtek secure solution.
+
+config REALTEK_POWER_CUT
+        bool "Enable Realtek Power Cut"
+        default n
+
+config REALTEK_DEV_MEM
+	bool "Provide the /dev/rtkmem interface."
+	default n
+	help
+	  Provide an interface to replace /dev/mem.
+config REALTEK_MANAGE_OVERLAPPED_REGION
+        bool "Manage the memory region overlapped by RBUS & NOR."
+        default n
+        help
+          Put the memory region overlapped by RBUS & NOR under the control of linux.
+
+config REALTEK_PCBMGR
+	bool "Use Realtek PCB Manager sysfs"
+	default n
+	help
+		pcb manager enable, pcb manager will export the pcb info at /sys/realtek_boards/pcb_enum
+
+config REALTEK_ARM_WRAPPER
+	bool "ARM WRAPPER Detector Enable"
+	default n
+	help
+	  support ARM WRAPPER Detector
+
+config REALTEK_KEYPAD
+	bool "keypad"
+	default n
+	help
+	  support keypad device
+
+config REALTEK_SCHED_LOG
+	bool "Log the scheduling sequence."
+	default y
+	help
+	  Log the scheduling sequence.
+
+config REALTEK_UART2RBUS_CONTROL
+	bool "Enable Realtek UART2RBUS control"
+	default y
+	help
+	  Enable Realtek UART2RBUS control
+
+config RTK_ATF_BOOTING
+        bool "Use ATF Bring up normal linux"
+        default y
+        help
+          This option config trust Zone feature for normal OS
+
+config BRINGUP_RTD288O_HACK
+	bool "hacking for bringup"
+	default y 
+	help
+	  support bringup hack
+
+config OPTEE
+        bool "Use OPTEE Bring up normal linux"
+        default n
+        help
+          This option config trust Zone feature for normal OS
+
+config ASAN
+   default n
+   bool "reserve 0x20000000 for Address Sanitizer"
+   help
+     relayout virtual address space to reserved 0x20000000 for Address Sanitizer.
+
+endmenu
+
+source "drivers/rtk_kdriver/Kconfig"
+
+endif

@@ -34,12 +34,19 @@
 #include <linux/usb.h>
 #include <linux/usb/hcd.h>
 #include <linux/usb/ehci_pdriver.h>
-
 #include "ehci.h"
 
 #define DRIVER_DESC "EHCI generic platform driver"
 #define EHCI_MAX_CLKS 3
 #define hcd_to_ehci_priv(h) ((struct ehci_platform_priv *)hcd_to_ehci(h)->priv)
+
+#define ehci_plat_dbg(fmt, args...)           pr_debug("[ehci] dbg, " fmt, ## args)
+#define ehci_plat_info(fmt, args...)          pr_info("[ehci] info, " fmt, ## args)
+#define ehci_plat_warn(fmt, args...)          pr_warn("[ehci] warn, " fmt, ## args)
+
+#if (1)   /* RTK self defined usb2_platform ops */
+static struct rtk_ehci_platform_driver *rtk_ehci_platform;
+#endif
 
 struct ehci_platform_priv {
 	struct clk *clks[EHCI_MAX_CLKS];
@@ -76,7 +83,7 @@ static int ehci_platform_reset(struct usb_hcd *hcd)
 	return 0;
 }
 
-static int ehci_platform_power_on(struct platform_device *dev)
+static int __maybe_unused ehci_platform_power_on(struct platform_device *dev)
 {
 	struct usb_hcd *hcd = platform_get_drvdata(dev);
 	struct ehci_platform_priv *priv = hcd_to_ehci_priv(hcd);
@@ -113,7 +120,22 @@ err_disable_clks:
 	return ret;
 }
 
-static void ehci_platform_power_off(struct platform_device *dev)
+static int rtk_ehci_platform_power_on(struct platform_device *dev)
+{
+	rtk_ehci_platform = get_rtk_ehci_platform_driver();
+	if (!rtk_ehci_platform)
+		return -ENODEV;
+
+	if (rtk_ehci_platform->usb_on) {
+        rtk_ehci_platform->usb_on();
+	} else {
+		rtk_put_ehci_platform(rtk_ehci_platform);
+		return -ENODEV;
+	}
+	return 0;
+}
+
+static void  __maybe_unused ehci_platform_power_off(struct platform_device *dev)
 {
 	struct usb_hcd *hcd = platform_get_drvdata(dev);
 	struct ehci_platform_priv *priv = hcd_to_ehci_priv(hcd);
@@ -129,17 +151,32 @@ static void ehci_platform_power_off(struct platform_device *dev)
 			clk_disable_unprepare(priv->clks[clk]);
 }
 
+static void rtk_ehci_platform_power_off(struct platform_device *dev)
+{
+    rtk_put_ehci_platform(rtk_ehci_platform);
+}
+
 static struct hc_driver __read_mostly ehci_platform_hc_driver;
 
+#ifdef CONFIG_USER_INITCALL_USB
+static const struct ehci_driver_overrides platform_overrides = {
+#else
 static const struct ehci_driver_overrides platform_overrides __initconst = {
+#endif
 	.reset =		ehci_platform_reset,
 	.extra_priv_size =	sizeof(struct ehci_platform_priv),
 };
 
 static struct usb_ehci_pdata ehci_platform_defaults = {
+#if 1 /* We use rtk self-defined power on/off seuqeunce */
+	.power_on      = rtk_ehci_platform_power_on,
+	.power_off     = rtk_ehci_platform_power_off,
+	.power_suspend = rtk_ehci_platform_power_off,
+#else
 	.power_on =		ehci_platform_power_on,
-	.power_suspend =	ehci_platform_power_off,
 	.power_off =		ehci_platform_power_off,
+	.power_suspend =	ehci_platform_power_off,
+#endif
 };
 
 static int ehci_platform_probe(struct platform_device *dev)
@@ -287,6 +324,10 @@ static int ehci_platform_probe(struct platform_device *dev)
 	hcd->rsrc_start = res_mem->start;
 	hcd->rsrc_len = resource_size(res_mem);
 
+#ifdef CONFIG_USB_HCD_TEST_MODE
+	hcd->port_test_mode = rtk_ehci_port_test_mode;
+#endif
+
 	err = usb_add_hcd(hcd, irq, IRQF_SHARED);
 	if (err)
 		goto err_power;
@@ -379,16 +420,14 @@ static int ehci_platform_resume(struct device *dev)
 }
 #endif /* CONFIG_PM_SLEEP */
 
-static const struct of_device_id vt8500_ehci_ids[] = {
-	{ .compatible = "via,vt8500-ehci", },
-	{ .compatible = "wm,prizm-ehci", },
-	{ .compatible = "generic-ehci", },
-	{ .compatible = "cavium,octeon-6335-ehci", },
+static int ehci_top_index = 0;
+static const struct of_device_id rtk_ehci_ids[] = {
+	{ .compatible = "rtk,ehci-top", .data = &ehci_top_index },
 	{}
 };
-MODULE_DEVICE_TABLE(of, vt8500_ehci_ids);
+MODULE_DEVICE_TABLE(of, rtk_ehci_ids);
 
-static const struct acpi_device_id ehci_acpi_match[] = {
+static const struct acpi_device_id ehci_acpi_match[] __maybe_unused = {
 	{ "PNP0D20", 0 }, /* EHCI controller without debug */
 	{ }
 };
@@ -411,12 +450,16 @@ static struct platform_driver ehci_platform_driver = {
 	.driver		= {
 		.name	= "ehci-platform",
 		.pm	= &ehci_platform_pm_ops,
-		.of_match_table = vt8500_ehci_ids,
+		.of_match_table = rtk_ehci_ids,
 		.acpi_match_table = ACPI_PTR(ehci_acpi_match),
 	}
 };
 
+#ifdef CONFIG_USER_INITCALL_USB
+static int ehci_platform_init(void)
+#else
 static int __init ehci_platform_init(void)
+#endif
 {
 	if (usb_disabled())
 		return -ENODEV;
@@ -426,7 +469,11 @@ static int __init ehci_platform_init(void)
 	ehci_init_driver(&ehci_platform_hc_driver, &platform_overrides);
 	return platform_driver_register(&ehci_platform_driver);
 }
+#if defined(CONFIG_USER_INITCALL_USB) && !defined(MODULE)
+user_initcall_grp("USB", ehci_platform_init);
+#else
 module_init(ehci_platform_init);
+#endif
 
 static void __exit ehci_platform_cleanup(void)
 {

@@ -31,6 +31,8 @@
 #include <linux/list.h>
 #include <linux/time.h>
 #include <linux/dvb/dmx.h>
+#include <dmx-ext.h>
+#include <pvr-ext.h>
 
 /*
  * Common definitions
@@ -103,6 +105,9 @@ struct dmx_ts_feed {
 		   struct timespec timeout);
 	int (*start_filtering)(struct dmx_ts_feed *feed);
 	int (*stop_filtering)(struct dmx_ts_feed *feed);
+
+	int (*control)(struct dmx_ts_feed *feed, u32 cmd, void * parg);
+
 };
 
 /*
@@ -131,6 +136,7 @@ struct dmx_section_filter {
 	u8 filter_value[DMX_MAX_FILTER_SIZE];
 	u8 filter_mask[DMX_MAX_FILTER_SIZE];
 	u8 filter_mode[DMX_MAX_FILTER_SIZE];
+	int one_shot;
 	struct dmx_section_feed *parent; /* Back-pointer */
 	void *priv; /* Pointer to private data of the API client */
 };
@@ -188,9 +194,60 @@ struct dmx_section_feed {
 };
 
 /*
+ * TEMI reception
+ */
+
+/**
+ * struct dmx_temi_feed - Structure that contains a section feed filter
+ *
+ * @is_filtering:	Set to non-zero when filtering in progress
+ * @parent:		pointer to struct dmx_demux
+ * @priv:		pointer to private data of the API client
+ * @check_crc:		If non-zero, check the CRC values of filtered sections.
+ * @timeline_id: timeline_id requested.
+ * @set:		sets the section filter
+ * @allocate_filter:	This function is used to allocate a section filter on
+ *			the demux. It should only be called when no filtering
+ *			is in progress on this section feed. If a filter cannot
+ *			be allocated, the function fails with -ENOSPC.
+ * @release_filter:	This function releases all the resources of a
+ *			previously allocated section filter. The function
+ *			should not be called while filtering is in progress
+ *			on this section feed. After calling this function,
+ *			the caller should not try to dereference the filter
+ *			pointer.
+ * @start_filtering:	starts section filtering
+ * @stop_filtering:	stops section filtering
+ *
+ * A TS feed is typically mapped to a hardware PID filter on the demux chip.
+ * Using this API, the client can set the filtering properties to start/stop
+ * filtering TS packets on a particular TS feed.
+ */
+struct dmx_temi_feed
+{
+	int is_filtering;
+	struct dmx_demux *parent;
+	void *priv; // point to driver dmxdevfilter
+
+	u8 timeline_id;
+
+
+
+	/* public: */
+	int (*set)(struct dmx_temi_feed *feed, u16 pid, u8 timeline_id);
+	int (*start_filtering)(struct dmx_temi_feed *feed);
+	int (*stop_filtering)(struct dmx_temi_feed *feed);
+};
+/*
  * Callback functions
  */
 
+
+typedef int (*dvr_rec_cb)(const u8 *buffer1,
+			 size_t buffer1_length,
+			 const u8 *buffer2,
+			 size_t buffer2_length,
+			 void *source);
 /**
  * typedef dmx_ts_cb - DVB demux TS filter callback function prototype
  *
@@ -293,6 +350,46 @@ typedef int (*dmx_section_cb)(const u8 *buffer1,
 			      size_t buffer2_len,
 			      struct dmx_section_filter *source);
 
+/**
+ * typedef dmx_temi_cb - DVB demux TS filter callback function prototype
+ *
+ * @buffer1:		Pointer to the start of the filtered temi, e.g.
+ *			within the circular buffer of the demux driver.
+ * @buffer1_len:	Length of the filtered temi data in @buffer1,
+ *			including headers and CRC.
+ * @buffer2:		Pointer to the tail of the filtered temi data,
+ *			or NULL. Useful to handle the wrapping of a
+ *			circular buffer.
+ * @buffer2_len:	Length of the filtered temi data in @buffer2,
+ *			including headers and CRC.
+ * @source:		Indicates which temi feed is the source of the
+ *			callback.
+ *
+ * This function callback prototype, provided by the client of the demux API,
+ * is called from the demux code. The function is only called when
+ * filtering of temis has been enabled using the function
+ * &dmx_ts_feed.@start_filtering. When the demux driver has received a
+ * complete temi that matches at least one temi filter, the client
+ * is notified via this callback function. Normally this function is called
+ * for each received temi; however, it is also possible to deliver
+ * multiple temis with one callback, for example when the system load
+ * is high. If an error occurs while receiving a temi, this
+ * function should be called with the corresponding error type set in the
+ * success field, whether or not there is data to deliver. The temi Feed
+ * implementation should maintain a circular buffer for received temis.
+ * However, this is not necessary if the temi Feed API is implemented as
+ * a client of the TS Feed API, because the TS Feed implementation then
+ * buffers the received data. The size of the circular buffer can be
+ * configured using the &dmx_ts_feed.@set function in the temi Feed API.
+ * If there is no room in the circular buffer when a new temi is received,
+ * the temi must be discarded. If this happens, the value of the success
+ * parameter should be DMX_OVERRUN_ERROR on the next callback.
+ */
+typedef int (*dmx_temi_cb)(const u8 *buffer1,
+							  size_t buffer1_len,
+							  const u8 *buffer2,
+							  size_t buffer2_len,
+							  struct dmx_temi_feed *source);
 /*--------------------------------------------------------------------------*/
 /* DVB Front-End */
 /*--------------------------------------------------------------------------*/
@@ -570,6 +667,12 @@ struct dmx_demux {
 				     dmx_section_cb callback);
 	int (*release_section_feed)(struct dmx_demux *demux,
 				    struct dmx_section_feed *feed);
+
+	int (*allocate_temi_feed)(struct dmx_demux *demux,
+								 struct dmx_temi_feed **feed,
+								 dmx_temi_cb callback);
+	int (*release_temi_feed)(struct dmx_demux *demux,
+								struct dmx_temi_feed *feed);
 	int (*add_frontend)(struct dmx_demux *demux,
 			    struct dmx_frontend *frontend);
 	int (*remove_frontend)(struct dmx_demux *demux,
@@ -593,6 +696,13 @@ struct dmx_demux {
 	 */
 	int (*get_stc)(struct dmx_demux *demux, unsigned int num,
 		       u64 *stc, unsigned int *base);
+
+	int (*prop_set)(struct dmx_demux *demux, __u32 cmd, void *parg);
+	int (*prop_get)(struct dmx_demux *demux, __u32 cmd, void *parg);
+
+	int (*dvr_open)(struct dmx_demux *demux, dvr_rec_cb dvr_rec_cb);
+	int (*dvr_close)(struct dmx_demux *demux);
+	int (*pvr_prop_set)(struct dmx_demux *demux, __u32 cmd, void *parg);
 };
 
 #endif /* #ifndef __DEMUX_H */

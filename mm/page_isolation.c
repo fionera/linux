@@ -7,6 +7,7 @@
 #include <linux/pageblock-flags.h>
 #include <linux/memory.h>
 #include <linux/hugetlb.h>
+#include <linux/page_owner.h>
 #include "internal.h"
 
 static int set_migratetype_isolate(struct page *page,
@@ -58,13 +59,12 @@ static int set_migratetype_isolate(struct page *page,
 out:
 	if (!ret) {
 		unsigned long nr_pages;
-		int migratetype = get_pageblock_migratetype(page);
 
 		set_pageblock_migratetype(page, MIGRATE_ISOLATE);
 		zone->nr_isolate_pageblock++;
 		nr_pages = move_freepages_block(zone, page, MIGRATE_ISOLATE);
 
-		__mod_zone_freepage_state(zone, -nr_pages, migratetype);
+		__mod_zone_page_state(zone, NR_FREE_PAGES, -nr_pages);
 	}
 
 	spin_unlock_irqrestore(&zone->lock, flags);
@@ -105,8 +105,6 @@ static void unset_migratetype_isolate(struct page *page, unsigned migratetype)
 			if (pfn_valid_within(page_to_pfn(buddy)) &&
 			    !is_migrate_isolate_page(buddy)) {
 				__isolate_free_page(page, order);
-				kernel_map_pages(page, (1 << order), 1);
-				set_page_refcounted(page);
 				isolated_page = page;
 			}
 		}
@@ -119,14 +117,22 @@ static void unset_migratetype_isolate(struct page *page, unsigned migratetype)
 	 */
 	if (!isolated_page) {
 		nr_pages = move_freepages_block(zone, page, migratetype);
-		__mod_zone_freepage_state(zone, nr_pages, migratetype);
+		__mod_zone_page_state(zone, NR_FREE_PAGES, nr_pages);
 	}
 	set_pageblock_migratetype(page, migratetype);
 	zone->nr_isolate_pageblock--;
 out:
 	spin_unlock_irqrestore(&zone->lock, flags);
-	if (isolated_page)
+	if (isolated_page) {
+		kernel_map_pages(page, (1 << order), 1);
+		set_page_refcounted(page);
+#ifdef CONFIG_CMA_TRACK_USE_PAGE_OWNER
+		page_owner_alloc_pages(page, 1UL << order, __GFP_MOVABLE);
+#else
+		page_owner_alloc_pages(page, order, __GFP_MOVABLE);
+#endif
 		__free_pages(isolated_page, order);
+	}
 }
 
 static inline struct page *
@@ -242,6 +248,7 @@ __test_page_isolated_in_pageblock(unsigned long pfn, unsigned long end_pfn,
 	return 1;
 }
 
+/* Caller should ensure that requested range is in a single zone */
 int test_pages_isolated(unsigned long start_pfn, unsigned long end_pfn,
 			bool skip_hwpoisoned_pages)
 {
@@ -291,7 +298,11 @@ struct page *alloc_migrate_target(struct page *page, unsigned long private,
 	}
 
 	if (PageHighMem(page))
+#ifdef CONFIG_CMA_MIGRATE_TARGET
+		gfp_mask |= __GFP_HIGHMEM | __GFP_CMA;
+#else
 		gfp_mask |= __GFP_HIGHMEM;
+#endif
 
 	return alloc_page(gfp_mask);
 }

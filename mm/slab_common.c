@@ -35,7 +35,7 @@ struct kmem_cache *kmem_cache;
  */
 #define SLAB_NEVER_MERGE (SLAB_RED_ZONE | SLAB_POISON | SLAB_STORE_USER | \
 		SLAB_TRACE | SLAB_DESTROY_BY_RCU | SLAB_NOLEAKTRACE | \
-		SLAB_FAILSLAB)
+		SLAB_FAILSLAB | SLAB_READONLY)
 
 #define SLAB_MERGE_SAME (SLAB_RECLAIM_ACCOUNT | SLAB_CACHE_DMA | SLAB_NOTRACK)
 
@@ -1005,9 +1005,16 @@ void *kmalloc_order(size_t size, gfp_t flags, unsigned int order)
 
 	flags |= __GFP_COMP;
 	page = alloc_kmem_pages(flags, order);
-	ret = page ? page_address(page) : NULL;
+	if (!page)
+		return NULL;
+
+	ret = page_address(page);
+	if (kasan_kmalloc_large(ret, size, flags)) {
+		__free_kmem_pages(page, order);
+		return NULL;
+	}
+
 	kmemleak_alloc(ret, size, 1, flags);
-	kasan_kmalloc_large(ret, size);
 	return ret;
 }
 EXPORT_SYMBOL(kmalloc_order);
@@ -1122,6 +1129,58 @@ static int slab_show(struct seq_file *m, void *p)
 	return 0;
 }
 
+void slab_show_oom(void)
+{
+	struct kmem_cache *s;
+	struct slabinfo sinfo;
+
+	mutex_lock(&slab_mutex);
+
+	/*
+	 * Output format version, so at least we can change it
+	 * without _too_ many complaints.
+	 */
+#ifdef CONFIG_DEBUG_SLAB
+	printk("slabinfo - version: 2.1 (statistics)\n");
+#else
+	printk("slabinfo - version: 2.1\n");
+#endif
+	printk("# name            <active_objs> <num_objs> <objsize> "
+		 "<objperslab> <pagesperslab>");
+	printk(" : tunables <limit> <batchcount> <sharedfactor>");
+	printk(" : slabdata <active_slabs> <num_slabs> <sharedavail>");
+#ifdef CONFIG_DEBUG_SLAB
+	printk(" : globalstat <listallocs> <maxobjs> <grown> <reaped> "
+		 "<error> <maxfreeable> <nodeallocs> <remotefrees> <alienoverflow>");
+	printk(" : cpustat <allochit> <allocmiss> <freehit> <freemiss>");
+#endif
+	printk("\n");
+
+//	slabinfo_header();
+	list_for_each_entry(s, &slab_caches, list) {
+		if (!is_root_cache(s))
+			continue;
+
+	memset(&sinfo, 0, sizeof(sinfo));
+	get_slabinfo(s, &sinfo);
+
+	memcg_accumulate_slabinfo(s, &sinfo);
+
+	printk("%-17s %6lu %6lu %6u %4u %4d",
+		   cache_name(s), sinfo.active_objs, sinfo.num_objs, s->size,
+		   sinfo.objects_per_slab, (1 << sinfo.cache_order));
+
+	printk(" : tunables %4u %4u %4u",
+		   sinfo.limit, sinfo.batchcount, sinfo.shared);
+	printk(" : slabdata %6lu %6lu %6lu",
+		   sinfo.active_slabs, sinfo.num_slabs, sinfo.shared_avail);
+//	slabinfo_show_stats(m, s);
+	printk("\n");
+
+	}
+	mutex_unlock(&slab_mutex);
+}
+
 #ifdef CONFIG_MEMCG_KMEM
 int memcg_slab_show(struct seq_file *m, void *p)
 {
@@ -1188,7 +1247,7 @@ static __always_inline void *__do_krealloc(const void *p, size_t new_size,
 		ks = ksize(p);
 
 	if (ks >= new_size) {
-		kasan_krealloc((void *)p, new_size);
+		kasan_krealloc((void *)p, new_size, flags);
 		return (void *)p;
 	}
 

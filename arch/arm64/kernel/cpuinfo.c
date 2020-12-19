@@ -34,6 +34,8 @@
 #include <linux/smp.h>
 #include <linux/delay.h>
 
+const char *machine_name;
+
 /*
  * In case the boot CPU is hotpluggable, we record its initial state and
  * current state separately. Certain system registers may contain different
@@ -155,6 +157,10 @@ static int c_show(struct seq_file *m, void *v)
 		seq_printf(m, "CPU part\t: 0x%03x\n", MIDR_PARTNUM(midr));
 		seq_printf(m, "CPU revision\t: %d\n\n", MIDR_REVISION(midr));
 	}
+
+	seq_printf(m, "Hardware\t: %s\n", machine_name);
+	//seq_printf(m, "Revision\t: %04x\n", system_rev);
+	//seq_printf(m, "Serial\t\t: %s\n", system_serial);
 
 	return 0;
 }

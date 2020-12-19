@@ -211,8 +211,7 @@ static void macb_get_hwaddr(struct macb *bp)
 		}
 	}
 
-	dev_info(&bp->pdev->dev, "invalid hw address, using random\n");
-	eth_hw_addr_random(bp->dev);
+	dev_warn(&bp->pdev->dev, "no valid hw address\n");
 }
 
 static int macb_mdio_read(struct mii_bus *bus, int mii_id, int regnum)
@@ -523,7 +522,7 @@ static int macb_halt_tx(struct macb *bp)
 		if (!(status & MACB_BIT(TGO)))
 			return 0;
 
-		usleep_range(10, 250);
+		udelay(250);
 	} while (time_before(halt_time, timeout));
 
 	return -ETIMEDOUT;
@@ -663,9 +662,6 @@ static void macb_tx_interrupt(struct macb_queue *queue)
 
 	status = macb_readl(bp, TSR);
 	macb_writel(bp, TSR, status);
-
-	if (bp->caps & MACB_CAPS_ISR_CLEAR_ON_WRITE)
-		queue_writel(queue, ISR, MACB_BIT(TCOMP));
 
 	netdev_vdbg(bp->dev, "macb_tx_interrupt status = 0x%03lx\n",
 		(unsigned long)status);
@@ -1017,13 +1013,10 @@ static int macb_poll(struct napi_struct *napi, int budget)
 
 		/* Packets received while interrupts were disabled */
 		status = macb_readl(bp, RSR);
-		if (status) {
-			if (bp->caps & MACB_CAPS_ISR_CLEAR_ON_WRITE)
-				macb_writel(bp, ISR, MACB_BIT(RCOMP));
+		if (status)
 			napi_reschedule(napi);
-		} else {
+		else
 			macb_writel(bp, IER, MACB_RX_INT_FLAGS);
-		}
 	}
 
 	/* TODO: Handle errors */
@@ -1039,6 +1032,8 @@ static irqreturn_t macb_interrupt(int irq, void *dev_id)
 	u32 status, ctrl;
 
 	status = queue_readl(queue, ISR);
+	if (bp->caps & MACB_CAPS_ISR_CLEAR_ON_WRITE)
+		queue_writel(queue, ISR, status);
 
 	if (unlikely(!status))
 		return IRQ_NONE;
@@ -1065,8 +1060,6 @@ static irqreturn_t macb_interrupt(int irq, void *dev_id)
 			 * now.
 			 */
 			queue_writel(queue, IDR, MACB_RX_INT_FLAGS);
-			if (bp->caps & MACB_CAPS_ISR_CLEAR_ON_WRITE)
-				queue_writel(queue, ISR, MACB_BIT(RCOMP));
 
 			if (napi_schedule_prep(&bp->napi)) {
 				netdev_vdbg(bp->dev, "scheduling RX softirq\n");
@@ -1077,10 +1070,6 @@ static irqreturn_t macb_interrupt(int irq, void *dev_id)
 		if (unlikely(status & (MACB_TX_ERR_FLAGS))) {
 			queue_writel(queue, IDR, MACB_TX_INT_FLAGS);
 			schedule_work(&queue->tx_error_task);
-
-			if (bp->caps & MACB_CAPS_ISR_CLEAR_ON_WRITE)
-				queue_writel(queue, ISR, MACB_TX_ERR_FLAGS);
-
 			break;
 		}
 
@@ -1102,9 +1091,6 @@ static irqreturn_t macb_interrupt(int irq, void *dev_id)
 			ctrl = macb_readl(bp, NCR);
 			macb_writel(bp, NCR, ctrl & ~MACB_BIT(RE));
 			macb_writel(bp, NCR, ctrl | MACB_BIT(RE));
-
-			if (bp->caps & MACB_CAPS_ISR_CLEAR_ON_WRITE)
-				macb_writel(bp, ISR, MACB_BIT(RXUBR));
 		}
 
 		if (status & MACB_BIT(ISR_ROVR)) {
@@ -1113,9 +1099,6 @@ static irqreturn_t macb_interrupt(int irq, void *dev_id)
 				bp->hw_stats.gem.rx_overruns++;
 			else
 				bp->hw_stats.macb.rx_overruns++;
-
-			if (bp->caps & MACB_CAPS_ISR_CLEAR_ON_WRITE)
-				queue_writel(queue, ISR, MACB_BIT(ISR_ROVR));
 		}
 
 		if (status & MACB_BIT(HRESP)) {
@@ -1125,12 +1108,11 @@ static irqreturn_t macb_interrupt(int irq, void *dev_id)
 			 * (work queue?)
 			 */
 			netdev_err(dev, "DMA bus error: HRESP not OK\n");
-
-			if (bp->caps & MACB_CAPS_ISR_CLEAR_ON_WRITE)
-				queue_writel(queue, ISR, MACB_BIT(HRESP));
 		}
 
 		status = queue_readl(queue, ISR);
+		if (bp->caps & MACB_CAPS_ISR_CLEAR_ON_WRITE)
+			queue_writel(queue, ISR, status);
 	}
 
 	spin_unlock(&bp->lock);
@@ -1570,6 +1552,8 @@ static void macb_reset_hw(struct macb *bp)
 	for (q = 0, queue = bp->queues; q < bp->num_queues; ++q, ++queue) {
 		queue_writel(queue, IDR, -1);
 		queue_readl(queue, ISR);
+		if (bp->caps & MACB_CAPS_ISR_CLEAR_ON_WRITE)
+			queue_writel(queue, ISR, -1);
 	}
 }
 
@@ -1655,6 +1639,7 @@ static void macb_configure_dma(struct macb *bp)
 			dmacfg = GEM_BFINS(FBLDO, bp->dma_burst_length, dmacfg);
 		dmacfg |= GEM_BIT(TXPBMS) | GEM_BF(RXBMS, -1L);
 		dmacfg &= ~GEM_BIT(ENDIA_PKT);
+		dmacfg |= GEM_BIT(BDBRW);
 
 		if (bp->native_io)
 			dmacfg &= ~GEM_BIT(ENDIA_DESC);
@@ -1858,8 +1843,15 @@ static int macb_open(struct net_device *dev)
 
 	netdev_dbg(bp->dev, "open\n");
 
+#if 0
+	/*
+	 * AUG 05 2013 neidhard.kim@lge.com
+	 * TEMPORARILY disable this explicit link-detection to
+	 * avoid 2-minute delay when the cable is not plugged.
+	 */
 	/* carrier starts down */
 	netif_carrier_off(dev);
+#endif
 
 	/* if the phy is not yet register, retry later*/
 	if (!bp->phy_dev)
@@ -2128,11 +2120,43 @@ static void macb_get_regs(struct net_device *dev, struct ethtool_regs *regs,
 	}
 }
 
+static void macb_get_wol(struct net_device *netdev, struct ethtool_wolinfo *wol)
+{
+	struct macb *bp = netdev_priv(netdev);
+	struct phy_device *phydev = bp->phy_dev;
+	wol->supported = wol->wolopts = 0;
+	phy_ethtool_get_wol(phydev, wol);
+}
+
+static int macb_set_wol(struct net_device *netdev, struct ethtool_wolinfo *wol)
+{
+	struct macb *bp = netdev_priv(netdev);
+	struct phy_device *phydev = bp->phy_dev;
+	return phy_ethtool_set_wol(phydev, wol);
+}
+
+static void gem_get_wol(struct net_device *netdev, struct ethtool_wolinfo *wol)
+{
+	struct macb *bp = netdev_priv(netdev);
+	struct phy_device *phydev = bp->phy_dev;
+	wol->supported = wol->wolopts = 0;
+	phy_ethtool_get_wol(phydev, wol);
+}
+
+static int gem_set_wol(struct net_device *netdev, struct ethtool_wolinfo *wol)
+{
+	struct macb *bp = netdev_priv(netdev);
+	struct phy_device *phydev = bp->phy_dev;
+	return phy_ethtool_set_wol(phydev, wol);
+}
+
 static const struct ethtool_ops macb_ethtool_ops = {
 	.get_settings		= macb_get_settings,
 	.set_settings		= macb_set_settings,
 	.get_regs_len		= macb_get_regs_len,
 	.get_regs		= macb_get_regs,
+	.get_wol		= macb_get_wol,
+	.set_wol		= macb_set_wol,
 	.get_link		= ethtool_op_get_link,
 	.get_ts_info		= ethtool_op_get_ts_info,
 };
@@ -2142,6 +2166,8 @@ static const struct ethtool_ops gem_ethtool_ops = {
 	.set_settings		= macb_set_settings,
 	.get_regs_len		= macb_get_regs_len,
 	.get_regs		= macb_get_regs,
+	.get_wol		= gem_get_wol,
+	.set_wol		= gem_set_wol,
 	.get_link		= ethtool_op_get_link,
 	.get_ts_info		= ethtool_op_get_ts_info,
 	.get_ethtool_stats	= gem_get_ethtool_stats,
@@ -2931,7 +2957,28 @@ static int macb_probe(struct platform_device *pdev)
 	if (err)
 		goto err_out_unregister_netdev;
 
+	/*
+	 * TEMPORARILY disable this explicit link-detection to
+	 * avoid 2-minute delay when the cable is not plugged.
+	 */
+#if 0
 	netif_carrier_off(dev);
+#endif
+
+	/*
+	 * In order to reduce the resume time of ethernet devices,
+	 * asynchronous suspend/resume requires to be enabled for
+	 * following devices.
+	 *
+	 * dev->dev: eth0 (net_device)
+	 * pdev->dev: c1b00000.ethernet (macb mac)
+	 * bp->phy_dev->dev: c1b00000.etherne:03 (actual phy)
+	 * bp->mii_bus->dev: c1b00000.etherne (mii_bus)
+	 */
+	device_enable_async_suspend(&dev->dev);
+	device_enable_async_suspend(&pdev->dev);
+	device_enable_async_suspend(&bp->phy_dev->dev);
+	device_enable_async_suspend(&bp->mii_bus->dev);
 
 	netdev_info(dev, "Cadence %s rev 0x%08x at 0x%08lx irq %d (%pM)\n",
 		    macb_is_gem(bp) ? "GEM" : "MACB", macb_readl(bp, MID),
@@ -2986,9 +3033,25 @@ static int __maybe_unused macb_suspend(struct device *dev)
 	struct platform_device *pdev = to_platform_device(dev);
 	struct net_device *netdev = platform_get_drvdata(pdev);
 	struct macb *bp = netdev_priv(netdev);
+	unsigned long flags;
 
-	netif_carrier_off(netdev);
+	/* stop phy_state_machine */
+	cancel_delayed_work_sync(&bp->phy_dev->state_queue);
+
 	netif_device_detach(netdev);
+
+	if (netif_running(netdev)) {
+		napi_disable(&bp->napi);
+
+		if (bp->phy_dev)
+			phy_stop(bp->phy_dev);
+
+		spin_lock_irqsave(&bp->lock, flags);
+		macb_reset_hw(bp);
+		spin_unlock_irqrestore(&bp->lock, flags);
+
+		macb_free_consistent(bp);
+	}
 
 	clk_disable_unprepare(bp->tx_clk);
 	clk_disable_unprepare(bp->hclk);
@@ -3007,7 +3070,22 @@ static int __maybe_unused macb_resume(struct device *dev)
 	clk_prepare_enable(bp->hclk);
 	clk_prepare_enable(bp->tx_clk);
 
+	if (netif_running(netdev)) {
+		macb_open(netdev);
+		macb_set_rx_mode(netdev);
+	} else {
+		/*
+		 * At least, the management port is required to be
+		 * enabled here for the following phy_init_hw() to
+		 * take effect.
+		 */
+		macb_writel(bp, NCR, MACB_BIT(MPE));
+	}
+
 	netif_device_attach(netdev);
+
+	/* restart phy_state_machine */
+	phy_start_machine(bp->phy_dev);
 
 	return 0;
 }

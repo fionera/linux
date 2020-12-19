@@ -23,6 +23,7 @@
 #include <linux/dma-contiguous.h>
 #include <linux/sizes.h>
 #include <linux/stop_machine.h>
+#include <linux/pageremap.h>
 
 #include <asm/cp15.h>
 #include <asm/mach-types.h>
@@ -36,8 +37,34 @@
 
 #include <asm/mach/arch.h>
 #include <asm/mach/map.h>
+#include <mach/rtk_platform.h>
 
 #include "mm.h"
+
+#ifdef CONFIG_HIGHMEM
+unsigned long cma_highmem_start = 0;
+unsigned long cma_highmem_size = 0;
+#endif
+
+#ifndef GPU_MEM_SIZE
+#define GPU_MEM_SIZE (0)
+#endif
+
+extern unsigned long get_zone_zram_size(void);
+#if defined(CONFIG_ZRAM) || defined(CONFIG_DM_CRYPT)
+ #ifdef CONFIG_ZONE_ZRAM
+#define ZRAM_RESERVED_SIZE get_zone_zram_size()
+ #else
+#define ZRAM_RESERVED_SIZE 128*1024*1024
+ #endif
+#else
+#define ZRAM_RESERVED_SIZE 0
+#endif
+
+#ifdef CONFIG_OPTEE_SUPPORT_MC_ALLOCATOR
+unsigned long cma_mc_start_addr = 0;
+unsigned long cma_mc_size = 0;
+#endif
 
 #ifdef CONFIG_CPU_CP15_MMU
 unsigned long __init __clear_cr(unsigned long mask)
@@ -87,6 +114,9 @@ static int __init parse_tag_initrd2(const struct tag *tag)
 
 __tagtable(ATAG_INITRD2, parse_tag_initrd2);
 
+struct meminfo meminfo;
+unsigned long ext_mem_size = 0;
+
 static void __init find_limits(unsigned long *min, unsigned long *max_low,
 			       unsigned long *max_high)
 {
@@ -112,12 +142,12 @@ unsigned long arm_dma_pfn_limit;
 static void __init arm_adjust_dma_zone(unsigned long *size, unsigned long *hole,
 	unsigned long dma_size)
 {
-	if (size[0] <= dma_size)
+	if (size[ZONE_NORMAL] <= dma_size)
 		return;
 
-	size[ZONE_NORMAL] = size[0] - dma_size;
+	size[ZONE_NORMAL] = size[ZONE_NORMAL] - dma_size;
 	size[ZONE_DMA] = dma_size;
-	hole[ZONE_NORMAL] = hole[0];
+	hole[ZONE_NORMAL] = hole[ZONE_NORMAL];
 	hole[ZONE_DMA] = 0;
 }
 #endif
@@ -139,7 +169,12 @@ static void __init zone_sizes_init(unsigned long min, unsigned long max_low,
 {
 	unsigned long zone_size[MAX_NR_ZONES], zhole_size[MAX_NR_ZONES];
 	struct memblock_region *reg;
+#ifdef CONFIG_HIGHMEM
+	unsigned long high_size;
+#endif
 
+	unsigned int platIdx = (get_platform() - PLATFORM_KXLP) + 2; // 0: KxLP, 1: KxL. (2 is base offset)
+	unsigned long carvedout_cma_high_size = carvedout_buf[CARVEDOUT_CMA_HIGH][platIdx];
 	/*
 	 * initialise the zones.
 	 */
@@ -150,7 +185,7 @@ static void __init zone_sizes_init(unsigned long min, unsigned long max_low,
 	 * to do anything fancy with the allocation of this memory
 	 * to the zones, now is the time to do it.
 	 */
-	zone_size[0] = max_low - min;
+	zone_size[ZONE_NORMAL] = max_low - min;
 #ifdef CONFIG_HIGHMEM
 	zone_size[ZONE_HIGHMEM] = max_high - max_low;
 #endif
@@ -166,7 +201,7 @@ static void __init zone_sizes_init(unsigned long min, unsigned long max_low,
 
 		if (start < max_low) {
 			unsigned long low_end = min(end, max_low);
-			zhole_size[0] -= low_end - start;
+			zhole_size[ZONE_NORMAL] -= low_end - start;
 		}
 #ifdef CONFIG_HIGHMEM
 		if (end > max_low) {
@@ -185,6 +220,71 @@ static void __init zone_sizes_init(unsigned long min, unsigned long max_low,
 		arm_adjust_dma_zone(zone_size, zhole_size,
 			arm_dma_zone_size >> PAGE_SHIFT);
 #endif
+
+#ifdef CONFIG_HIGHMEM
+	high_size = zone_size[ZONE_HIGHMEM] - zhole_size[ZONE_HIGHMEM];
+	printk("ext memory size: %lx highmem size: %lx\n", ext_mem_size, high_size);
+#if 0 //deprecated, due to apply zone_cma
+	if (high_size > 0) {
+		if (IS_ENABLED(CONFIG_VMSPLIT_3G_OPT)) {
+#if defined(CONFIG_ZRAM) || defined(CONFIG_DM_CRYPT)
+			if (ext_mem_size > high_size) {
+				zone_size[ZONE_MOVABLE] = ext_mem_size - (ZRAM_RESERVED_SIZE + carvedout_cma_high_size) / PAGE_SIZE;
+				zone_size[ZONE_HIGHMEM] = zone_size[ZONE_HIGHMEM] - zone_size[ZONE_MOVABLE];
+			} else {
+				zone_size[ZONE_MOVABLE] = ext_mem_size - (carvedout_cma_high_size) / PAGE_SIZE;
+				zone_size[ZONE_HIGHMEM] = zone_size[ZONE_HIGHMEM] - zone_size[ZONE_MOVABLE];
+			}
+#else
+			printk(KERN_ERR "CONFIG_ZRAM disabled...\n");
+			BUG();
+#endif
+		} else if (ext_mem_size == high_size) {
+#if defined(CONFIG_ZRAM) || defined(CONFIG_DM_CRYPT)
+			zone_size[ZONE_MOVABLE] = ext_mem_size - (ZRAM_RESERVED_SIZE + carvedout_cma_high_size) / PAGE_SIZE;
+			zone_size[ZONE_HIGHMEM] = zone_size[ZONE_HIGHMEM] - zone_size[ZONE_MOVABLE];
+#else
+			if (carvedout_cma_high_size) {
+				zone_size[ZONE_MOVABLE] = ext_mem_size - carvedout_cma_high_size / PAGE_SIZE;
+				zone_size[ZONE_HIGHMEM] = zone_size[ZONE_HIGHMEM] - zone_size[ZONE_MOVABLE];
+			} else {
+				zone_size[ZONE_MOVABLE] = zone_size[ZONE_HIGHMEM];
+				zhole_size[ZONE_MOVABLE] = zhole_size[ZONE_HIGHMEM];
+				zone_size[ZONE_HIGHMEM] = 0;
+				zhole_size[ZONE_HIGHMEM] = 0;
+			}
+#endif
+		} else if (ext_mem_size < high_size) {
+			zone_size[ZONE_MOVABLE] = high_size - (carvedout_cma_high_size) / PAGE_SIZE;
+			zone_size[ZONE_HIGHMEM] = zone_size[ZONE_HIGHMEM] - zone_size[ZONE_MOVABLE];
+		} else {
+			printk(KERN_ERR "ext memory size should not be larger than highmem...\n");
+			BUG();
+		}
+	}
+#endif
+
+	printk("### normal %lx %lx ###\n",
+			zone_size[ZONE_NORMAL], zhole_size[ZONE_NORMAL]);
+
+#ifdef CONFIG_ZONE_ZRAM
+    zone_size[ZONE_ZRAM] = ZRAM_RESERVED_SIZE / PAGE_SIZE;
+    zone_size[ZONE_HIGHMEM] = zone_size[ZONE_HIGHMEM] - zone_size[ZONE_ZRAM];
+	printk("### Zone ZRAM %lx %lx ###\n",
+			zone_size[ZONE_ZRAM], zhole_size[ZONE_ZRAM]);
+#endif
+
+	printk("### highmem %lx %lx movable %lx %lx carvedout %lx ###\n", 
+			zone_size[ZONE_HIGHMEM], zhole_size[ZONE_HIGHMEM],
+			zone_size[ZONE_MOVABLE], zhole_size[ZONE_MOVABLE], carvedout_cma_high_size);
+
+#ifdef CONFIG_OPTEE_SUPPORT_MC_ALLOCATOR
+	printk("### cma_mc %lx ###\n", cma_mc_size);
+#endif
+
+#endif
+
+
 
 	free_area_init_node(0, zone_size, min, zhole_size);
 }
@@ -227,6 +327,21 @@ phys_addr_t __init arm_memblock_steal(phys_addr_t size, phys_addr_t align)
 	return phys;
 }
 
+void check_ext_mem_size(void)
+{
+	struct meminfo *mi = &meminfo;
+	int i;
+
+	add_memory_size(GFP_DCU1, mi->bank[0].size);
+	/* we see all the memory banks except the first one as external memory */
+	for_each_bank (i, mi)
+		if (i) ext_mem_size += mi->bank[i].size;
+	add_memory_size(GFP_DCU2, ext_mem_size);
+
+	ext_mem_size >>= PAGE_SHIFT;
+}
+
+#define MB (1024*1024)
 void __init arm_memblock_init(const struct machine_desc *mdesc)
 {
 	/* Register the kernel text, kernel data and initrd with memblock. */
@@ -273,10 +388,143 @@ void __init arm_memblock_init(const struct machine_desc *mdesc)
 	early_init_fdt_scan_reserved_mem();
 
 	/* reserve memory for DMA contiguous allocations */
-	dma_contiguous_reserve(arm_dma_limit);
+//	dma_contiguous_reserve(arm_dma_limit);
 
 	arm_memblock_steal_permitted = false;
 	memblock_dump_all();
+
+	if (arm_lowmem_limit >= 0x20000000) {
+        unsigned int addrIdx = (get_platform() - PLATFORM_KXLP);
+		unsigned int platIdx = (get_platform() - PLATFORM_KXLP) + 2; // 0: KxLP, 1: KxL. (2 is base offset)
+		dma_declare_contiguous(NULL, 224*MB - carvedout_buf[CARVEDOUT_CMA_LOW][platIdx], carvedout_buf[CARVEDOUT_CMA_LOW][addrIdx], min(arm_dma_limit, arm_lowmem_limit));
+	} else
+		dma_declare_contiguous(NULL, arm_lowmem_limit - 72*MB, 0x02800000, min(arm_dma_limit, arm_lowmem_limit));
+
+#ifdef CONFIG_HIGHMEM
+	{
+		struct meminfo *mi = &meminfo;
+		int i, hcnt = 0, last = 0;
+		unsigned long high_size = 0;
+		unsigned long high_start = 0;
+		unsigned long ext_size = ext_mem_size << PAGE_SHIFT;
+        unsigned long carvedout_cma_high_size, carvedout_cma_high_start;
+        unsigned long carvedout_cma_3_size, carvedout_cma_3_start;
+        carvedout_cma_high_size = carvedout_buf_query(CARVEDOUT_CMA_HIGH, &carvedout_cma_high_start);
+        carvedout_cma_3_size = carvedout_buf_query(CARVEDOUT_CMA_3, &carvedout_cma_3_start);
+#ifdef CONFIG_OPTEE_SUPPORT_MC_ALLOCATOR
+        cma_mc_size = carvedout_buf_query(CARVEDOUT_CMA_MC, &cma_mc_start_addr);
+#endif
+
+		for_each_bank (i, mi) {
+			pr_debug("bank[%d] %llx@%llx, %d\n", i, (long long)mi->bank[i].size, (long long)mi->bank[i].start, mi->bank[i].highmem);
+			if (mi->bank[i].highmem) {
+				hcnt++;
+				last = i;
+
+				high_size += mi->bank[i].size;
+				if (hcnt == 1)
+					high_start = mi->bank[i].start;
+			}
+		}
+
+		if ((hcnt > 0) && (ext_mem_size)) {
+#if defined(CONFIG_ZRAM) || defined(CONFIG_DM_CRYPT)
+  #if 0 //deprecated, due to 1.5G/2GB DDR with same layout
+			if (hcnt > 1) {
+				cma_highmem_start = mi->bank[last].start + carvedout_cma_high_size;
+				cma_highmem_size = mi->bank[last].size - carvedout_cma_high_size;
+			} else if (IS_ENABLED(CONFIG_VMSPLIT_3G_OPT)) {
+				if (mi->bank[last].size >= (ext_mem_size << PAGE_SHIFT)) {
+					cma_highmem_start = mi->bank[last].start + carvedout_cma_high_size;
+					cma_highmem_size = mi->bank[last].size - carvedout_cma_high_size;
+				} else {
+					unsigned long my_high_start = mi->bank[last-1].start;
+					unsigned long my_high_size = mi->bank[last-1].size + mi->bank[last].size;
+
+					cma_highmem_start = my_high_start + ZRAM_RESERVED_SIZE + carvedout_cma_high_size;
+					cma_highmem_size = my_high_size - ZRAM_RESERVED_SIZE - carvedout_cma_high_size;
+				}
+			} else {
+				cma_highmem_start = mi->bank[last].start + ZRAM_RESERVED_SIZE + carvedout_cma_high_size;
+				cma_highmem_size = mi->bank[last].size - ZRAM_RESERVED_SIZE - carvedout_cma_high_size;
+			}
+  #else
+            cma_highmem_start = carvedout_cma_high_start;
+            if (carvedout_cma_high_start < (CONFIG_PHYS_OFFSET + 1024*_MB_)) {
+#ifdef CONFIG_ZONE_ZRAM
+#ifdef CONFIG_OPTEE_SUPPORT_MC_ALLOCATOR
+                cma_highmem_size = 512*_MB_ - carvedout_cma_high_size - cma_mc_size;
+#else
+                cma_highmem_size = 512*_MB_ - carvedout_cma_high_size;
+#endif
+#else
+#ifdef CONFIG_OPTEE_SUPPORT_MC_ALLOCATOR
+                cma_highmem_size = 512*_MB_ - ZRAM_RESERVED_SIZE - carvedout_cma_high_size - cma_mc_size;
+#else
+                cma_highmem_size = 512*_MB_ - ZRAM_RESERVED_SIZE - carvedout_cma_high_size;
+#endif
+#endif
+            } else {
+#ifdef CONFIG_ZONE_ZRAM
+#ifdef CONFIG_OPTEE_SUPPORT_MC_ALLOCATOR
+                cma_highmem_size = 1024*_MB_ - carvedout_cma_high_size - cma_mc_size;
+#else
+                cma_highmem_size = 1024*_MB_ - carvedout_cma_high_size;
+#endif
+#else
+#ifdef CONFIG_OPTEE_SUPPORT_MC_ALLOCATOR
+                cma_highmem_size = 1024*_MB_ - ZRAM_RESERVED_SIZE - carvedout_cma_high_size - cma_mc_size;
+#else
+                cma_highmem_size = 1024*_MB_ - ZRAM_RESERVED_SIZE - carvedout_cma_high_size;
+#endif
+#endif
+            }
+  #endif
+#else
+			if (carvedout_cma_high_size) {
+#ifdef CONFIG_OPTEE_SUPPORT_MC_ALLOCATOR
+				cma_highmem_start = mi->bank[last].start + carvedout_cma_high_size + cma_mc_size;
+				cma_highmem_size = mi->bank[last].size - carvedout_cma_high_size - cma_mc_size;
+#else
+				cma_highmem_start = mi->bank[last].start + carvedout_cma_high_size;
+				cma_highmem_size = mi->bank[last].size - carvedout_cma_high_size;
+#endif
+			} else if (hcnt == 1 && IS_ENABLED(CONFIG_VMSPLIT_3G_OPT)) {
+				printk(KERN_ERR "CONFIG_ZRAM disabled...\n");
+				BUG();
+			} else {
+				cma_highmem_start = mi->bank[last].start;
+				cma_highmem_size = mi->bank[last].size;
+			}
+#endif
+			pr_info("reserve %08lx - %08lx for high memory cma...\n",
+				cma_highmem_start, cma_highmem_start + cma_highmem_size);
+			memblock_reserve(cma_highmem_start, cma_highmem_size);
+
+            if (carvedout_cma_3_size) {
+                pr_info("reserve %08lx - %08lx for high memory area-3 cma...\n",
+                        carvedout_cma_3_start, carvedout_cma_3_start + carvedout_cma_3_size);
+                memblock_reserve(carvedout_cma_3_start, carvedout_cma_3_size);
+            }
+
+#ifdef CONFIG_OPTEE_SUPPORT_MC_ALLOCATOR
+			if (cma_mc_size) {
+				pr_info("reserve %08lx - %08lx for mc cma...\n",
+						cma_mc_start_addr, cma_mc_start_addr + cma_mc_size);
+				memblock_reserve(cma_mc_start_addr, cma_mc_size);
+			}
+#endif
+		} else if (arm_lowmem_limit == (get_memory_size(GFP_DCU1) + get_memory_size(GFP_DCU2))) { // cma area in same zone
+
+            cma_highmem_start = carvedout_cma_high_start;
+            cma_highmem_size = get_memory_size(GFP_DCU2) - ZRAM_RESERVED_SIZE - carvedout_cma_high_size;
+
+			pr_info("reserve %08lx - %08lx for high memory cma...\n",
+                    cma_highmem_start, cma_highmem_start + cma_highmem_size);
+			memblock_reserve(cma_highmem_start, cma_highmem_size);
+        }
+	}
+#endif
 }
 
 void __init bootmem_init(void)
@@ -413,8 +661,20 @@ static void __init free_unused_memmap(void)
 #ifdef CONFIG_HIGHMEM
 static inline void free_area_high(unsigned long pfn, unsigned long end)
 {
+    pr_info("%s, (%lx/%lx)\n", __FUNCTION__, pfn, end);
 	for (; pfn < end; pfn++)
 		free_highmem_page(pfn_to_page(pfn));
+}
+#endif
+
+#ifdef CONFIG_ZONE_ZRAM
+extern unsigned long totalzram_pages;
+
+static inline void free_area_zram(unsigned long pfn, unsigned long end)
+{
+    pr_info("%s, (%lx/%lx)\n", __FUNCTION__, pfn, end);
+	for (; pfn < end; pfn++)
+		free_zram_page(pfn_to_page(pfn));
 }
 #endif
 
@@ -452,16 +712,33 @@ static void __init free_highpages(void)
 				res_start = end;
 			if (res_end > end)
 				res_end = end;
-			if (res_start != start)
+
+			if (res_start != start) {
+#ifdef CONFIG_ZONE_ZRAM
+				if (start < (max_pfn - ZRAM_RESERVED_SIZE/PAGE_SIZE))
+					free_area_high(start, res_start);
+				else
+					free_area_zram(start, res_start);
+#else
 				free_area_high(start, res_start);
+#endif
+            }
 			start = res_end;
 			if (start == end)
 				break;
 		}
 
 		/* And now free anything which remains */
-		if (start < end)
+		if (start < end) {
+#ifdef CONFIG_ZONE_ZRAM
+            if (start >= (max_pfn - ZRAM_RESERVED_SIZE/PAGE_SIZE))
+                free_area_zram(start, end);
+            else
+                free_area_high(start, end);
+#else
 			free_area_high(start, end);
+#endif
+        }
 	}
 #endif
 }
@@ -782,4 +1059,34 @@ static int __init keepinitrd_setup(char *__unused)
 }
 
 __setup("keepinitrd", keepinitrd_setup);
+#endif
+
+/*
+ * Following functions (arch_{add,remove}_memory) are from
+ * arch/x86/mm/init_32.c.
+ *
+ * These functions are temporarily added here to support memory hotplug.
+ */
+#ifdef CONFIG_MEMORY_HOTPLUG
+int arch_add_memory(int nid, u64 start, u64 size, bool for_device)
+{
+        struct pglist_data *pgdata = NODE_DATA(nid);
+        struct zone *zone = pgdata->node_zones + ZONE_NORMAL;
+        unsigned long start_pfn = start >> PAGE_SHIFT;
+        unsigned long nr_pages = size >> PAGE_SHIFT;
+
+        return __add_pages(nid, zone, start_pfn, nr_pages);
+}
+
+#ifdef CONFIG_MEMORY_HOTREMOVE
+int arch_remove_memory(u64 start, u64 size)
+{
+        unsigned long start_pfn = start >> PAGE_SHIFT;
+        unsigned long nr_pages = size >> PAGE_SHIFT;
+        struct zone *zone;
+
+        zone = page_zone(pfn_to_page(start_pfn));
+        return __remove_pages(zone, start_pfn, nr_pages);
+}
+#endif
 #endif

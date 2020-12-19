@@ -87,8 +87,15 @@ __register_chrdev_region(unsigned int major, unsigned int baseminor,
 	/* temporary */
 	if (major == 0) {
 		for (i = ARRAY_SIZE(chrdevs)-1; i > 0; i--) {
-			if (chrdevs[i] == NULL)
-				break;
+			if (chrdevs[i] == NULL) {
+#if 1
+				/* KTASKWBS-7936. fix LG hidraw devcie always use 254 as its MAJOR */
+				if (strcmp(name, "hidraw") && i == 254)
+					continue;
+				else
+#endif
+					break;
+			}
 		}
 
 		if (i == 0) {

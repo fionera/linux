@@ -164,11 +164,19 @@ static struct thread_info *alloc_thread_info_node(struct task_struct *tsk,
 	struct page *page = alloc_kmem_pages_node(node, THREADINFO_GFP,
 						  THREAD_SIZE_ORDER);
 
+	if (kasan_stack_alloc(page ? page_address(page) : NULL,
+				PAGE_SIZE << THREAD_SIZE_ORDER)) {
+		free_kmem_pages((unsigned long)page_address(page),
+				THREAD_SIZE_ORDER);
+		page = NULL;
+	}
+
 	return page ? page_address(page) : NULL;
 }
 
 static inline void free_thread_info(struct thread_info *ti)
 {
+	kasan_stack_free(ti, PAGE_SIZE << THREAD_SIZE_ORDER);
 	free_kmem_pages((unsigned long)ti, THREAD_SIZE_ORDER);
 }
 # else
@@ -1385,6 +1393,10 @@ static struct task_struct *copy_process(unsigned long clone_flags,
 #endif
 
 	p->default_timer_slack_ns = current->timer_slack_ns;
+
+#ifdef CONFIG_PSI
+	p->psi_flags = 0;
+#endif
 
 	task_io_accounting_init(&p->ioac);
 	acct_clear_integrals(p);

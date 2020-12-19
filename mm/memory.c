@@ -872,10 +872,7 @@ copy_one_pte(struct mm_struct *dst_mm, struct mm_struct *src_mm,
 		} else if (is_migration_entry(entry)) {
 			page = migration_entry_to_page(entry);
 
-			if (PageAnon(page))
-				rss[MM_ANONPAGES]++;
-			else
-				rss[MM_FILEPAGES]++;
+			rss[mm_counter(page)]++;
 
 			if (is_write_migration_entry(entry) &&
 					is_cow_mapping(vm_flags)) {
@@ -914,10 +911,7 @@ copy_one_pte(struct mm_struct *dst_mm, struct mm_struct *src_mm,
 	if (page) {
 		get_page(page);
 		page_dup_rmap(page);
-		if (PageAnon(page))
-			rss[MM_ANONPAGES]++;
-		else
-			rss[MM_FILEPAGES]++;
+		rss[mm_counter(page)]++;
 	}
 
 out_set_pte:
@@ -1154,9 +1148,8 @@ again:
 			tlb_remove_tlb_entry(tlb, pte, addr);
 			if (unlikely(!page))
 				continue;
-			if (PageAnon(page))
-				rss[MM_ANONPAGES]--;
-			else {
+
+			if (!PageAnon(page)) {
 				if (pte_dirty(ptent)) {
 					force_flush = 1;
 					set_page_dirty(page);
@@ -1164,8 +1157,8 @@ again:
 				if (pte_young(ptent) &&
 				    likely(!(vma->vm_flags & VM_SEQ_READ)))
 					mark_page_accessed(page);
-				rss[MM_FILEPAGES]--;
 			}
+			rss[mm_counter(page)]--;
 			page_remove_rmap(page);
 			if (unlikely(page_mapcount(page) < 0))
 				print_bad_pte(vma, addr, ptent, page);
@@ -1187,11 +1180,7 @@ again:
 			struct page *page;
 
 			page = migration_entry_to_page(entry);
-
-			if (PageAnon(page))
-				rss[MM_ANONPAGES]--;
-			else
-				rss[MM_FILEPAGES]--;
+			rss[mm_counter(page)]--;
 		}
 		if (unlikely(!free_swap_and_cache(entry)))
 			print_bad_pte(vma, addr, ptent, NULL);
@@ -1501,7 +1490,7 @@ static int insert_page(struct vm_area_struct *vma, unsigned long addr,
 
 	/* Ok, finally just insert the thing.. */
 	get_page(page);
-	inc_mm_counter_fast(mm, MM_FILEPAGES);
+	inc_mm_counter_fast(mm, mm_counter_file(page));
 	page_add_file_rmap(page);
 	set_pte_at(mm, addr, pte, mk_pte(page, prot));
 
@@ -1770,6 +1759,11 @@ int remap_pfn_range(struct vm_area_struct *vma, unsigned long addr,
 		return -EINVAL;
 
 	vma->vm_flags |= VM_IO | VM_PFNMAP | VM_DONTEXPAND | VM_DONTDUMP;
+
+#if defined(CONFIG_ARM) || defined(CONFIG_ARM64)
+	if (vma->vm_flags & VM_WRITE)
+		prot = pte_mkdirty(prot);
+#endif
 
 	BUG_ON(addr >= end);
 	pfn -= addr >> PAGE_SHIFT;
@@ -2114,11 +2108,19 @@ static int wp_page_copy(struct mm_struct *mm, struct vm_area_struct *vma,
 		goto oom;
 
 	if (is_zero_pfn(pte_pfn(orig_pte))) {
+#ifdef CONFIG_CMA_ANON
+		new_page = alloc_zeroed_user_highpage_movable_cma(vma, address);
+#else
 		new_page = alloc_zeroed_user_highpage_movable(vma, address);
+#endif
 		if (!new_page)
 			goto oom;
 	} else {
+#ifdef CONFIG_CMA_ANON
+		new_page = alloc_page_vma(GFP_HIGHUSER_MOVABLE|__GFP_CMA, vma, address);
+#else
 		new_page = alloc_page_vma(GFP_HIGHUSER_MOVABLE, vma, address);
+#endif
 		if (!new_page)
 			goto oom;
 		cow_user_page(new_page, old_page, address, vma);
@@ -2138,7 +2140,8 @@ static int wp_page_copy(struct mm_struct *mm, struct vm_area_struct *vma,
 	if (likely(pte_same(*page_table, orig_pte))) {
 		if (old_page) {
 			if (!PageAnon(old_page)) {
-				dec_mm_counter_fast(mm, MM_FILEPAGES);
+				dec_mm_counter_fast(mm,
+						mm_counter_file(old_page));
 				inc_mm_counter_fast(mm, MM_ANONPAGES);
 			}
 		} else {
@@ -2515,8 +2518,13 @@ static int do_swap_page(struct mm_struct *mm, struct vm_area_struct *vma,
 	delayacct_set_flag(DELAYACCT_PF_SWAPIN);
 	page = lookup_swap_cache(entry);
 	if (!page) {
+#ifdef CONFIG_CMA_ANON
+		page = swapin_readahead(entry,
+					GFP_HIGHUSER_MOVABLE | __GFP_CMA, vma, address);
+#else
 		page = swapin_readahead(entry,
 					GFP_HIGHUSER_MOVABLE, vma, address);
+#endif
 		if (!page) {
 			/*
 			 * Back out if somebody else faulted in this pte
@@ -2701,7 +2709,11 @@ static int do_anonymous_page(struct mm_struct *mm, struct vm_area_struct *vma,
 	/* Allocate our own private page. */
 	if (unlikely(anon_vma_prepare(vma)))
 		goto oom;
+#ifdef CONFIG_CMA_ANON
+	page = alloc_zeroed_user_highpage_movable_cma(vma, address);
+#else
 	page = alloc_zeroed_user_highpage_movable(vma, address);
+#endif
 	if (!page)
 		goto oom;
 
@@ -2823,7 +2835,7 @@ void do_set_pte(struct vm_area_struct *vma, unsigned long address,
 		inc_mm_counter_fast(vma->vm_mm, MM_ANONPAGES);
 		page_add_new_anon_rmap(page, vma, address);
 	} else {
-		inc_mm_counter_fast(vma->vm_mm, MM_FILEPAGES);
+		inc_mm_counter_fast(vma->vm_mm, mm_counter_file(page));
 		page_add_file_rmap(page);
 	}
 	set_pte_at(vma->vm_mm, address, pte, entry);
@@ -2832,8 +2844,16 @@ void do_set_pte(struct vm_area_struct *vma, unsigned long address,
 	update_mmu_cache(vma, address, pte);
 }
 
+/*
+ * If architecture emulates "accessed" or "young" bit without HW support,
+ * there is no much gain with fault_around.
+ */
 static unsigned long fault_around_bytes __read_mostly =
+#ifndef __HAVE_ARCH_PTEP_SET_ACCESS_FLAGS
+	PAGE_SIZE;
+#else
 	rounddown_pow_of_two(65536);
+#endif
 
 #ifdef CONFIG_DEBUG_FS
 static int fault_around_bytes_get(void *data, u64 *val)
@@ -2992,7 +3012,11 @@ static int do_cow_fault(struct mm_struct *mm, struct vm_area_struct *vma,
 	if (unlikely(anon_vma_prepare(vma)))
 		return VM_FAULT_OOM;
 
+#ifdef CONFIG_CMA_ANON
+	new_page = alloc_page_vma(GFP_HIGHUSER_MOVABLE | __GFP_CMA, vma, address);
+#else
 	new_page = alloc_page_vma(GFP_HIGHUSER_MOVABLE, vma, address);
+#endif
 	if (!new_page)
 		return VM_FAULT_OOM;
 

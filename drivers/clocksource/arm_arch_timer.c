@@ -23,6 +23,7 @@
 #include <linux/slab.h>
 #include <linux/sched_clock.h>
 #include <linux/acpi.h>
+#include <mach/platform.h>
 
 #include <asm/arch_timer.h>
 #include <asm/virt.h>
@@ -400,7 +401,12 @@ static void arch_timer_banner(unsigned type)
 
 u32 arch_timer_get_rate(void)
 {
-	return arch_timer_rate;
+	unsigned int ver = get_ic_version();
+
+	if(ver >= VERSION_C) 
+		return arch_timer_rate;
+	else
+		return 27000000;
 }
 
 static u64 arch_counter_get_cntvct_mem(void)
@@ -529,8 +535,18 @@ static unsigned int saved_cntkctl;
 static int arch_timer_cpu_pm_notify(struct notifier_block *self,
 				    unsigned long action, void *hcpu)
 {
-	if (action == CPU_PM_ENTER)
+	if (action == CPU_PM_ENTER){
+		unsigned int ver = get_ic_version();
 		saved_cntkctl = arch_timer_get_cntkctl();
+
+		if(ver < VERSION_C) {
+               	 	saved_cntkctl &= ~(ARCH_TIMER_USR_PT_ACCESS_EN
+                                   | ARCH_TIMER_USR_VT_ACCESS_EN
+                                   | ARCH_TIMER_VIRT_EVT_EN
+                                   | ARCH_TIMER_USR_PCT_ACCESS_EN);
+                	saved_cntkctl |= ARCH_TIMER_USR_VCT_ACCESS_EN;
+		}
+        }
 	else if (action == CPU_PM_ENTER_FAILED || action == CPU_PM_EXIT)
 		arch_timer_set_cntkctl(saved_cntkctl);
 	return NOTIFY_OK;
@@ -712,9 +728,51 @@ static void __init arch_timer_init(void)
 	arch_timer_common_init();
 }
 
+extern u32 gic_irq_find_mapping(u32 hwirq);
+// RTK_patch: add timer dev register api
+void arch_timer_dev_register(int freq, int ppi[])
+{
+	int i;
+
+	arch_timer_rate = freq;
+
+	for (i = PHYS_SECURE_PPI; i < MAX_TIMER_PPI; i++)
+		arch_timer_ppi[i] = gic_irq_find_mapping(ppi[i]);
+
+	/*
+	 * If HYP mode is available, we know that the physical timer
+	 * has been configured to be accessible from PL1. Use it, so
+	 * that a guest can use the virtual timer instead.
+	 *
+	 * If no interrupt provided for virtual timer, we'll have to
+	 * stick to the physical timer. It'd better be accessible...
+	 */
+
+	if (is_hyp_mode_available() || !arch_timer_ppi[VIRT_PPI]) {
+		arch_timer_use_virtual = false;
+		if (!arch_timer_ppi[PHYS_SECURE_PPI] ||
+				!arch_timer_ppi[PHYS_NONSECURE_PPI]) {
+			pr_warn("arch_timer: No interrupt available, giving up\n");
+			return;
+		}
+	}
+
+	if (arch_timer_use_virtual)
+		arch_timer_read_counter = arch_counter_get_cntvct;
+	else
+		arch_timer_read_counter = arch_counter_get_cntpct;
+
+	arch_timer_register();
+	arch_timer_arch_init();
+}
+
 static void __init arch_timer_of_init(struct device_node *np)
 {
 	int i;
+
+	unsigned int ver = get_ic_version();
+	if(ver < VERSION_C)
+		return ;
 
 	if (arch_timers_present & ARCH_CP15_TIMER) {
 		pr_warn("arch_timer: multiple nodes in dt, skipping\n");

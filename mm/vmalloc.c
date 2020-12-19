@@ -2627,7 +2627,7 @@ static int s_show(struct seq_file *m, void *p)
 
 	v = va->vm;
 
-	seq_printf(m, "0x%pK-0x%pK %7ld",
+	seq_printf(m, "0x%pK-0x%pK %9ld",
 		v->addr, v->addr + v->size, v->size);
 
 	if (v->caller)
@@ -2653,6 +2653,9 @@ static int s_show(struct seq_file *m, void *p)
 
 	if (v->flags & VM_VPAGES)
 		seq_puts(m, " vpages");
+
+	if (v->flags & VM_DVR)
+		seq_printf(m, " DVR");
 
 	show_numa_info(m, v);
 	seq_putc(m, '\n');

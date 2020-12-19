@@ -598,19 +598,13 @@ void zone_statistics(struct zone *preferred_zone, struct zone *z, gfp_t flags)
 unsigned long node_page_state(int node, enum zone_stat_item item)
 {
 	struct zone *zones = NODE_DATA(node)->node_zones;
+	int i;
+	unsigned long count = 0;
 
-	return
-#ifdef CONFIG_ZONE_DMA
-		zone_page_state(&zones[ZONE_DMA], item) +
-#endif
-#ifdef CONFIG_ZONE_DMA32
-		zone_page_state(&zones[ZONE_DMA32], item) +
-#endif
-#ifdef CONFIG_HIGHMEM
-		zone_page_state(&zones[ZONE_HIGHMEM], item) +
-#endif
-		zone_page_state(&zones[ZONE_NORMAL], item) +
-		zone_page_state(&zones[ZONE_MOVABLE], item);
+	for (i = 0; i < MAX_NR_ZONES; i++)
+		count += zone_page_state(zones + i, item);
+
+	return count;
 }
 
 #endif
@@ -714,8 +708,43 @@ int fragmentation_index(struct zone *zone, unsigned int order)
 #define TEXT_FOR_HIGHMEM(xx)
 #endif
 
+#ifdef CONFIG_CMA
+#define TEXT_FOR_CMA_LOWMEM(xx) xx "_cmalow",
+#ifdef CONFIG_HIGHMEM
+#define TEXT_FOR_CMA_HIGHMEM(xx) xx "_cmahigh",
+#else
+#define TEXT_FOR_CMA_HIGHMEM(xx)
+#endif
+#else
+#define TEXT_FOR_CMA_LOWMEM(xx)
+#define TEXT_FOR_CMA_HIGHMEM(xx)
+#endif
+
+#ifdef CONFIG_ZONE_ZRAM
+#define TEXT_FOR_ZONE_ZRAM(xx) xx "_zone_zram",
+#else
+#define TEXT_FOR_ZONE_ZRAM(xx)
+#endif
+
+#ifdef CONFIG_ZONE_ZRAM
+ #ifdef CONFIG_ZONE_ZRAM_DISABLE_FALLBACK
 #define TEXTS_FOR_ZONES(xx) TEXT_FOR_DMA(xx) TEXT_FOR_DMA32(xx) xx "_normal", \
-					TEXT_FOR_HIGHMEM(xx) xx "_movable",
+					TEXT_FOR_HIGHMEM(xx) xx "_movable", \
+					TEXT_FOR_CMA_LOWMEM(xx) TEXT_FOR_CMA_HIGHMEM(xx) \
+					TEXT_FOR_ZONE_ZRAM(xx)
+
+ #else
+#define TEXTS_FOR_ZONES(xx) TEXT_FOR_ZONE_ZRAM(xx) \
+					TEXT_FOR_DMA(xx) TEXT_FOR_DMA32(xx) xx "_normal", \
+					TEXT_FOR_HIGHMEM(xx) xx "_movable", \
+					TEXT_FOR_CMA_LOWMEM(xx) TEXT_FOR_CMA_HIGHMEM(xx)
+ #endif
+
+#else
+#define TEXTS_FOR_ZONES(xx) TEXT_FOR_DMA(xx) TEXT_FOR_DMA32(xx) xx "_normal", \
+					TEXT_FOR_HIGHMEM(xx) xx "_movable", \
+					TEXT_FOR_CMA_LOWMEM(xx) TEXT_FOR_CMA_HIGHMEM(xx)
+#endif
 
 const char * const vmstat_text[] = {
 	/* enum zone_stat_item countes */
@@ -747,7 +776,9 @@ const char * const vmstat_text[] = {
 	"nr_dirtied",
 	"nr_written",
 	"nr_pages_scanned",
-
+#if IS_ENABLED(CONFIG_ZSMALLOC)
+	"nr_zspages",
+#endif
 #ifdef CONFIG_NUMA
 	"numa_hit",
 	"numa_miss",
@@ -758,9 +789,9 @@ const char * const vmstat_text[] = {
 #endif
 	"workingset_refault",
 	"workingset_activate",
+	"workingset_restore",
 	"workingset_nodereclaim",
 	"nr_anon_transparent_hugepages",
-	"nr_free_cma",
 
 	/* enum writeback_stat_item counters */
 	"nr_dirty_threshold",
@@ -924,9 +955,6 @@ static char * const migratetype_names[MIGRATE_TYPES] = {
 	"Movable",
 	"Reclaimable",
 	"HighAtomic",
-#ifdef CONFIG_CMA
-	"CMA",
-#endif
 #ifdef CONFIG_MEMORY_ISOLATION
 	"Isolate",
 #endif
@@ -1016,6 +1044,9 @@ static void pagetypeinfo_showblockcount_print(struct seq_file *m,
 		if (!memmap_valid_within(pfn, page, zone))
 			continue;
 
+		if (page_zone(page) != zone)
+			continue;
+
 		mtype = get_pageblock_migratetype(page);
 
 		if (mtype < MIGRATE_TYPES)
@@ -1082,6 +1113,10 @@ static void pagetypeinfo_showmixedcount_print(struct seq_file *m,
 				continue;
 
 			page = pfn_to_page(pfn);
+
+			if (page_zone(page) != zone)
+				continue;
+
 			if (PageBuddy(page)) {
 				pfn += (1UL << page_order(page)) - 1;
 				continue;
@@ -1091,21 +1126,24 @@ static void pagetypeinfo_showmixedcount_print(struct seq_file *m,
 				continue;
 
 			page_ext = lookup_page_ext(page);
+			if (unlikely(!page_ext))
+				continue;
 
-			if (!test_bit(PAGE_EXT_OWNER, &page_ext->flags))
+			if (!test_bit(PAGE_EXT_OWNER_ALLOC, &page_ext->flags))
 				continue;
 
 			page_mt = gfpflags_to_migratetype(page_ext->gfp_mask);
 			if (pageblock_mt != page_mt) {
-				if (is_migrate_cma(pageblock_mt))
-					count[MIGRATE_MOVABLE]++;
-				else
-					count[pageblock_mt]++;
+				count[pageblock_mt]++;
 
 				pfn = block_end_pfn;
 				break;
 			}
+			#ifdef CONFIG_CMA_TRACK_USE_PAGE_OWNER
+			pfn += (page_ext->count) - 1;
+			#else
 			pfn += (1UL << page_ext->order) - 1;
+			#endif
 		}
 	}
 
@@ -1128,7 +1166,7 @@ static void pagetypeinfo_showmixedcount(struct seq_file *m, pg_data_t *pgdat)
 #ifdef CONFIG_PAGE_OWNER
 	int mtype;
 
-	if (!page_owner_inited)
+	if (!static_branch_unlikely(&page_owner_inited))
 		return;
 
 	drain_all_pages(NULL);
@@ -1268,10 +1306,14 @@ static void zoneinfo_show_print(struct seq_file *m, pg_data_t *pgdat,
 /*
  * Output information about zones in @pgdat.
  */
+//void show_pvec(struct seq_file *m);
+int meminfo_proc_show(struct seq_file *m, void *v);
 static int zoneinfo_show(struct seq_file *m, void *arg)
 {
 	pg_data_t *pgdat = (pg_data_t *)arg;
+//	show_pvec(m);
 	walk_zones_in_node(m, pgdat, zoneinfo_show_print);
+	meminfo_proc_show(m, NULL);
 	return 0;
 }
 

@@ -836,7 +836,11 @@ error:
 void key_change_session_keyring(struct callback_head *twork)
 {
 	const struct cred *old = current_cred();
+#ifdef CONFIG_EKP_CRED_PROTECTION
+	struct cred *new = container_of(twork, struct cred_rcu, rcu)->cred;
+#else
 	struct cred *new = container_of(twork, struct cred, rcu);
+#endif
 
 	if (unlikely(current->flags & PF_EXITING)) {
 		put_cred(new);

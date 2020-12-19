@@ -782,6 +782,13 @@ ENTRY(__switch_to)
  THUMB(	str	lr, [ip], #4		   )
 	ldr	r4, [r2, #TI_TP_VALUE]
 	ldr	r5, [r2, #TI_TP_VALUE + 4]
+#if defined (CONFIG_RTK_NON_TEMPORAL)
+        ldr     r6, [r2, #TI_FLAGS]
+        lsl     r6, #(31-TIF_IS_NONTEMP)
+        lsrs    r6, #(31)
+        movne   r6, #NONTEMP_SID
+        mcr     p15, 0, r6, c15, c4, 0
+#endif //#if defined (CONFIG_RTK_NON_TEMPORAL)        
 #ifdef CONFIG_CPU_USE_DOMAINS
 	mrc	p15, 0, r6, c3, c0, 0		@ Get domain register
 	str	r6, [r1, #TI_CPU_DOMAIN]	@ Save old domain register
@@ -851,6 +858,59 @@ ENDPROC(__switch_to)
 	.globl	__kuser_helper_start
 __kuser_helper_start:
 
+#if defined(CONFIG_RTK_NON_TEMPORAL)
+#define L3_QUAD_SIZE     (0x100000/4)
+
+	.macro	kuser_pad_magic, sym, size
+	.if	(. - \sym) & 3
+	.rept	4 - (. - \sym) & 3
+	.byte	0
+	.endr
+	.endif
+	.rept	(\size - (. - \sym)) / 4
+	.word	0x00087000
+	.endr
+	.endm
+        
+/* these are copied from caller, glibc/memcpy_impl.S */
+/* Call parameters.  */
+#define dstin	r0
+#define src	r1      
+#define count	r2      /* the size to copy */
+
+/* Locals.  */
+#define tmp1	r3      
+#define dst	ip
+#define tmp2	r8      /** THIS IS the return address to memcpy. **/
+
+        /* NOTICE: here is a tricky for quick sysall,
+         * but it disobeys all ABI of syscall.
+         * tmp1 is the vsyscall address,  
+         * and take it to replace r7 as magic number for swi */
+__kuser_nontemp_begin:				@ 0xffff0f20
+        cmp     r7, #(L3_QUAD_SIZE)
+        movwcs   r7, #:lower16:(__ARM_NR_nontemp_begin)
+        movtcs   r7, #:upper16:(__ARM_NR_nontemp_begin)
+        swics    0 //EABI:0, but OABI/thumb need #(__ARM_NR_nontemp_end) 
+	bx      tmp2
+
+	kuser_pad_magic __kuser_nontemp_begin, 32
+
+        /* NOTICE: here is a tricky for quick sysall,
+         * but it disobeys all ABI of syscall.
+         * tmp1 is the vsyscall address,  
+         * and take it to replace r7 as magic number for swi */
+__kuser_nontemp_end:				@ 0xffff0f40
+        cmp     r7, #(L3_QUAD_SIZE)
+        movwcs   r7, #:lower16:(__ARM_NR_nontemp_end)
+        movtcs   r7, #:upper16:(__ARM_NR_nontemp_end)
+        swics     0 //EABI: 0 , OABI/thumb need #(__ARM_NR_nontemp_end) 
+	bx      tmp2
+
+	kuser_pad_magic __kuser_nontemp_end, 32
+        
+#endif //#if defined(CONFIG_RTK_NON_TEMPORAL)
+        
 /*
  * Due to the length of some sequences, __kuser_cmpxchg64 spans 2 regular
  * kuser "slots", therefore 0xffff0f80 is not used as a valid entry point.

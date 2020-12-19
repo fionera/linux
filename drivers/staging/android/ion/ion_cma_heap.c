@@ -24,6 +24,8 @@
 #include "ion.h"
 #include "ion_priv.h"
 
+#define DEBUG 1  //kjw test add
+
 #define ION_CMA_ALLOCATE_FAILED -1
 
 struct ion_cma_heap {

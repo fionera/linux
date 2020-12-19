@@ -50,7 +50,7 @@ my (@stack, $re, $dre, $x, $xs, $funcre);
 		$re = qr/^.*stp.*sp,\#-([0-9]{1,8})\]\!/o;
 	} elsif ($arch eq 'arm') {
 		#c0008ffc:	e24dd064	sub	sp, sp, #100	; 0x64
-		$re = qr/.*sub.*sp, sp, #(([0-9]{2}|[3-9])[0-9]{2})/o;
+		$re = qr/.*sub.*sp, sp, #(([0-9]{2}|[3-9])[0-9]{2,})/o;
 	} elsif ($arch eq 'avr32') {
 		#8000008a:       20 1d           sub sp,4
 		#80000ca8:       fa cd 05 b0     sub sp,sp,1456

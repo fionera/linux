@@ -38,6 +38,10 @@
 #include <asm/mach/map.h>
 #include <asm/system_info.h>
 #include <asm/dma-contiguous.h>
+#ifdef CONFIG_CMA_RTK_ALLOCATOR
+#include <linux/rtkrecord.h>
+#include <linux/pageremap.h>
+#endif
 
 #include "dma.h"
 #include "mm.h"
@@ -533,13 +537,32 @@ static void *__alloc_from_contiguous(struct device *dev, size_t size,
 				     const void *caller, bool want_vaddr)
 {
 	unsigned long order = get_order(size);
-	size_t count = size >> PAGE_SHIFT;
+	int count;
+
+	int size_page, size_order;
+	int count_page, count_order;
+
+	size = size_page = PAGE_ALIGN(size);
+	count = count_page = size >> PAGE_SHIFT;
+
+	if (need_debug_cma_guardband()) {
+		size = size_order = dvr_guardband_size(size);
+		count = count_order = size_order >> PAGE_SHIFT;
+	}
+
 	struct page *page;
 	void *ptr = NULL;
 
 	page = dma_alloc_from_contiguous(dev, count, order);
 	if (!page)
 		return NULL;
+
+#ifdef CONFIG_CMA_RTK_ALLOCATOR
+	if (rtk_record_insert(page_to_pfn(page) << PAGE_SHIFT, RTK_SIGNATURE | DRIVER_ID | count_page, 0, caller)) {
+		dma_release_from_contiguous(dev, page, count);
+		return NULL;
+	}
+#endif
 
 	__dma_clear_buffer(page, size);
 
@@ -549,12 +572,26 @@ static void *__alloc_from_contiguous(struct device *dev, size_t size,
 	if (PageHighMem(page)) {
 		ptr = __dma_alloc_remap(page, size, GFP_KERNEL, prot, caller);
 		if (!ptr) {
+#ifdef CONFIG_CMA_RTK_ALLOCATOR
+			int value;
+
+			value = rtk_record_lookup(page_to_pfn(page) << PAGE_SHIFT, NULL);
+			if ((value & 0xf0000000) != RTK_SIGNATURE) {
+				pr_err("remap: free memory (%lx) signature error...\n", page_to_pfn(page) << PAGE_SHIFT);
+				BUG();
+			}
+			rtk_record_delete(page_to_pfn(page) << PAGE_SHIFT);
+#endif
 			dma_release_from_contiguous(dev, page, count);
 			return NULL;
 		}
 	} else {
 		__dma_remap(page, size, prot);
 		ptr = page_address(page);
+	}
+
+	if (need_debug_cma_guardband()) {
+		dvr_guardband_padding(page, count_order, count_page);
 	}
 
  out:
@@ -565,13 +602,45 @@ static void *__alloc_from_contiguous(struct device *dev, size_t size,
 static void __free_from_contiguous(struct device *dev, struct page *page,
 				   void *cpu_addr, size_t size, bool want_vaddr)
 {
+#ifdef CONFIG_CMA_RTK_ALLOCATOR
+	int value;
+	rtk_record *ptr = NULL;
+
+	value = rtk_record_lookup_ex(page_to_pfn(page) << PAGE_SHIFT, &ptr, true);
+	if ((value & 0xf0000000) != RTK_SIGNATURE) {
+		pr_err("remap: free memory (%lx) signature error...\n", page_to_pfn(page) << PAGE_SHIFT);
+		BUG();
+	}
+
+
+	if (need_debug_cma_deferfree()) {
+		rtk_record_tag_set(ptr, RTK_RECORD_TAG_DEFER_FREE);
+		/* defer free not alloc, mark it */
+		//rtk_record_delete(page_to_pfn(page) << PAGE_SHIFT);
+	} else 
+		rtk_record_delete(page_to_pfn(page) << PAGE_SHIFT);
+
+	if (((value & ID_MASK) == DRIVER_ID) && need_debug_cma_guardband())
+	{
+		dvr_guardband_check(page_to_pfn(page) << PAGE_SHIFT, value);
+	}
+    
+#endif
+
 	if (want_vaddr) {
 		if (PageHighMem(page))
 			__dma_free_remap(cpu_addr, size);
 		else
 			__dma_remap(page, size, PAGE_KERNEL);
 	}
-	dma_release_from_contiguous(dev, page, size >> PAGE_SHIFT);
+
+	if (need_debug_cma_deferfree()) {
+		/* defer free not alloc, mark it */
+		//dma_release_from_contiguous(dev, page, size >> PAGE_SHIFT);
+		dvr_guardband_padding(page, 1, 0);
+	} else {
+		dma_release_from_contiguous(dev, page, size >> PAGE_SHIFT);
+	}
 }
 
 static inline pgprot_t __get_dma_pgprot(struct dma_attrs *attrs, pgprot_t prot)
@@ -1146,6 +1215,13 @@ static struct page **__iommu_alloc_buffer(struct device *dev, size_t size,
 		if (!page)
 			goto error;
 
+#ifdef CONFIG_CMA_RTK_ALLOCATOR
+		if (rtk_record_insert(page_to_pfn(page) << PAGE_SHIFT, RTK_SIGNATURE | DRIVER_ID | count, 0, __builtin_return_address(0))) {
+			dma_release_from_contiguous(dev, page, count);
+			goto error;
+		}
+#endif
+
 		__dma_clear_buffer(page, size);
 
 		for (i = 0; i < count; i++)
@@ -1215,7 +1291,30 @@ static int __iommu_free_buffer(struct device *dev, struct page **pages,
 	int i;
 
 	if (dma_get_attr(DMA_ATTR_FORCE_CONTIGUOUS, attrs)) {
-		dma_release_from_contiguous(dev, pages[0], count);
+#ifdef CONFIG_CMA_RTK_ALLOCATOR
+		int value;
+		rtk_record *ptr = NULL;
+
+		value = rtk_record_lookup_ex(page_to_pfn(pages[0]) << PAGE_SHIFT, &ptr, true);
+		if ((value & 0xf0000000) != RTK_SIGNATURE) {
+			pr_err("remap: free memory (%lx) signature error...\n", page_to_pfn(pages[0]) << PAGE_SHIFT);
+			BUG();
+		}
+
+		if (need_debug_cma_deferfree()) {
+			rtk_record_tag_set(ptr, RTK_RECORD_TAG_DEFER_FREE);
+			/* defer free not alloc, mark it */
+			//rtk_record_delete(page_to_pfn(pages[0]) << PAGE_SHIFT);
+		} else
+			rtk_record_delete(page_to_pfn(pages[0]) << PAGE_SHIFT);
+#endif
+		if (need_debug_cma_deferfree()) {
+			/* defer free not alloc, mark it */
+			//dma_release_from_contiguous(dev, pages[0], count);
+			dvr_guardband_padding(pages[0], 1, 0);
+		} else {
+			dma_release_from_contiguous(dev, pages[0], count);
+		}
 	} else {
 		for (i = 0; i < count; i++)
 			if (pages[i])

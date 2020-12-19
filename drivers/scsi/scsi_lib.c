@@ -1791,7 +1791,7 @@ static void scsi_request_fn(struct request_queue *q)
 
 		if (unlikely(!scsi_device_online(sdev))) {
 			sdev_printk(KERN_ERR, sdev,
-				    "rejecting I/O to offline device\n");
+				    "rejecting I/O to offline device. state=%d\n", sdev->sdev_state);
 			scsi_kill_request(req, q);
 			continue;
 		}

@@ -33,6 +33,13 @@
 #include <linux/mtd/blktrans.h>
 #include <linux/mutex.h>
 #include <linux/major.h>
+//---------------------------------------------------
+#define ERASE_NAND 1
+//#define MTD_NAND_SECT_SIZE 4096
+#define NAND_CP_RW_DISABLE (0xFFFFFFFF)
+
+unsigned int *ptrMtdCacheAddr = NULL;
+//---------------------------------------------------
 
 
 struct mtdblk_dev {
@@ -44,6 +51,8 @@ struct mtdblk_dev {
 	unsigned int cache_size;
 	enum { STATE_EMPTY, STATE_CLEAN, STATE_DIRTY } cache_state;
 };
+
+static DEFINE_MUTEX(mtdblks_lock);
 
 /*
  * Cache stuff...
@@ -60,6 +69,12 @@ static void erase_callback(struct erase_info *done)
 	wait_queue_head_t *wait_q = (wait_queue_head_t *)done->priv;
 	wake_up(wait_q);
 }
+//----------------------------------------------
+static void erase_callbackExt(struct erase_info *done)
+{
+ return;
+}
+//----------------------------------------------
 
 static int erase_write (struct mtd_info *mtd, unsigned long pos,
 			int len, const char *buf)
@@ -67,13 +82,56 @@ static int erase_write (struct mtd_info *mtd, unsigned long pos,
 	struct erase_info erase;
 	DECLARE_WAITQUEUE(wait, current);
 	wait_queue_head_t wait_q;
-	size_t retlen;
+	size_t retlen = 0;
 	int ret;
+	size_t retTmp=0;
 
 	/*
 	 * First, let's erase the flash block.
 	 */
+	if (mtd->type==MTD_DATAFLASH||mtd->type==MTD_NORFLASH || mtd->type == MTD_NANDFLASH || strstr(mtd->name, "nand") ){	//Nand flash
+			erase.mtd = mtd;
+			erase.addr = (pos/mtd->erasesize)*mtd->erasesize;
+			if(!len)
+				len = mtd->erasesize; 
+			if(mtd->type==MTD_NORFLASH||mtd->type==MTD_DATAFLASH)
+				erase.callback = erase_callbackExt;
+			erase.len = len;
+			//ret = MTD_ERASE(mtd, &erase);
+			ret = mtd_erase(mtd, &erase);
+			if (ret) {
+				printk (KERN_WARNING "MTD_NAND_WITHOUT_WAIT_QUEUE: mtdblock:erase nand of region [0x%lx, 0x%x] "
+						     "on \"%s\" failed\n", pos, len, mtd->name);
+				return ret;
+			}
+	}else{		//Nor flash
+	init_waitqueue_head(&wait_q);
+	erase.mtd = mtd;
+	erase.callback = erase_callback;
+//	erase.addr = pos;
+	erase.addr = (pos/mtd->erasesize)*mtd->erasesize;
+	erase.len = len;
+	erase.priv = (u_long)&wait_q;
 
+	set_current_state(TASK_INTERRUPTIBLE);
+	add_wait_queue(&wait_q, &wait);
+
+	//ret = MTD_ERASE(mtd, &erase);
+	ret = mtd_erase(mtd, &erase);
+		
+	if (ret) {
+		set_current_state(TASK_RUNNING);
+		remove_wait_queue(&wait_q, &wait);
+		printk (KERN_WARNING "mtdblock: erase of region [0x%lx, 0x%x] "
+				     "on \"%s\" failed\n",
+			pos, len, mtd->name);
+		return ret;
+	}
+
+	schedule();  /* Wait for erase to finish. */
+	remove_wait_queue(&wait_q, &wait);
+	}
+#if 0
 	init_waitqueue_head(&wait_q);
 	erase.mtd = mtd;
 	erase.callback = erase_callback;
@@ -96,12 +154,31 @@ static int erase_write (struct mtd_info *mtd, unsigned long pos,
 
 	schedule();  /* Wait for erase to finish. */
 	remove_wait_queue(&wait_q, &wait);
-
+#endif
 	/*
 	 * Next, write the data to flash.
 	 */
+	 if ( mtd->type==MTD_DATAFLASH||mtd->type==MTD_NORFLASH||mtd->type == MTD_NANDFLASH || strstr(mtd->name, "nand") )
+	 {
+		int nCnt=len/mtd->oobblock;
+		int idx = 0;
 
-	ret = mtd_write(mtd, pos, len, &retlen, buf);
+		pos = (pos/mtd->erasesize)*mtd->erasesize;
+		retlen = 0;
+		for(idx=0;idx<nCnt;idx++)
+		{
+			//ret = MTD_WRITE(mtd, pos+idx*mtd->oobblock, mtd->oobblock, &retTmp, (unsigned char*)mtd->ptr_u32CacheAddr[idx]);
+			ret = mtd_write(mtd, pos+idx*mtd->oobblock, mtd->oobblock, &retTmp, (unsigned char*)mtd->ptr_u32CacheAddr[idx]);
+			retlen+=retTmp;
+
+		}
+	 }
+	 else
+	 { 
+		//ret = MTD_WRITE (mtd, pos, len, &retlen, buf);
+		ret = mtd_write(mtd, pos, len, &retlen, buf);
+	 }
+
 	if (ret)
 		return ret;
 	if (retlen != len)
@@ -145,7 +222,8 @@ static int do_cached_write (struct mtdblk_dev *mtdblk, unsigned long pos,
 	struct mtd_info *mtd = mtdblk->mbd.mtd;
 	unsigned int sect_size = mtdblk->cache_size;
 	size_t retlen;
-	int ret;
+	size_t retLenTmp =0 ;
+	int ret=0;
 
 	pr_debug("mtdblock: write on \"%s\" at 0x%lx, size 0x%x\n",
 		mtd->name, pos, len);
@@ -178,7 +256,7 @@ static int do_cached_write (struct mtdblk_dev *mtdblk, unsigned long pos,
 				if (ret)
 					return ret;
 			}
-
+#if 0
 			if (mtdblk->cache_state == STATE_EMPTY ||
 			    mtdblk->cache_offset != sect_start) {
 				/* fill the cache with the current sector */
@@ -194,10 +272,83 @@ static int do_cached_write (struct mtdblk_dev *mtdblk, unsigned long pos,
 				mtdblk->cache_size = sect_size;
 				mtdblk->cache_state = STATE_CLEAN;
 			}
+#else
+			if (mtdblk->cache_state == STATE_EMPTY ||
+			    mtdblk->cache_offset != sect_start) {
+				/* fill the cache with the current sector */
+				mtdblk->cache_state = STATE_EMPTY;
+					if ( mtd->type==MTD_DATAFLASH||mtd->type==MTD_NORFLASH||mtd->type == MTD_NANDFLASH || strstr(mtd->name, "nand") )
+					{
+						int nCnt=sect_size/mtd->oobblock;
+						int idx = 0;
+						retlen = 0;
+						for(idx=0;idx<nCnt;idx++)
+						{
+							if((strcmp("/",mtd->name)==0)|| (strcmp("/usr/local/Resource",mtd->name)==0))
+							{
+								mtd->isCPdisable_R = 0;
+								retLenTmp=0;
+							}
+							else
+							{
+								retLenTmp=NAND_CP_RW_DISABLE;
+							}
+							ret = mtd_read(mtd, sect_start+idx*mtd->oobblock, mtd->oobblock, &retLenTmp, (unsigned char*)mtd->ptr_u32CacheAddr[idx]);
+							retlen+=retLenTmp;
+						}
+					}
+					else
+						ret = mtd_read(mtd, sect_start, sect_size, &retlen, mtdblk->cache_data);
 
+				if (ret)
+					return ret;
+				if (retlen != sect_size)
+					return -EIO;
+
+				mtdblk->cache_offset = sect_start;
+				mtdblk->cache_size = sect_size;
+				mtdblk->cache_state = STATE_CLEAN;
+
+			}
+#endif
 			/* write data to our local cache */
+#if 0
 			memcpy (mtdblk->cache_data + offset, buf, size);
 			mtdblk->cache_state = STATE_DIRTY;
+#else
+			if ( mtd->type==MTD_DATAFLASH||mtd->type==MTD_NORFLASH||mtd->type == MTD_NANDFLASH || strstr(mtd->name, "nand") )
+			{
+					int nStartAddrIdx = offset/mtd->oobblock;
+					int nCnt=size/mtd->oobblock;
+					int i=0;
+					if(mtd->oobblock>=0x2000)
+					{
+						if(pos%mtd->oobblock)
+						{
+							memcpy ( (unsigned char*)mtd->ptr_u32CacheAddr[nStartAddrIdx]+4096,buf, 4096);
+							
+						}
+						else
+						{
+							memcpy ( (unsigned char*)mtd->ptr_u32CacheAddr[nStartAddrIdx],buf, 4096);	
+						}
+					}
+					else
+					{
+					
+						for(i=0;i<nCnt;i++)
+						{
+						  memcpy ( (char*)mtd->ptr_u32CacheAddr[nStartAddrIdx],buf+mtd->oobblock*i, mtd->oobblock);	
+						  nStartAddrIdx++;
+						}
+					}
+			}
+			else
+			{
+				memcpy (mtdblk->cache_data + offset, buf, size);
+				}
+			mtdblk->cache_state = STATE_DIRTY;
+#endif
 		}
 
 		buf += size;
@@ -214,14 +365,37 @@ static int do_cached_read (struct mtdblk_dev *mtdblk, unsigned long pos,
 {
 	struct mtd_info *mtd = mtdblk->mbd.mtd;
 	unsigned int sect_size = mtdblk->cache_size;
-	size_t retlen;
+	size_t retlen=0;
 	int ret;
+       //struct mtd_oob_ops op;
 
 	pr_debug("mtdblock: read on \"%s\" at 0x%lx, size 0x%x\n",
 			mtd->name, pos, len);
 
+#if 0
 	if (!sect_size)
 		return mtd_read(mtd, pos, len, &retlen, buf);
+#else
+	if (!sect_size)
+	{
+		//if(strcmddp("/",mtd->name)==0)
+		if((strcmp("/",mtd->name)==0)|| (strcmp("/usr/local/Resource",mtd->name)==0))
+			return mtd_read(mtd, pos, len, &retlen, buf);
+		else
+		{
+			#if 0
+			op.len = len;
+			op.retlen = retlen;
+			op.datbuf = buf;
+			op.oobbuf = NULL;
+			return mtd->read_oob(mtd, pos,&op);
+			#else
+			retlen = NAND_CP_RW_DISABLE;
+			return mtd_read(mtd, pos, len, &retlen, buf);
+			#endif
+		}
+	}
+#endif
 
 	while (len > 0) {
 		unsigned long sect_start = (pos/sect_size)*sect_size;
@@ -238,9 +412,42 @@ static int do_cached_read (struct mtdblk_dev *mtdblk, unsigned long pos,
 		 */
 		if (mtdblk->cache_state != STATE_EMPTY &&
 		    mtdblk->cache_offset == sect_start) {
-			memcpy (buf, mtdblk->cache_data + offset, size);
+		    	if ( mtd->type==MTD_DATAFLASH||mtd->type==MTD_NORFLASH||mtd->type == MTD_NANDFLASH || strstr(mtd->name, "nand") )
+			{
+				int nStartAddrIdx = offset/mtd->oobblock;
+				int nCnt=size/mtd->oobblock;
+				int i=0;
+				for(i=0;i<nCnt;i++)
+				{
+				  memcpy ( buf+mtd->oobblock*i,(char*)mtd->ptr_u32CacheAddr[nStartAddrIdx] ,mtd->oobblock);	
+				  nStartAddrIdx++;
+				}
+			}
+			else
+			  memcpy (buf, mtdblk->cache_data + offset, size);
 		} else {
-			ret = mtd_read(mtd, pos, size, &retlen, buf);
+
+			#if 0
+				//ret = mtd->read(mtd, pos, size, &retlen, buf);
+				ret = mtd_read(mtd, pos, size, &retlen, buf);
+			#else
+			//if(strcmp("/",mtd->name)==0)
+			if((strcmp("/",mtd->name)==0)|| (strcmp("/usr/local/Resource",mtd->name)==0))
+				ret = mtd_read(mtd, pos, size, &retlen, buf);
+			else
+			{
+				#if 0
+				op.len = size;
+				op.retlen = retlen;
+				op.datbuf = buf;
+				op.oobbuf = NULL;
+				ret =  mtd->read_oob(mtd, pos,&op);
+				#else
+				retlen = NAND_CP_RW_DISABLE;
+			        ret = mtd_read(mtd, pos, size, &retlen, buf);
+				#endif
+			}
+		    #endif
 			if (ret)
 				return ret;
 			if (retlen != size)
@@ -259,31 +466,93 @@ static int mtdblock_readsect(struct mtd_blktrans_dev *dev,
 			      unsigned long block, char *buf)
 {
 	struct mtdblk_dev *mtdblk = container_of(dev, struct mtdblk_dev, mbd);
-	return do_cached_read(mtdblk, block<<9, 512, buf);
+	struct mtd_info *mtd = mtdblk->mbd.mtd;
+
+	if(!mtd->oobblock)
+		mtd->oobblock = 512;
+	if (mtd->type==MTD_DATAFLASH||mtd->type==MTD_NORFLASH|| mtd->type == MTD_NANDFLASH || strstr(mtd->name, "nand") )
+		//return do_cached_read(mtdblk, block<<9, MTD_NAND_SECT_SIZE, buf);	
+		return do_cached_read(mtdblk, block<<9, mtd->oobblock, buf);
+	else
+		return do_cached_read(mtdblk, block<<9, 512, buf);
 }
 
 static int mtdblock_writesect(struct mtd_blktrans_dev *dev,
 			      unsigned long block, char *buf)
 {
 	struct mtdblk_dev *mtdblk = container_of(dev, struct mtdblk_dev, mbd);
+	struct mtd_info *mtd = mtdblk->mbd.mtd;
+
+	int i = 0;
+	int addrSlots = 0;
+
+	if(!mtd->oobblock)
+		mtd->oobblock = 512;
+
+	addrSlots = mtd->erasesize/mtd->oobblock;
+	
 	if (unlikely(!mtdblk->cache_data && mtdblk->cache_size)) {
+#if 1
+		if ( mtd->type==MTD_DATAFLASH||mtd->type==MTD_NORFLASH||mtd->type == MTD_NANDFLASH || strstr(mtd->name, "nand") )
+		{
+			mtd->ptr_u32CacheAddr=kmalloc(addrSlots*sizeof(int), GFP_KERNEL);
+			if(!mtd->ptr_u32CacheAddr)
+			{
+				printk("[%s]mtdblk->mtd->ptr_u32CacheAddr allocate FAIL!\n",__FUNCTION__);
+				return -EINTR;
+			}
+			for(i=0;i<addrSlots;i++)
+			{
+				mtd->ptr_u32CacheAddr[i]=(int)kmalloc(mtd->oobblock, GFP_KERNEL);
+				if(!mtd->ptr_u32CacheAddr[i])
+					return -EINTR;
+			}
+			mtdblk->cache_data  = (unsigned char*)mtd->ptr_u32CacheAddr;
+		}
+		else
+		{
+			mtdblk->cache_data = vmalloc(mtd->erasesize);
+			if (!mtdblk->cache_data)
+			return -EINTR;
+		}
+#else
 		mtdblk->cache_data = vmalloc(mtdblk->mbd.mtd->erasesize);
 		if (!mtdblk->cache_data)
 			return -EINTR;
+#endif
 		/* -EINTR is not really correct, but it is the best match
 		 * documented in man 2 write for all cases.  We could also
 		 * return -EAGAIN sometimes, but why bother?
 		 */
 	}
-	return do_cached_write(mtdblk, block<<9, 512, buf);
+
+	if ( mtd->type==MTD_DATAFLASH ||mtd->type==MTD_NORFLASH||mtd->type == MTD_NANDFLASH || strstr(mtd->name, "nand") )
+	{
+		if(mtd->oobblock>0x1000)
+		{
+			unsigned int len=0;
+			len=mtd->oobblock;
+			len/=(mtd->oobblock/0x1000);
+			return do_cached_write(mtdblk, block<<9, len, buf);
+		}
+
+		else
+			return do_cached_write(mtdblk, block<<9, mtd->oobblock, buf);
+	}
+	else
+		return do_cached_write(mtdblk, block<<9, 512, buf);
+	
 }
 
 static int mtdblock_open(struct mtd_blktrans_dev *mbd)
 {
 	struct mtdblk_dev *mtdblk = container_of(mbd, struct mtdblk_dev, mbd);
+	struct mtd_info *mtd = mbd->mtd;
 
 	pr_debug("mtdblock_open\n");
 
+	if(!mtd->oobblock)
+		mtd->oobblock = 512;
 	if (mtdblk->count) {
 		mtdblk->count++;
 		return 0;
@@ -297,6 +566,15 @@ static int mtdblock_open(struct mtd_blktrans_dev *mbd)
 		mtdblk->cache_size = mbd->mtd->erasesize;
 		mtdblk->cache_data = NULL;
 	}
+	if ( mtd->type==MTD_DATAFLASH||mtd->type==MTD_NORFLASH||mtd->type == MTD_NANDFLASH || strstr(mtd->name, "nand") )
+	{
+		if(!mtdblk->cache_size)
+		{
+			printk("[%s]No cache for NAND device!\n",__FUNCTION__);
+			return -ENOMEM;
+		}
+		mtdblk->cache_data = NULL;
+	}
 
 	pr_debug("ok\n");
 
@@ -306,11 +584,16 @@ static int mtdblock_open(struct mtd_blktrans_dev *mbd)
 static void mtdblock_release(struct mtd_blktrans_dev *mbd)
 {
 	struct mtdblk_dev *mtdblk = container_of(mbd, struct mtdblk_dev, mbd);
-
+	int i=0;
+	
 	pr_debug("mtdblock_release\n");
 
+	mutex_lock(&mtdblks_lock);
+
 	mutex_lock(&mtdblk->cache_mutex);
-	write_cached_data(mtdblk);
+	
+	if(mtdblk)
+		write_cached_data(mtdblk);
 	mutex_unlock(&mtdblk->cache_mutex);
 
 	if (!--mtdblk->count) {
@@ -320,10 +603,38 @@ static void mtdblock_release(struct mtd_blktrans_dev *mbd)
 		 */
 		if (mbd->file_mode & FMODE_WRITE)
 			mtd_sync(mbd->mtd);
-		vfree(mtdblk->cache_data);
+
+		//vfree(mtdblk->cache_data);
+		if(mbd->mtd->ptr_u32CacheAddr)
+		{
+			for(i=0;i<mbd->mtd->erasesize/mbd->mtd->oobblock;i++)
+				{
+					if(mbd->mtd->ptr_u32CacheAddr[i])
+					{
+						kfree((unsigned int*)mbd->mtd->ptr_u32CacheAddr[i]);
+						mbd->mtd->ptr_u32CacheAddr[i] = 0;
+					}
+				}
+			if(mbd->mtd->ptr_u32CacheAddr)
+			{
+				kfree((unsigned int*)mbd->mtd->ptr_u32CacheAddr);
+				mbd->mtd->ptr_u32CacheAddr = NULL;
+			}
+			mtdblk->cache_data=NULL;
+		}
+		if(mtdblk->cache_data)
+			vfree(mtdblk->cache_data);
+#if 0
+		if(mtdblk)
+			kfree(mtdblk);
+#endif
 	}
 
+	mutex_unlock(&mtdblks_lock);
+
 	pr_debug("ok\n");
+
+	//return 0;
 }
 
 static int mtdblock_flush(struct mtd_blktrans_dev *dev)
@@ -348,6 +659,7 @@ static void mtdblock_add_mtd(struct mtd_blktrans_ops *tr, struct mtd_info *mtd)
 	dev->mbd.devnum = mtd->index;
 
 	dev->mbd.size = mtd->size >> 9;
+	dev->mbd.blksize = 512;			//
 	dev->mbd.tr = tr;
 
 	if (!(mtd->flags & MTD_WRITEABLE))

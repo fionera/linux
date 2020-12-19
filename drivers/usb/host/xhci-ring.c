@@ -69,6 +69,17 @@
 #include "xhci.h"
 #include "xhci-trace.h"
 
+#include <linux/delay.h>	/* for udelay() */
+
+/*#define CONFIG_USB_XHCI_ALIGN_DEBUG*/
+/*#define USB_XHCI_DEBUG_TRB*/
+
+#ifdef USB_XHCI_DEBUG_TRB
+struct xhci_generic_trb fail_trb;
+unsigned int fail_trb_addr;
+#endif /* USB_XHCI_DEBUG_TRB */
+
+
 /*
  * Returns zero if the TRB isn't in this segment, otherwise it returns the DMA
  * address of the TRB.
@@ -275,6 +286,7 @@ void xhci_ring_cmd_db(struct xhci_hcd *xhci)
 		return;
 
 	xhci_dbg(xhci, "// Ding dong!\n");
+	wmb(); /* add by cfyeh */
 	writel(DB_VALUE_HOST, &xhci->dba->doorbell[0]);
 	/* Flush PCI posted writes */
 	readl(&xhci->dba->doorbell[0]);
@@ -344,8 +356,9 @@ static int xhci_abort_cmd_ring(struct xhci_hcd *xhci, unsigned long flags)
 {
 	u64 temp_64;
 	int ret;
+	int abort_retry = 0;
 
-	xhci_dbg(xhci, "Abort command ring\n");
+	xhci_warn(xhci, "Abort command ring\n");
 
 	reinit_completion(&xhci->cmd_ring_stop_completion);
 
@@ -363,19 +376,30 @@ static int xhci_abort_cmd_ring(struct xhci_hcd *xhci, unsigned long flags)
 	ret = xhci_handshake(&xhci->op_regs->cmd_ring,
 			CMD_RING_RUNNING, 0, 5 * 1000 * 1000);
 	if (ret < 0) {
-		/* we are about to kill xhci, give it one more chance */
-		xhci_write_64(xhci, temp_64 | CMD_RING_ABORT,
-			      &xhci->op_regs->cmd_ring);
-		udelay(1000);
-		ret = xhci_handshake(&xhci->op_regs->cmd_ring,
-				     CMD_RING_RUNNING, 0, 3 * 1000 * 1000);
+		for (abort_retry=0; abort_retry<10; abort_retry++) {
+			/* we are about to kill xhci, give it one more chance */
+			xhci_write_64(xhci, temp_64 | CMD_RING_ABORT,
+					&xhci->op_regs->cmd_ring);
+			udelay(1000);
+			ret = xhci_handshake(&xhci->op_regs->cmd_ring,
+						CMD_RING_RUNNING, 0, 3 * 1000 * 1000);
+			if (ret == 0)
+				return 0;
+		}
 		if (ret < 0) {
 			xhci_err(xhci, "Stopped the command ring failed, "
 				 "maybe the host is dead\n");
+			/* Do not halt HC here, that will make the
+			 * XHCI HC shutdown forever.
+			 */
+#if 0
 			xhci->xhc_state |= XHCI_STATE_DYING;
 			xhci_quiesce(xhci);
 			xhci_halt(xhci);
 			return -ESHUTDOWN;
+#else
+			return 0;
+#endif
 		}
 	}
 	/*
@@ -394,7 +418,6 @@ static int xhci_abort_cmd_ring(struct xhci_hcd *xhci, unsigned long flags)
 	} else {
 		xhci_handle_stopped_cmd_ring(xhci, xhci_next_queued_cmd(xhci));
 	}
-
 	return 0;
 }
 
@@ -416,6 +439,7 @@ void xhci_ring_ep_doorbell(struct xhci_hcd *xhci,
 	if ((ep_state & EP_HALT_PENDING) || (ep_state & SET_DEQ_PENDING) ||
 	    (ep_state & EP_HALTED))
 		return;
+	wmb(); /* add by cfyeh */
 	writel(DB_VALUE(ep_index, stream_id), db_addr);
 	/* The CPU has better things to do at this point than wait for a
 	 * write-posting flush.  It'll get there soon enough.
@@ -925,6 +949,31 @@ void xhci_stop_endpoint_command_watchdog(unsigned long arg)
 	}
 
 	xhci_warn(xhci, "xHCI host not responding to stop endpoint command.\n");
+#if 1
+	{
+	int slot_id = -1;
+	for (i = 0; i < MAX_HC_SLOTS; i++) {
+		if (!xhci->devs[i])
+			continue;
+		for (j = 0; j < 31; j++) {
+			if (&xhci->devs[i]->eps[j]==ep) {
+				slot_id = i;
+				break;
+			}
+		}
+	}
+
+	if (slot_id != -1) {
+		xhci_warn(xhci, "kill urbs from slot %d\n", slot_id);
+		for (j = 0; j < 31; j++)
+			xhci_kill_endpoint_urbs(xhci, slot_id, j);
+	}
+	spin_unlock_irqrestore(&xhci->lock, flags);
+	return;
+	}
+
+#endif
+
 	xhci_warn(xhci, "Assuming host is dying, halting host.\n");
 	/* Oops, HC is dead or dying or at least not responding to the stop
 	 * endpoint command.
@@ -1065,6 +1114,8 @@ static void xhci_handle_cmd_set_deq(struct xhci_hcd *xhci, int slot_id,
 			slot_state = GET_SLOT_STATE(slot_state);
 			xhci_dbg_trace(xhci, trace_xhci_dbg_cancel_urb,
 					"Slot state = %u, EP state = %u",
+					slot_state, ep_state);
+			xhci_warn(xhci, "Slot state = %u, EP state = %u",
 					slot_state, ep_state);
 			break;
 		case COMP_EBADSLT:
@@ -1295,14 +1346,15 @@ void xhci_handle_command_timeout(struct work_struct *work)
 	    (hw_ring_state & CMD_RING_RUNNING))  {
 		/* Prevent new doorbell, and start command abort */
 		xhci->cmd_ring_state = CMD_RING_STATE_ABORTED;
-		xhci_dbg(xhci, "Command timeout\n");
+		xhci_warn(xhci, "Command timeout\n");
 		ret = xhci_abort_cmd_ring(xhci, flags);
+		/* RTK: we hack xhci_abort_cmd_ring, so we never get -ESHUTDOWN */
 		if (unlikely(ret == -ESHUTDOWN)) {
 			xhci_err(xhci, "Abort command ring failed\n");
 			xhci_cleanup_command_queue(xhci);
 			spin_unlock_irqrestore(&xhci->lock, flags);
 			usb_hc_died(xhci_to_hcd(xhci)->primary_hcd);
-			xhci_dbg(xhci, "xHCI host controller is dead.\n");
+			xhci_warn(xhci, "xHCI host controller is dead.\n");
 
 			return;
 		}
@@ -1319,7 +1371,7 @@ void xhci_handle_command_timeout(struct work_struct *work)
 	}
 
 	/* command timeout on stopped ring, ring can't be aborted */
-	xhci_dbg(xhci, "Command timeout on stopped ring\n");
+	xhci_warn(xhci, "Command timeout on stopped ring\n");
 	xhci_handle_stopped_cmd_ring(xhci, xhci->current_cmd);
 
 time_out_completed:
@@ -1406,6 +1458,11 @@ static void handle_cmd_completion(struct xhci_hcd *xhci,
 	case TRB_ADDR_DEV:
 		break;
 	case TRB_STOP_RING:
+
+#ifdef USB_XHCI_DEBUG_TRB
+		pr_err("#@# %s(%d)\n", __func__, __LINE__);
+		pr_err("#@# %s(%d) trb 0x%.8x 0x%.8x 0x%.8x 0x%.8x 0x%.8x\n\n", __func__, __LINE__, fail_trb_addr, fail_trb.field[0], fail_trb.field[1], fail_trb.field[2], fail_trb.field[3]);
+#endif /* USB_XHCI_DEBUG_TRB */
 		WARN_ON(slot_id != TRB_TO_SLOT_ID(
 				le32_to_cpu(cmd_trb->generic.field[3])));
 		xhci_handle_cmd_stop_ep(xhci, slot_id, cmd_trb, event);
@@ -2661,6 +2718,10 @@ static int xhci_handle_event(struct xhci_hcd *xhci)
 	union xhci_trb *event;
 	int update_ptrs = 1;
 	int ret;
+	/* add by cfyeh */
+#ifdef USB_XHCI_DEBUG_TRB
+	struct xhci_generic_trb *trb;
+#endif /* USB_XHCI_DEBUG_TRB */
 
 	if (!xhci->event_ring || !xhci->event_ring->dequeue) {
 		xhci->error_bitmask |= 1 << 1;
@@ -2680,6 +2741,13 @@ static int xhci_handle_event(struct xhci_hcd *xhci)
 	 * speculative reads of the event's flags/data below.
 	 */
 	rmb();
+
+
+#ifdef USB_XHCI_DEBUG_TRB
+	trb = &event->generic;
+	pr_debug("#@# %s(%d) trb 0x%.8x 0x%.8x 0x%.8x 0x%.8x 0x%.8x\n\n", __func__, __LINE__, trb, trb->field[0], trb->field[1], trb->field[2], trb->field[3]);
+#endif /* USB_XHCI_DEBUG_TRB */
+
 	/* FIXME: Handle more event types. */
 	switch ((le32_to_cpu(event->event_cmd.flags) & TRB_TYPE_BITMASK)) {
 	case TRB_TYPE(TRB_COMPLETION):
@@ -2725,6 +2793,7 @@ static int xhci_handle_event(struct xhci_hcd *xhci)
 	return 1;
 }
 
+unsigned long xhci_irq_count = 0;
 /*
  * xHCI spec says we can get an interrupt, and if the HC has an error condition,
  * we might get bad data out of the event ring.  Section 4.10.2.7 has a list of
@@ -2741,13 +2810,16 @@ irqreturn_t xhci_irq(struct usb_hcd *hcd)
 	spin_lock(&xhci->lock);
 	/* Check if the xHC generated the interrupt, or the irq is shared */
 	status = readl(&xhci->op_regs->status);
-	if (status == 0xffffffff)
-		goto hw_died;
-
 	if (!(status & STS_EINT)) {
 		spin_unlock(&xhci->lock);
 		return IRQ_NONE;
 	}
+
+	xhci->irq_count++;
+
+	if (status == 0xffffffff)
+		goto hw_died;
+
 	if (status & STS_FATAL) {
 		xhci_warn(xhci, "WARNING: Host System Error\n");
 		xhci_halt(xhci);
@@ -2842,6 +2914,12 @@ static void queue_trb(struct xhci_hcd *xhci, struct xhci_ring *ring,
 	trb->field[1] = cpu_to_le32(field2);
 	trb->field[2] = cpu_to_le32(field3);
 	trb->field[3] = cpu_to_le32(field4);
+
+
+#ifdef USB_XHCI_DEBUG_TRB
+	pr_debug("#@# %s(%d) trb 0x%.8x 0x%.8x 0x%.8x 0x%.8x 0x%.8x\n", __func__, __LINE__, trb, trb->field[0], trb->field[1], trb->field[2], trb->field[3]);
+#endif /* USB_XHCI_DEBUG_TRB */
+
 	inc_enq(xhci, ring, more_trbs_coming);
 }
 
@@ -3038,6 +3116,13 @@ static void giveback_first_trb(struct xhci_hcd *xhci, int slot_id,
 		unsigned int ep_index, unsigned int stream_id, int start_cycle,
 		struct xhci_generic_trb *start_trb)
 {
+#ifdef USB_XHCI_DEBUG_TRB
+	struct xhci_generic_trb *trb;
+
+	memcpy(&fail_trb, start_trb, sizeof(struct xhci_generic_trb));
+	fail_trb_addr = start_trb;
+#endif /* USB_XHCI_DEBUG_TRB */
+
 	/*
 	 * Pass all the TRBs to the hardware at once and make sure this write
 	 * isn't reordered.
@@ -3047,6 +3132,14 @@ static void giveback_first_trb(struct xhci_hcd *xhci, int slot_id,
 		start_trb->field[3] |= cpu_to_le32(start_cycle);
 	else
 		start_trb->field[3] &= cpu_to_le32(~TRB_CYCLE);
+	wmb();
+
+
+#ifdef USB_XHCI_DEBUG_TRB
+	trb = start_trb;
+	pr_debug("#@# %s(%d) trb 0x%.8x 0x%.8x 0x%.8x 0x%.8x 0x%.8x\n\n", __func__, __LINE__, trb, trb->field[0], trb->field[1], trb->field[2], trb->field[3]);
+#endif /* USB_XHCI_DEBUG_TRB */
+
 	xhci_ring_ep_doorbell(xhci, slot_id, ep_index, stream_id);
 }
 
@@ -3262,6 +3355,21 @@ static int queue_bulk_sg_tx(struct xhci_hcd *xhci, gfp_t mem_flags,
 			more_trbs_coming = true;
 		else
 			more_trbs_coming = false;
+
+		/* add by cfyeh */
+#ifdef CONFIG_USB_XHCI_ALIGN_DEBUG
+		/*
+		 * check alignment
+		 * 1. trb_buff_len >= 1k, but addr not align 0x10
+		 * 2. trb_buff_len < 1k, but trb_buff cross 1k
+		 */
+		if (!usb_urb_dir_in(urb))
+		if (((trb_buff_len >= 0x400) && (addr % 0x400)) ||
+				((trb_buff_len < 0x400) &&
+				((trb_buff_len + (addr % 0x400)) > 0x400)))
+			pr_debug("#@# %s(%d) %s trb_buff_len 0x%x @ 0x%llx\n", __func__, __LINE__, usb_urb_dir_in(urb) ? "in" : "out", trb_buff_len, addr);
+#endif /* CONFIG_USB_XHCI_ALIGN_DEBUG */
+
 		queue_trb(xhci, ep_ring, more_trbs_coming,
 				lower_32_bits(addr),
 				upper_32_bits(addr),
@@ -3430,6 +3538,21 @@ int xhci_queue_bulk_tx(struct xhci_hcd *xhci, gfp_t mem_flags,
 			more_trbs_coming = true;
 		else
 			more_trbs_coming = false;
+
+		/* add by cfyeh */
+#ifdef CONFIG_USB_XHCI_ALIGN_DEBUG
+		/*
+		 * check alignment
+		 * 1. trb_buff_len >= 1k, but addr not align 0x10
+		 * 2. trb_buff_len < 1k, but trb_buff cross 1k
+		 */
+		if (!usb_urb_dir_in(urb))
+		if (((trb_buff_len >= 0x400) && (addr % 0x400)) ||
+				((trb_buff_len < 0x400) &&
+				((trb_buff_len + (addr % 0x400)) > 0x400)))
+			pr_debug("#@# %s(%d) %s trb_buff_len 0x%x @ 0x%llx\n", __func__, __LINE__, usb_urb_dir_in(urb) ? "in" : "out", trb_buff_len, addr);
+#endif /* CONFIG_USB_XHCI_ALIGN_DEBUG */
+
 		queue_trb(xhci, ep_ring, more_trbs_coming,
 				lower_32_bits(addr),
 				upper_32_bits(addr),
@@ -3546,6 +3669,21 @@ int xhci_queue_ctrl_tx(struct xhci_hcd *xhci, gfp_t mem_flags,
 	if (urb->transfer_buffer_length > 0) {
 		if (setup->bRequestType & USB_DIR_IN)
 			field |= TRB_DIR_IN;
+
+		/* add by cfyeh */
+#ifdef CONFIG_USB_XHCI_ALIGN_DEBUG
+		/*
+		 * check alignment
+		 * 1. trb_buff_len >= 1k, but addr not align 0x10
+		 * 2. trb_buff_len < 1k, but trb_buff cross 1k
+		 */
+		if (!usb_urb_dir_in(urb))
+		if (((urb->transfer_buffer_length >= 0x400) && (urb->transfer_dma % 0x400)) ||
+				((urb->transfer_buffer_length < 0x400) &&
+				((urb->transfer_buffer_length + (urb->transfer_dma % 0x400)) > 0x400)))
+			pr_debug("#@# %s(%d) %s trb_buff_len 0x%x @ 0x%llx\n", __func__, __LINE__, usb_urb_dir_in(urb) ? "in" : "out", urb->transfer_buffer_length, urb->transfer_dma);
+#endif /* CONFIG_USB_XHCI_ALIGN_DEBUG */
+
 		queue_trb(xhci, ep_ring, true,
 				lower_32_bits(urb->transfer_dma),
 				upper_32_bits(urb->transfer_dma),
@@ -3880,6 +4018,20 @@ static int xhci_queue_isoc_tx(struct xhci_hcd *xhci, gfp_t mem_flags,
 				TRB_TD_SIZE(remainder) |
 				TRB_INTR_TARGET(0);
 
+			/* add by cfyeh */
+#ifdef CONFIG_USB_XHCI_ALIGN_DEBUG
+			/*
+			 * check alignment
+			 * 1. trb_buff_len >= 1k, but addr not align 0x10
+			 * 2. trb_buff_len < 1k, but trb_buff cross 1k
+			 */
+			if (!usb_urb_dir_in(urb))
+			if (((trb_buff_len >= 0x400) && (addr % 0x400)) ||
+					((trb_buff_len < 0x400) &&
+					((trb_buff_len + (addr % 0x400)) > 0x400)))
+				pr_debug("#@# %s(%d) %s trb_buff_len 0x%x @ 0x%llx\n", __func__, __LINE__, usb_urb_dir_in(urb) ? "in" : "out", trb_buff_len, addr);
+#endif /* CONFIG_USB_XHCI_ALIGN_DEBUG */
+
 			queue_trb(xhci, ep_ring, more_trbs_coming,
 				lower_32_bits(addr),
 				upper_32_bits(addr),
@@ -4152,6 +4304,12 @@ int xhci_queue_evaluate_context(struct xhci_hcd *xhci, struct xhci_command *cmd,
 int xhci_queue_stop_endpoint(struct xhci_hcd *xhci, struct xhci_command *cmd,
 			     int slot_id, unsigned int ep_index, int suspend)
 {
+
+#ifdef USB_XHCI_DEBUG_TRB
+	pr_err("#@# %s(%d)\n", __func__, __LINE__);
+	pr_err("#@# %s(%d) trb 0x%.8x 0x%.8x 0x%.8x 0x%.8x 0x%.8x\n\n", __func__, __LINE__, fail_trb_addr, fail_trb.field[0], fail_trb.field[1], fail_trb.field[2], fail_trb.field[3]);
+#endif /* USB_XHCI_DEBUG_TRB */
+
 	u32 trb_slot_id = SLOT_ID_FOR_TRB(slot_id);
 	u32 trb_ep_index = EP_ID_FOR_TRB(ep_index);
 	u32 type = TRB_TYPE(TRB_STOP_RING);

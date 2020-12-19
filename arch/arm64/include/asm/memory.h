@@ -53,10 +53,12 @@
 #define PAGE_OFFSET		(UL(0xffffffffffffffff) << (VA_BITS - 1))
 #define MODULES_END		(PAGE_OFFSET)
 #define MODULES_VADDR		(MODULES_END - SZ_64M)
-#define PCI_IO_END		(MODULES_VADDR - SZ_2M)
-#define PCI_IO_START		(PCI_IO_END - PCI_IO_SIZE)
-#define FIXADDR_TOP		(PCI_IO_START - SZ_2M)
-#define TASK_SIZE_64		(UL(1) << VA_BITS)
+
+#define EARLYCON_IOBASE  	(MODULES_VADDR - SZ_4M)
+#define PCI_IO_END              (MODULES_VADDR - SZ_8M)
+#define PCI_IO_START            (PCI_IO_END - PCI_IO_SIZE)
+#define FIXADDR_TOP             (PCI_IO_START - SZ_2M)
+#define TASK_SIZE_64            (UL(1) << VA_BITS)
 
 #ifdef CONFIG_COMPAT
 #define TASK_SIZE_32		UL(0x100000000)
@@ -69,6 +71,13 @@
 #endif /* CONFIG_COMPAT */
 
 #define TASK_UNMAPPED_BASE	(PAGE_ALIGN(TASK_SIZE / 4))
+
+#define KERNEL_START      _text
+#ifdef CONFIG_EKP_ROMEMPOOL
+#define KERNEL_END        __static_pgtab_end
+#else
+#define KERNEL_END        _end
+#endif
 
 /*
  * Physical vs virtual RAM address space conversion.  These are

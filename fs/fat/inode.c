@@ -305,6 +305,7 @@ static const struct address_space_operations fat_aops = {
 	.write_begin	= fat_write_begin,
 	.write_end	= fat_write_end,
 	.direct_IO	= fat_direct_IO,
+	.migratepage	= buffer_migrate_page,
 	.bmap		= _fat_bmap
 };
 
@@ -738,6 +739,9 @@ static int fat_statfs(struct dentry *dentry, struct kstatfs *buf)
 
 	return 0;
 }
+#ifdef CONFIG_FAT_LOW_FREQUENCY_FOR_ERR_MSG
+static unsigned int count_inode_io_err = 0;
+#endif
 
 static int __fat_write_inode(struct inode *inode, int wait)
 {
@@ -760,8 +764,17 @@ retry:
 	fat_get_blknr_offset(sbi, i_pos, &blocknr, &offset);
 	bh = sb_bread(sb, blocknr);
 	if (!bh) {
+#ifdef CONFIG_FAT_LOW_FREQUENCY_FOR_ERR_MSG
+		count_inode_io_err++;
+		if (count_inode_io_err > 300)
+			count_inode_io_err = 0;
+		if (count_inode_io_err < 5)
+			fat_msg(sb, KERN_ERR, "unable to read inode block "
+				"for updating (i_pos %lld)", i_pos);
+#else
 		fat_msg(sb, KERN_ERR, "unable to read inode block "
-		       "for updating (i_pos %lld)", i_pos);
+				"for updating (i_pos %lld)", i_pos);
+#endif
 		return -EIO;
 	}
 	spin_lock(&sbi->inode_hash_lock);
@@ -793,6 +806,9 @@ retry:
 	if (wait)
 		err = sync_dirty_buffer(bh);
 	brelse(bh);
+#ifdef CONFIG_FAT_LOW_FREQUENCY_FOR_ERR_MSG
+	count_inode_io_err = 0;
+#endif
 	return err;
 }
 

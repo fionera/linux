@@ -92,10 +92,13 @@ static int fat12_ent_bread(struct super_block *sb, struct fat_entry *fatent,
 err_brelse:
 	brelse(bhs[0]);
 err:
-	fat_msg(sb, KERN_ERR, "FAT read failed (blocknr %llu)", (llu)blocknr);
+	fat_msg(sb, KERN_ERR, "FAT12 read failed (blocknr %llu)", (llu)blocknr);
 	return -EIO;
 }
 
+#ifdef CONFIG_FAT_LOW_FREQUENCY_FOR_ERR_MSG
+static unsigned int count_fat_read_fail = 0;
+#endif
 static int fat_ent_bread(struct super_block *sb, struct fat_entry *fatent,
 			 int offset, sector_t blocknr)
 {
@@ -105,12 +108,24 @@ static int fat_ent_bread(struct super_block *sb, struct fat_entry *fatent,
 	fatent->fat_inode = MSDOS_SB(sb)->fat_inode;
 	fatent->bhs[0] = sb_bread(sb, blocknr);
 	if (!fatent->bhs[0]) {
+#ifdef CONFIG_FAT_LOW_FREQUENCY_FOR_ERR_MSG
+		count_fat_read_fail++;
+		if (count_fat_read_fail > 300)
+			count_fat_read_fail = 0;
+		if (count_fat_read_fail < 5)
+			fat_msg(sb, KERN_ERR, "FAT read failed (blocknr %llu)",
+				(llu)blocknr);
+#else
 		fat_msg(sb, KERN_ERR, "FAT read failed (blocknr %llu)",
-		       (llu)blocknr);
+			(llu)blocknr);
+#endif
 		return -EIO;
 	}
 	fatent->nr_bhs = 1;
 	ops->ent_set_ptr(fatent, offset);
+#ifdef CONFIG_FAT_LOW_FREQUENCY_FOR_ERR_MSG
+	count_fat_read_fail = 0;
+#endif
 	return 0;
 }
 

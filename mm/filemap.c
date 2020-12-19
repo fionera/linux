@@ -34,6 +34,8 @@
 #include <linux/memcontrol.h>
 #include <linux/cleancache.h>
 #include <linux/rmap.h>
+#include <linux/delayacct.h>
+#include <linux/psi.h>
 #include "internal.h"
 
 #define CREATE_TRACE_POINTS
@@ -100,7 +102,7 @@
  *    ->tree_lock		(page_remove_rmap->set_page_dirty)
  *    bdi.wb->list_lock		(page_remove_rmap->set_page_dirty)
  *    ->inode->i_lock		(page_remove_rmap->set_page_dirty)
- *    ->memcg->move_lock	(page_remove_rmap->mem_cgroup_begin_page_stat)
+ *    ->memcg->move_lock	(page_remove_rmap->lock_page_memcg)
  *    bdi.wb->list_lock		(zap_pte_range->set_page_dirty)
  *    ->inode->i_lock		(zap_pte_range->set_page_dirty)
  *    ->private_lock		(zap_pte_range->__set_page_dirty_buffers)
@@ -226,10 +228,9 @@ static void page_cache_tree_delete(struct address_space *mapping,
  * Delete a page from the page cache and free it. Caller has to make
  * sure the page is locked and that nobody else uses it - or that usage
  * is safe.  The caller must hold the mapping's tree_lock and
- * mem_cgroup_begin_page_stat().
+ * lock_page_memcg().
  */
-void __delete_from_page_cache(struct page *page, void *shadow,
-			      struct mem_cgroup *memcg)
+void __delete_from_page_cache(struct page *page, void *shadow)
 {
 	struct address_space *mapping = page->mapping;
 
@@ -265,8 +266,7 @@ void __delete_from_page_cache(struct page *page, void *shadow,
 	 * anyway will be cleared before returning page into buddy allocator.
 	 */
 	if (WARN_ON_ONCE(PageDirty(page)))
-		account_page_cleaned(page, mapping, memcg,
-				     inode_to_wb(mapping->host));
+		account_page_cleaned(page, mapping, inode_to_wb(mapping->host));
 }
 
 /**
@@ -280,7 +280,6 @@ void __delete_from_page_cache(struct page *page, void *shadow,
 void delete_from_page_cache(struct page *page)
 {
 	struct address_space *mapping = page->mapping;
-	struct mem_cgroup *memcg;
 	unsigned long flags;
 
 	void (*freepage)(struct page *);
@@ -289,11 +288,11 @@ void delete_from_page_cache(struct page *page)
 
 	freepage = mapping->a_ops->freepage;
 
-	memcg = mem_cgroup_begin_page_stat(page);
+	lock_page_memcg(page);
 	spin_lock_irqsave(&mapping->tree_lock, flags);
-	__delete_from_page_cache(page, NULL, memcg);
+	__delete_from_page_cache(page, NULL);
 	spin_unlock_irqrestore(&mapping->tree_lock, flags);
-	mem_cgroup_end_page_stat(memcg);
+	unlock_page_memcg(page);
 
 	if (freepage)
 		freepage(page);
@@ -575,7 +574,6 @@ int replace_page_cache_page(struct page *old, struct page *new, gfp_t gfp_mask)
 	if (!error) {
 		struct address_space *mapping = old->mapping;
 		void (*freepage)(struct page *);
-		struct mem_cgroup *memcg;
 		unsigned long flags;
 
 		pgoff_t offset = old->index;
@@ -585,9 +583,9 @@ int replace_page_cache_page(struct page *old, struct page *new, gfp_t gfp_mask)
 		new->mapping = mapping;
 		new->index = offset;
 
-		memcg = mem_cgroup_begin_page_stat(old);
+		lock_page_memcg(old);
 		spin_lock_irqsave(&mapping->tree_lock, flags);
-		__delete_from_page_cache(old, NULL, memcg);
+		__delete_from_page_cache(old, NULL);
 		error = page_cache_tree_insert(mapping, new, NULL);
 		BUG_ON(error);
 
@@ -599,8 +597,8 @@ int replace_page_cache_page(struct page *old, struct page *new, gfp_t gfp_mask)
 		if (PageSwapBacked(new))
 			__inc_zone_page_state(new, NR_SHMEM);
 		spin_unlock_irqrestore(&mapping->tree_lock, flags);
-		mem_cgroup_end_page_stat(memcg);
-		mem_cgroup_replace_page(old, new);
+		unlock_page_memcg(old);
+		mem_cgroup_migrate(old, new);
 		radix_tree_preload_end();
 		if (freepage)
 			freepage(old);
@@ -699,12 +697,13 @@ int add_to_page_cache_lru(struct page *page, struct address_space *mapping,
 		 * The page might have been evicted from cache only
 		 * recently, in which case it should be activated like
 		 * any other repeatedly accessed page.
+		 * The exception is pages getting rewritten; evicting other
+		 * data from the working set, only to cache data that will
+		 * get overwritten with something else, is a waste of memory.
 		 */
-		if (shadow && workingset_refault(shadow)) {
-			SetPageActive(page);
-			workingset_activation(page);
-		} else
-			ClearPageActive(page);
+		WARN_ON_ONCE(PageActive(page));
+		if (!(gfp_mask & __GFP_WRITE) && shadow)
+			workingset_refault(page, shadow);
 		lru_cache_add(page);
 	}
 	return ret;
@@ -750,37 +749,94 @@ wait_queue_head_t *page_waitqueue(struct page *page)
 }
 EXPORT_SYMBOL(page_waitqueue);
 
+static bool wait_on_thrashing_page(struct page *page, int bit_nr)
+{
+	if (bit_nr != PG_locked)
+		return false;
+	if (!test_bit(bit_nr, &page->flags))
+		return false;
+	if (PageUptodate(page))
+		return false;
+	if (!PageWorkingset(page))
+		return false;
+	return true;
+}
+
 void wait_on_page_bit(struct page *page, int bit_nr)
 {
 	DEFINE_WAIT_BIT(wait, &page->flags, bit_nr);
+	bool thrashing;
+	unsigned long pflags;
 
-	if (test_bit(bit_nr, &page->flags))
+	if (test_bit(bit_nr, &page->flags)) {
+		thrashing = wait_on_thrashing_page(page, bit_nr);
+		if (thrashing) {
+			if (!PageSwapBacked(page))
+				delayacct_thrashing_start();
+			psi_memstall_enter(&pflags);
+		}
 		__wait_on_bit(page_waitqueue(page), &wait, bit_wait_io,
 							TASK_UNINTERRUPTIBLE);
+		if (thrashing) {
+			if (!PageSwapBacked(page))
+				delayacct_thrashing_end();
+			psi_memstall_leave(&pflags);
+		}
+	}
 }
 EXPORT_SYMBOL(wait_on_page_bit);
 
 int wait_on_page_bit_killable(struct page *page, int bit_nr)
 {
 	DEFINE_WAIT_BIT(wait, &page->flags, bit_nr);
+	int ret;
+	bool thrashing;
+	unsigned long pflags;
 
 	if (!test_bit(bit_nr, &page->flags))
 		return 0;
 
-	return __wait_on_bit(page_waitqueue(page), &wait,
+	thrashing = wait_on_thrashing_page(page, bit_nr);
+	if (thrashing) {
+		if (!PageSwapBacked(page))
+			delayacct_thrashing_start();
+		psi_memstall_enter(&pflags);
+	}
+	ret = __wait_on_bit(page_waitqueue(page), &wait,
 			     bit_wait_io, TASK_KILLABLE);
+	if (thrashing) {
+		if (!PageSwapBacked(page))
+			delayacct_thrashing_end();
+		psi_memstall_leave(&pflags);
+	}
+	return ret;
 }
 
 int wait_on_page_bit_killable_timeout(struct page *page,
 				       int bit_nr, unsigned long timeout)
 {
 	DEFINE_WAIT_BIT(wait, &page->flags, bit_nr);
+	int ret;
+	bool thrashing;
+	unsigned long pflags;
 
 	wait.key.timeout = jiffies + timeout;
 	if (!test_bit(bit_nr, &page->flags))
 		return 0;
-	return __wait_on_bit(page_waitqueue(page), &wait,
+	thrashing = wait_on_thrashing_page(page, bit_nr);
+	if (thrashing) {
+		if (!PageSwapBacked(page))
+			delayacct_thrashing_start();
+		psi_memstall_enter(&pflags);
+	}
+	ret = __wait_on_bit(page_waitqueue(page), &wait,
 			     bit_wait_io_timeout, TASK_KILLABLE);
+	if (thrashing) {
+		if (!PageSwapBacked(page))
+			delayacct_thrashing_end();
+		psi_memstall_leave(&pflags);
+	}
+	return ret;
 }
 EXPORT_SYMBOL_GPL(wait_on_page_bit_killable_timeout);
 
@@ -884,18 +940,47 @@ EXPORT_SYMBOL_GPL(page_endio);
 void __lock_page(struct page *page)
 {
 	DEFINE_WAIT_BIT(wait, &page->flags, PG_locked);
+	bool thrashing;
+	unsigned long pflags;
 
+	thrashing = wait_on_thrashing_page(page, PG_locked);
+	if (thrashing) {
+		if (!PageSwapBacked(page))
+			delayacct_thrashing_start();
+		psi_memstall_enter(&pflags);
+	}
 	__wait_on_bit_lock(page_waitqueue(page), &wait, bit_wait_io,
 							TASK_UNINTERRUPTIBLE);
+	if (thrashing) {
+		if (!PageSwapBacked(page))
+			delayacct_thrashing_end();
+		psi_memstall_leave(&pflags);
+	}
 }
 EXPORT_SYMBOL(__lock_page);
 
 int __lock_page_killable(struct page *page)
 {
 	DEFINE_WAIT_BIT(wait, &page->flags, PG_locked);
+	int ret;
+	bool thrashing;
+	unsigned long pflags;
 
-	return __wait_on_bit_lock(page_waitqueue(page), &wait,
+	thrashing = wait_on_thrashing_page(page, PG_locked);
+	if (thrashing) {
+		if (!PageSwapBacked(page))
+			delayacct_thrashing_start();
+		psi_memstall_enter(&pflags);
+	}
+	ret = __wait_on_bit_lock(page_waitqueue(page), &wait,
 					bit_wait_io, TASK_KILLABLE);
+	if (thrashing) {
+		if (!PageSwapBacked(page))
+			delayacct_thrashing_end();
+		psi_memstall_leave(&pflags);
+	}
+
+	return ret;
 }
 EXPORT_SYMBOL_GPL(__lock_page_killable);
 
@@ -1774,15 +1859,16 @@ generic_file_read_iter(struct kiocb *iocb, struct iov_iter *iter)
 	ssize_t retval = 0;
 	loff_t *ppos = &iocb->ki_pos;
 	loff_t pos = *ppos;
+	size_t count = iov_iter_count(iter);
+
+	if (!count)
+		goto out; /* skip atime */
 
 	if (iocb->ki_flags & IOCB_DIRECT) {
 		struct address_space *mapping = file->f_mapping;
 		struct inode *inode = mapping->host;
-		size_t count = iov_iter_count(iter);
 		loff_t size;
 
-		if (!count)
-			goto out; /* skip atime */
 		size = i_size_read(inode);
 		retval = filemap_write_and_wait_range(mapping, pos,
 					pos + count - 1);

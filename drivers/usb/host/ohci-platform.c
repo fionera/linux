@@ -35,6 +35,10 @@
 #define OHCI_MAX_CLKS 3
 #define hcd_to_ohci_priv(h) ((struct ohci_platform_priv *)hcd_to_ohci(h)->priv)
 
+#if (1)   /* RTK self defined usb2_platform ops */
+static struct rtk_ehci_platform_driver *rtk_ehci_platform;
+#endif
+
 struct ohci_platform_priv {
 	struct clk *clks[OHCI_MAX_CLKS];
 	struct reset_control *rst;
@@ -44,7 +48,7 @@ struct ohci_platform_priv {
 
 static const char hcd_name[] = "ohci-platform";
 
-static int ohci_platform_power_on(struct platform_device *dev)
+static int  __maybe_unused ohci_platform_power_on(struct platform_device *dev)
 {
 	struct usb_hcd *hcd = platform_get_drvdata(dev);
 	struct ohci_platform_priv *priv = hcd_to_ohci_priv(hcd);
@@ -81,7 +85,22 @@ err_disable_clks:
 	return ret;
 }
 
-static void ohci_platform_power_off(struct platform_device *dev)
+static int rtk_ohci_platform_power_on(struct platform_device *dev)
+{
+	rtk_ehci_platform = get_rtk_ehci_platform_driver();
+	if (!rtk_ehci_platform)
+		return -ENODEV;
+
+	if (rtk_ehci_platform->usb_on) {
+		rtk_ehci_platform->usb_on();
+	} else {
+		rtk_put_ehci_platform(rtk_ehci_platform);
+		return -ENODEV;
+	}
+	return 0;
+}
+
+static void __maybe_unused ohci_platform_power_off(struct platform_device *dev)
 {
 	struct usb_hcd *hcd = platform_get_drvdata(dev);
 	struct ohci_platform_priv *priv = hcd_to_ohci_priv(hcd);
@@ -97,17 +116,32 @@ static void ohci_platform_power_off(struct platform_device *dev)
 			clk_disable_unprepare(priv->clks[clk]);
 }
 
+static void rtk_ohci_platform_power_off(struct platform_device *dev)
+{
+    rtk_put_ehci_platform(rtk_ehci_platform);
+}
+
 static struct hc_driver __read_mostly ohci_platform_hc_driver;
 
+#ifdef CONFIG_USER_INITCALL_USB
+static const struct ohci_driver_overrides platform_overrides = {
+#else
 static const struct ohci_driver_overrides platform_overrides __initconst = {
+#endif
 	.product_desc =		"Generic Platform OHCI controller",
 	.extra_priv_size =	sizeof(struct ohci_platform_priv),
 };
 
 static struct usb_ohci_pdata ohci_platform_defaults = {
+#if 1 /* We use rtk self-defined power on/off seuqeunce */
+	.power_on      = rtk_ohci_platform_power_on,
+	.power_suspend = rtk_ohci_platform_power_off,
+	.power_off     = rtk_ohci_platform_power_off,
+#else
 	.power_on =		ohci_platform_power_on,
 	.power_suspend =	ohci_platform_power_off,
 	.power_off =		ohci_platform_power_off,
+#endif
 };
 
 static int ohci_platform_probe(struct platform_device *dev)
@@ -339,14 +373,16 @@ static int ohci_platform_resume(struct device *dev)
 	}
 
 	ohci_resume(hcd, false);
+
 	return 0;
 }
+
 #endif /* CONFIG_PM_SLEEP */
 
+static int ohci_top_index = 0;
 static const struct of_device_id ohci_platform_ids[] = {
-	{ .compatible = "generic-ohci", },
-	{ .compatible = "cavium,octeon-6335-ohci", },
-	{ }
+	{ .compatible = "rtk,ohci-top", .data = &ohci_top_index },
+	{}
 };
 MODULE_DEVICE_TABLE(of, ohci_platform_ids);
 
@@ -371,7 +407,11 @@ static struct platform_driver ohci_platform_driver = {
 	}
 };
 
+#ifdef CONFIG_USER_INITCALL_USB
+static int ohci_platform_init(void)
+#else
 static int __init ohci_platform_init(void)
+#endif
 {
 	if (usb_disabled())
 		return -ENODEV;
@@ -381,7 +421,11 @@ static int __init ohci_platform_init(void)
 	ohci_init_driver(&ohci_platform_hc_driver, &platform_overrides);
 	return platform_driver_register(&ohci_platform_driver);
 }
+#if defined(CONFIG_USER_INITCALL_USB) && !defined(MODULE)
+user_initcall_grp("USB", ohci_platform_init);
+#else
 module_init(ohci_platform_init);
+#endif
 
 static void __exit ohci_platform_cleanup(void)
 {

@@ -33,6 +33,9 @@
 #else
 #define CMA_SIZE_MBYTES 0
 #endif
+#ifdef CONFIG_CMA_TRACK_USE_PAGE_OWNER
+#include <linux/page_owner.h>
+#endif
 
 struct cma *dma_contiguous_default_area;
 
@@ -176,6 +179,18 @@ int __init dma_contiguous_reserve_area(phys_addr_t size, phys_addr_t base,
 	return 0;
 }
 
+int __init dma_declare_null(struct device *dev)
+{
+	struct cma *cma;
+	int ret;
+
+	ret = cma_declare_null(&cma);
+	if (ret == 0)
+		dev_set_cma_area(dev, cma);
+
+	return ret;
+}
+
 /**
  * dma_alloc_from_contiguous() - allocate pages from contiguous area
  * @dev:   Pointer to device for which the allocation is performed.
@@ -190,11 +205,68 @@ int __init dma_contiguous_reserve_area(phys_addr_t size, phys_addr_t base,
 struct page *dma_alloc_from_contiguous(struct device *dev, size_t count,
 				       unsigned int align)
 {
+	struct page *page = NULL;
+
 	if (align > CONFIG_CMA_ALIGNMENT)
 		align = CONFIG_CMA_ALIGNMENT;
 
-	return cma_alloc(dev_get_cma_area(dev), count, align);
+	page = cma_alloc(dev_get_cma_area(dev), count, align);
+
+#ifdef CONFIG_CMA_TRACK_USE_PAGE_OWNER
+	if (page) {
+		gfp_t gfp_mask;
+		gfp_mask = __GFP_MOVABLE;
+		page_owner_alloc_pages(page, count, gfp_mask);
+	}
+#endif
+
+	return page;
 }
+
+struct page *dma_bitmap_alloc_from_contiguous(struct device *dev, size_t count,
+				       unsigned int align)
+{
+	struct page *page = NULL;
+
+	if (align > CONFIG_CMA_ALIGNMENT)
+		align = CONFIG_CMA_ALIGNMENT;
+
+	page = cma_bitmap_alloc(dev_get_cma_area(dev), count, align);
+
+#ifdef CONFIG_CMA_TRACK_USE_PAGE_OWNER
+	if (page) {
+		gfp_t gfp_mask;
+		gfp_mask = __GFP_MOVABLE;
+		page_owner_alloc_pages(page, count, gfp_mask);
+	}
+#endif
+
+	return page;
+}
+void dma_show_bitmap(struct device *dev)
+{
+	cma_show_bitmap(dev_get_cma_area(dev));
+}
+
+#ifdef CONFIG_OPTEE_SUPPORT_MC_ALLOCATOR
+int dma_migrate_range(struct device *dev, unsigned long pa_start,
+				       unsigned long size)
+{
+	unsigned long pfn = pa_start >> PAGE_SHIFT;
+	size_t count = size >> PAGE_SHIFT;
+
+	return cma_migrate_range(dev_get_cma_area(dev), pfn, count);
+}
+
+bool dma_release_range(struct device *dev, unsigned long pa_start,
+				 unsigned long size)
+{
+	unsigned long pfn = pa_start >> PAGE_SHIFT;
+	size_t count = size >> PAGE_SHIFT;
+
+	return cma_release_range(dev_get_cma_area(dev), pfn, count);
+}
+#endif
 
 /**
  * dma_release_from_contiguous() - release allocated pages
@@ -210,6 +282,51 @@ bool dma_release_from_contiguous(struct device *dev, struct page *pages,
 				 int count)
 {
 	return cma_release(dev_get_cma_area(dev), pages, count);
+}
+
+bool dma_bitmap_release_from_contiguous(struct device *dev, struct page *pages,
+				 int count)
+{
+	return cma_bitmap_release(dev_get_cma_area(dev), pages, count);
+}
+
+#ifdef CONFIG_CMA_RTK_ALLOCATOR
+void *dma_get_allocator(struct device *dev)
+{
+	struct cma *cma = dev_get_cma_area(dev);
+
+	if (!cma)
+		return 0;
+	else
+		return (void *)cma_get_bitmap(cma);
+}
+#endif
+
+bool in_cma_range(struct device *dev, unsigned long pfn)
+{
+	struct cma *cma = dev_get_cma_area(dev);
+
+	if (!cma)
+		return false;
+	else {
+		unsigned long cma_base_pfn = cma_get_base(cma) >> PAGE_SHIFT;
+		unsigned long cma_count = cma_get_size(cma) >> PAGE_SHIFT;
+
+		if ((pfn >= cma_base_pfn) && (pfn < (cma_base_pfn + cma_count)))
+			return true;
+		else
+			return false;
+	}
+}
+
+unsigned long cma_get_avail_size(struct device *dev)
+{
+	struct cma *cma = dev_get_cma_area(dev);
+
+	if (!cma)
+		return 0;
+	else
+		return cma_avail_size(cma);
 }
 
 /*

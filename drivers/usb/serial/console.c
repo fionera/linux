@@ -196,6 +196,53 @@ static int usb_console_setup(struct console *co, char *options)
 	return retval;
 }
 
+void usb_rtice_disable_printk(void)
+{
+	static struct usbcons_info *info = &usbcons_info;
+	struct usb_serial_port *usp = info->port;
+	unsigned long flags;
+	usp->disable_printk = 1;
+
+	spin_lock_irqsave(&usp->lock, flags);
+	kfifo_reset(&usp->write_fifo);
+	spin_unlock_irqrestore(&usp->lock, flags);
+}
+
+void usb_rtice_enable_printk(void)
+{
+	static struct usbcons_info *info = &usbcons_info;
+	struct usb_serial_port *usp = info->port;
+	usp->disable_printk = 0;
+}
+
+void usb_rtice_console_write(const char *buf, unsigned count)
+{
+	static struct usbcons_info *info = &usbcons_info;
+	struct usb_serial_port *port = info->port;
+	struct usb_serial *serial;
+	int retval = -ENODEV;
+
+	if (!port || port->serial->dev->state == USB_STATE_NOTATTACHED)
+		return;
+
+	serial = port->serial;
+
+	if (count == 0)
+		return;
+
+	pr_debug("%s - port %d, %d byte(s)\n", __func__, port->port_number, count);
+
+	if (!port->port.console) {
+		pr_debug("%s - port not opened\n", __func__);
+		return;
+	}
+
+    if (serial->type->write)
+        retval = serial->type->write(NULL, port, buf, count);
+    else
+        retval = usb_serial_generic_write(NULL, port, buf, count);
+}
+
 static void usb_console_write(struct console *co,
 					const char *buf, unsigned count)
 {
@@ -204,6 +251,8 @@ static void usb_console_write(struct console *co,
 	struct usb_serial *serial;
 	int retval = -ENODEV;
 
+	if(port->disable_printk == 1)
+		return;
 	if (!port || port->serial->dev->state == USB_STATE_NOTATTACHED)
 		return;
 	serial = port->serial;

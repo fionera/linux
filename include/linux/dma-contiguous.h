@@ -86,6 +86,8 @@ int __init dma_contiguous_reserve_area(phys_addr_t size, phys_addr_t base,
 				       phys_addr_t limit, struct cma **res_cma,
 				       bool fixed);
 
+int __init dma_declare_null(struct device *dev);
+
 /**
  * dma_declare_contiguous() - reserve area for contiguous memory handling
  *			      for particular device
@@ -108,14 +110,43 @@ static inline int dma_declare_contiguous(struct device *dev, phys_addr_t size,
 	if (ret == 0)
 		dev_set_cma_area(dev, cma);
 
+#ifdef CONFIG_CMA_RTK_ALLOCATOR
+	if (dev == NULL && dma_contiguous_default_area == NULL)
+		dma_contiguous_set_default(cma);
+	else if (dev == NULL)
+		BUG();
+#endif
+
 	return ret;
 }
 
 struct page *dma_alloc_from_contiguous(struct device *dev, size_t count,
 				       unsigned int order);
+
+
+struct page *dma_bitmap_alloc_from_contiguous(struct device *dev, size_t count,
+				       unsigned int order);
+
+void dma_show_bitmap(struct device *dev);
+
+#ifdef CONFIG_OPTEE_SUPPORT_MC_ALLOCATOR
+int dma_migrate_range(struct device *dev, unsigned long pa_start,
+				       unsigned long size);
+
+bool dma_release_range(struct device *dev, unsigned long pa_start,
+				 unsigned long size);
+#endif
+
 bool dma_release_from_contiguous(struct device *dev, struct page *pages,
 				 int count);
 
+bool dma_bitmap_release_from_contiguous(struct device *dev, struct page *pages,
+				 int count);
+
+bool in_cma_range(struct device *dev, unsigned long pfn);
+unsigned long cma_get_avail_size(struct device *dev);
+
+void dev_bind_cma_area(struct device *dev, char *name);
 #else
 
 static inline struct cma *dev_get_cma_area(struct device *dev)
@@ -151,12 +182,49 @@ struct page *dma_alloc_from_contiguous(struct device *dev, size_t count,
 }
 
 static inline
+struct page *dma_bitmap_alloc_from_contiguous(struct device *dev, size_t count,
+				       unsigned int order)
+{
+	return NULL;
+}
+static inline
+void dma_show_bitmap(struct device *dev){
+	return;
+}
+
+
+#ifdef CONFIG_OPTEE_SUPPORT_MC_ALLOCATOR
+static inline
+int dma_migrate_range(struct device *dev, unsigned long pa_start,
+				       unsigned long size)
+{
+	return 0;
+}
+
+static inline
+bool dma_release_range(struct device *dev, unsigned long pa_start,
+					 unsigned long size)
+{
+	return true;
+}
+#endif
+
+static inline
 bool dma_release_from_contiguous(struct device *dev, struct page *pages,
 				 int count)
 {
 	return false;
 }
 
+static inline
+bool dma_bitmap_release_from_contiguous(struct device *dev, struct page *pages,
+				 int count)
+{
+	return false;
+}
+
+static inline
+void dev_bind_cma_area(struct device *dev, char *name) { }
 #endif
 
 #endif

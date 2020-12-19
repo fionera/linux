@@ -59,6 +59,7 @@ obj-$(CONFIG_I2C_IMX)		+= i2c-imx.o
 obj-$(CONFIG_I2C_IOP3XX)	+= i2c-iop3xx.o
 obj-$(CONFIG_I2C_JZ4780)	+= i2c-jz4780.o
 obj-$(CONFIG_I2C_KEMPLD)	+= i2c-kempld.o
+obj-$(CONFIG_I2C_LG1K)		+= i2c-lg1k.o
 obj-$(CONFIG_I2C_LPC2K)		+= i2c-lpc2k.o
 obj-$(CONFIG_I2C_MESON)		+= i2c-meson.o
 obj-$(CONFIG_I2C_MPC)		+= i2c-mpc.o
@@ -118,5 +119,17 @@ obj-$(CONFIG_I2C_PCA_ISA)	+= i2c-pca-isa.o
 obj-$(CONFIG_I2C_SIBYTE)	+= i2c-sibyte.o
 obj-$(CONFIG_I2C_XGENE_SLIMPRO) += i2c-xgene-slimpro.o
 obj-$(CONFIG_SCx200_ACB)	+= scx200_acb.o
+
+
+#kdriver support
+ifdef CONFIG_RTK_KDRIVER_SUPPORT
+obj-$(CONFIG_I2C_RTK)		+= i2c-rtk.o i2c-rtk-priv.o 
+else
+obj-$(CONFIG_I2C_RTK)		+= i2c-rtk.o i2c-rtk-priv.o
+endif
+
+
+
+
 
 ccflags-$(CONFIG_I2C_DEBUG_BUS) := -DDEBUG

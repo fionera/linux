@@ -49,6 +49,12 @@ config GCOV_PROFILE_ALL
 	larger and run slower. Also be sure to exclude files from profiling
 	which are not linked to the kernel image to prevent linker errors.
 
+config GCOV_CTORS
+	string
+	depends on GCOV_KERNEL
+	default ".init_array" if ARM && AEABI
+	default ".ctors"
+
 choice
 	prompt "Specify GCOV format"
 	depends on GCOV_KERNEL

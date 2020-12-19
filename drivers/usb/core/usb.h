@@ -4,6 +4,12 @@
 struct usb_hub_descriptor;
 struct usb_dev_state;
 
+/* extra variable */
+extern int usb3_device_plugin;
+extern int usb3_device_resume;
+extern int port_check_count;
+extern int bdevice;
+extern int U3PortCnt;
 /* Functions local to drivers/usb/core/ */
 
 extern int usb_create_sysfs_dev_files(struct usb_device *dev);

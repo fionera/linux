@@ -104,6 +104,8 @@ extern int core_uses_pid;
 extern char core_pattern[];
 extern unsigned int core_pipe_limit;
 #endif
+extern int rtd_swsem_debug;
+extern int rtd_swsem_debug_func(void);
 extern int pid_max;
 extern int pid_max_min, pid_max_max;
 extern int percpu_pagelist_fraction;
@@ -1173,6 +1175,15 @@ static struct ctl_table kern_table[] = {
 		.extra2		= &one,
 	},
 #endif
+
+	{
+		.procname	= "rtd_swsem_debug",
+		.data		= &rtd_swsem_debug,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= rtd_swsem_debug_func,
+	},
+
 	{ }
 };
 
@@ -1348,6 +1359,23 @@ static struct ctl_table vm_table[] = {
 		.mode		= 0644,
 		.proc_handler	= lowmem_reserve_ratio_sysctl_handler,
 	},
+#ifdef CONFIG_ZONE_ZRAM
+	{
+		.procname	= "min_zone_zram_kbytes",
+		.data		= &min_zone_zram_kbytes,
+		.maxlen		= sizeof(min_zone_zram_kbytes),
+		.mode		= 0644,
+		.proc_handler	= min_zone_zram_kbytes_sysctl_handler,
+		.extra1		= &zero,
+	},
+	{
+		.procname	= "lowmem_reserve_ratio_has_zone_zram",
+		.data		= &sysctl_lowmem_reserve_ratio_has_zone_zram,
+		.maxlen		= sizeof(sysctl_lowmem_reserve_ratio_has_zone_zram),
+		.mode		= 0644,
+		.proc_handler	= lowmem_reserve_ratio_sysctl_handler,
+	},
+#endif
 	{
 		.procname	= "drop_caches",
 		.data		= &sysctl_drop_caches,
@@ -1355,7 +1383,7 @@ static struct ctl_table vm_table[] = {
 		.mode		= 0644,
 		.proc_handler	= drop_caches_sysctl_handler,
 		.extra1		= &one,
-		.extra2		= &four,
+		.extra2		= &one_hundred,
 	},
 #ifdef CONFIG_COMPACTION
 	{
@@ -1569,6 +1597,15 @@ static struct ctl_table vm_table[] = {
 		.mode		= 0644,
 		.proc_handler	= proc_doulongvec_minmax,
 	},
+#ifdef CONFIG_SWAP
+	{
+		.procname	= "swap_full_const",
+		.data		= &swap_full_const,
+		.maxlen		= sizeof(swap_full_const),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+	},
+#endif
 	{ }
 };
 

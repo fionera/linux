@@ -33,6 +33,7 @@
 #define DMX_TYPE_TS  0
 #define DMX_TYPE_SEC 1
 #define DMX_TYPE_PES 2
+#define DMX_TYPE_TEMI 3
 
 #define DMX_STATE_FREE      0
 #define DMX_STATE_ALLOCATED 1
@@ -68,15 +69,17 @@ struct dvb_demux_feed {
 	union {
 		struct dmx_ts_feed ts;
 		struct dmx_section_feed sec;
+		struct dmx_temi_feed temi;
 	} feed;
 
 	union {
 		dmx_ts_cb ts;
 		dmx_section_cb sec;
+		dmx_temi_cb temi;
 	} cb;
 
 	struct dvb_demux *demux;
-	void *priv;
+	void *priv; // point to driver filter handle
 	int type;
 	int state;
 	u16 pid;
@@ -105,6 +108,13 @@ struct dvb_demux {
 	int feednum;
 	int (*start_feed)(struct dvb_demux_feed *feed);
 	int (*stop_feed)(struct dvb_demux_feed *feed);
+
+	int (*ts_control)(struct dvb_demux_feed *feed, u32 cmd, void * parg);
+	int (*start_scrambcheck)(struct dvb_demux_feed *feed);
+	int (*stop_scrambcheck)(struct dvb_demux_feed *feed);
+	int (*get_scramble_stauts)(struct dvb_demux_feed *feed, int *scramble_status);
+	int (*descrmb_ctrl)(struct dvb_demux_feed *feed, u8 is_enable);
+
 	int (*write_to_decoder)(struct dvb_demux_feed *feed,
 				 const u8 *buf, size_t len);
 	u32 (*check_crc32)(struct dvb_demux_feed *feed,

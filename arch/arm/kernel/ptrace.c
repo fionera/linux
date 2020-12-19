@@ -886,6 +886,11 @@ long arch_ptrace(struct task_struct *child, long request,
 
 #ifdef CONFIG_HAVE_HW_BREAKPOINT
 		case PTRACE_GETHBPREGS:
+#if defined(CONFIG_REALTEK_WATCHPOINT) || defined(CONFIG_RTK_KDRV_WATCHPOINT)
+			pr_info("warning: may using gdb under watchpoint device driver,\n");
+			pr_info("warning: suggest to disable CONFIG_REALTEK_WATCHPOINT or CONFIG_RTK_KDRV_WATCHPOINT in menuconfig\n");
+#endif
+
 			ret = ptrace_gethbpregs(child, addr,
 						(unsigned long __user *)data);
 			break;

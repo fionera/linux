@@ -1,0 +1,7 @@
+config RTK_KDRV_V4L2_VCODEC
+	tristate "Realtek V4L2 video codec driver"
+	depends on RTK_KDRV_RPC
+	select RTK_KDRV_VUTILS
+	select V4L2_MEM2MEM_DEV
+	select VIDEOBUF2_DMA_CONTIG
+	default n

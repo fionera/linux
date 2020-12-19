@@ -1,0 +1,1037 @@
+/dts-v1/;
+
+/* reserve zero-page for CPU-PM operations */
+/memreserve/ 0x00000000 0x00001000;
+
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/interrupt-controller/arm-gic.h>
+
+#define ARMV8_TIMER_IRQ_TYPE	(GIC_CPU_MASK_RAW(0x0f) | IRQ_TYPE_LEVEL_LOW)
+
+/ {
+	model = "LG Electronics, DTV SoC LG1212 (AArch64)";
+	compatible = "lge,lg1212", "lge,lg1k";
+	interrupt-parent = <&gic>;
+
+	#address-cells = <2>;
+	#size-cells = <2>;
+
+	memory {
+		ranges;
+		#address-cells = <2>;
+		#size-cells = <2>;
+
+		device_type = "memory";
+		/* Filled in by lxboot */
+		reg = <0x0 0x00000000 0x0 0x00000000>,
+		      <0x0 0x00000000 0x0 0x00000000>;
+	};
+
+	reserved-memory {
+		ranges;
+
+		#address-cells = <2>;
+		#size-cells = <2>;
+
+		/* Filled in by lxboot */
+		kdrv_reserved1: kdrv_buffer1@1 {
+			reg = <0x0 0x00000000 0x0 0x00000000>;
+			no-map;
+		};
+		kdrv_reserved2: kdrv_buffer2@2 {
+			reg = <0x0 0x00000000 0x0 0x00000000>;
+			no-map;
+		};
+	};
+
+	chosen {
+		bootargs = "";
+	};
+
+	cpus {
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		cpu@0 {
+			device_type = "cpu";
+			compatible = "arm,cortex-a55";
+			reg = <0>;
+			next-level-cache = <&L2_0>;
+			L2_0: l2-cache@0 {
+				compatible = "cache";
+				cache-level = <2>;
+				cache-size = <0x20000>;
+				cache-line-size = <64>;
+				cache-sets = <512>;
+				cache-unified;
+				next-level-cache = <&L3>;
+			};
+		};
+		cpu@1 {
+			device_type = "cpu";
+			compatible = "arm,cortex-a55";
+			reg = <1>;
+			enable-method = "psci";
+			next-level-cache = <&L2_1>;
+			L2_1: l2-cache@1 {
+				compatible = "cache";
+				cache-level = <2>;
+				cache-size = <0x20000>;
+				cache-line-size = <64>;
+				cache-sets = <512>;
+				cache-unified;
+				next-level-cache = <&L3>;
+			};
+		};
+		cpu@2 {
+			device_type = "cpu";
+			compatible = "arm,cortex-a55";
+			reg = <2>;
+			enable-method = "psci";
+			next-level-cache = <&L2_2>;
+			L2_2: l2-cache@2 {
+				compatible = "cache";
+				cache-level = <2>;
+				cache-size = <0x20000>;
+				cache-line-size = <64>;
+				cache-sets = <512>;
+				cache-unified;
+				next-level-cache = <&L3>;
+			};
+		};
+		cpu@3 {
+			device_type = "cpu";
+			compatible = "arm,cortex-a55";
+			reg = <3>;
+			enable-method = "psci";
+			next-level-cache = <&L2_3>;
+			L2_3: l2-cache@3 {
+				compatible = "cache";
+				cache-level = <2>;
+				cache-size = <0x20000>;
+				cache-line-size = <64>;
+				cache-sets = <512>;
+				cache-unified;
+				next-level-cache = <&L3>;
+			};
+		};
+		L3: l3-cache {
+			compatible = "cache";
+			cache-level = <3>;
+			cache-size = <0x80000>;
+			cache-line-size = <64>;
+			cache-sets = <512>;
+			cache-unified;
+		};
+	};
+
+	psci {
+		compatible  = "arm,psci";
+		method = "smc";
+		cpu_suspend = <0xc4000001>;
+		cpu_off = <0xc4000002>;
+		cpu_on = <0xc4000003>;
+	};
+
+	gic: interrupt-controller@c0001000 {
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
+
+		compatible = "arm,gic-400";
+		interrupt-controller;
+		reg = <0x0 0xc0001000 0x0 0x1000>,
+		      <0x0 0xc0002000 0x0 0x1000>;
+
+		#interrupt-cells = <3>;
+	};
+
+	pmu {
+		compatible = "arm,armv8-pmuv3";
+		interrupts = <GIC_SPI 164 IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 165 IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 166 IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 167 IRQ_TYPE_LEVEL_HIGH>;
+	};
+
+	generic-timer {
+		compatible = "arm,armv8-timer";
+		interrupts = <GIC_PPI 13 ARMV8_TIMER_IRQ_TYPE>,
+			     <GIC_PPI 14 ARMV8_TIMER_IRQ_TYPE>,
+			     <GIC_PPI 11 ARMV8_TIMER_IRQ_TYPE>,
+			     <GIC_PPI 10 ARMV8_TIMER_IRQ_TYPE>;
+		clock-frequency = <50000000>;
+	};
+
+	ctrl-regs {
+		compatible = "simple-bus";
+		ranges;
+		#address-cells = <2>;
+		#size-cells = <2>;
+
+		core_ctrl: regs@fd300000 {
+			reg = <0x0 0xfd300000 0x0 0x1000>;
+			static-map;
+		};
+		pinmux: pinctrl@c3300000 {
+			compatible = "lge,lg1212-pinctrl";
+			reg = <0x0 0xc3300000 0x0 0x1000>,
+			      <0x0 0xc9307000 0x0 0x1000>,
+			      <0x0 0xc9308000 0x0 0x1000>,
+			      <0x0 0xc930b000 0x0 0x1000>,
+			      <0x0 0xc930e000 0x0 0x1000>,
+			      <0x0 0xc9c71000 0x0 0x1000>;
+
+			spi0_state: spi0-state {
+				function = "spi0";
+				groups = "spi0", "spi0_cs";
+			};
+			spi1_state: spi1-state {
+				function = "spi1";
+				groups = "spi1", "spi1_cs";
+			};
+			rgmii_state: rgmii-state {
+				function = "rgmii";
+				groups = "rgmii", "rgmii_irq";
+			};
+		};
+	};
+
+	clks {
+
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
+
+		clk_xtal: clk-xtal {
+			compatible = "fixed-clock";
+			clock-output-names = "xtal";
+			clock-frequency = <50000000>;
+
+			#clock-cells = <0>;
+		};
+		clk_bus: clk-bus {
+			compatible = "fixed-factor-clock";
+			clocks = <&clk_xtal>;
+			clock-names = "xtal";
+			clock-output-names = "busclk";
+			clock-div = <1>;
+			clock-mult = <4>;
+
+			#clock-cells = <0>;
+		};
+	};
+
+	regulators {
+		compatible = "simple-bus";
+
+		cpu_regulator: regulator {
+			compatible = "regulator-gpio";
+			regulator-name = "cpu0";
+			regulator-type = "voltage";
+			regulator-min-microvolt = <920000>;
+			regulator-max-microvolt = <981000>;
+			regulator-always-on;
+			gpios = <&gpio1 1 GPIO_ACTIVE_HIGH>,
+			        <&gpio1 2 GPIO_ACTIVE_HIGH>;
+			gpios-states = <1>, <1>;
+			states = <920000 0>,
+			         <941000 1>,
+			         <960000 2>,
+			         <981000 3>;
+		};
+	};
+
+	wdt_detect {
+		compatible = "lge,wdt-detect";
+		gpios = <&gpio16 2 GPIO_ACTIVE_HIGH>;
+	};
+
+	soc {
+		compatible = "simple-bus";
+		interrupt-parent = <&gic>;
+
+		ranges;
+		#address-cells = <2>;
+		#size-cells = <2>;
+
+                mmc@c3600000 {
+                        compatible = "lge,lg1k-dwc-5.1";
+                        reg = <0x0 0xc3600000 0x0 0x1000>,
+                              <0x0 0xc3680000 0x0 0x1000>;
+                        interrupts = <GIC_SPI 88 IRQ_TYPE_LEVEL_HIGH>;
+                        clock-frequency = <198000000>;
+                        /* Filled in by lxboot */
+                        intap-delay = <0x0>;
+                        outtap-delay = <0x0>;
+                        device-ds = <0>;
+                        host-ds = <0>;
+                        op-mode = <0>;
+                        strobe = <0x0>;
+                        hw-clockgating = <0x0>;
+                        hw-autotune = <0x0>;
+                };
+
+		hsotg0: usb@c3430000 { // 8k-decoder
+			compatible = "lge,lg115x-drd2",
+					"lge,lg115x-hsotg", "snps,dwc2";
+			reg = <0x0 0xc3430000 0x0 0x8000>;
+			interrupts = <GIC_SPI 139 IRQ_TYPE_LEVEL_HIGH>;
+			dr_mode = "host";
+			status = "skip";
+
+			#address-cells = <2>;
+			#size-cells = <2>;
+			ranges;
+
+			hsotg_phy0: phy@c3430000 {
+				compatible = "lge,lg1k-hsotg-phy",
+						"lge,lg1k-drd2phy";
+				reg = <0x0 0xc3430000 0x0 0x8000>, // base_addr
+				      <0x0 0xc3438000 0x0 0x0020>, // host_addr
+				      <0x0 0xc343c004 0x0 0x0020>, // phy_addr
+				      <0x0 0xc343c000 0x0 0x0004>; // phy_rst
+				reg-names = "base", "host", "phy", "phyrst";
+				phy-rst-msk = <0x0001 0x0001>;
+				status = "skip";
+			};
+		};
+		ehci0: usb@c3400000 { // port3
+			compatible = "lge,lg115x-ehci", "generic-ehci";
+			reg = <0x0 0xc3400000 0x0 0x1000>;
+			interrupts = <GIC_SPI 99 IRQ_TYPE_LEVEL_HIGH>;
+			status = "skip";
+
+			#address-cells = <2>;
+			#size-cells = <2>;
+			ranges;
+
+			usb2phy0: phy@c3400000 {
+				compatible = "lge,lg1k-usb2phy";
+				reg = <0x0 0xc3400000 0x0 0x0100>, // base_addr
+				      <0x0 0xc3408000 0x0 0x0020>, // host_addr
+				      <0x0 0xc340c004 0x0 0x0010>, // phy_addr
+				      <0x0 0xc340c000 0x0 0x0004>, // phy_rst
+				      <0x0 0xc930b460 0x0 0x0004>; // pinmux
+				reg-names = "base", "host", "phy", "phyrst",
+					    "pinmux";
+				phy-rst-msk = <0x0001 0x0001>;
+				// gpios = <86 85 0xff>;
+				// gpio-pinmux <mask invert>
+				gpio-pinmux = <0x00000110 0x0000>;
+				ctrl-gpios = <&gpio10 6 GPIO_ACTIVE_LOW>;
+				ocd-gpios = <&gpio10 5 GPIO_ACTIVE_LOW>;
+				status = "skip";
+			};
+		};
+		ehci1: usb@c3410000 { // port2
+			compatible = "lge,lg115x-ehci", "generic-ehci";
+			reg = <0x0 0xc3410000 0x0 0x1000>;
+			interrupts = <GIC_SPI 101 IRQ_TYPE_LEVEL_HIGH>;
+			status = "skip";
+
+			#address-cells = <2>;
+			#size-cells = <2>;
+			ranges;
+
+			usb2phy1: phy@c3410000 {
+				compatible = "lge,lg1k-usb2phy";
+				reg = <0x0 0xc3410000 0x0 0x0100>, // base_addr
+				      <0x0 0xc3418000 0x0 0x0020>, // host_addr
+				      <0x0 0xc341c004 0x0 0x0010>, // phy_addr
+				      <0x0 0xc341c000 0x0 0x0004>; // phy_rst
+				reg-names = "base", "host", "phy", "phyrst";
+				phy-rst-msk = <0x0001 0x0001>;
+				// gpios = <95 94 0xff>;
+				ctrl-gpios = <&gpio11 7 GPIO_ACTIVE_LOW>;
+				ocd-gpios = <&gpio11 6 GPIO_ACTIVE_LOW>;
+				status = "skip";
+			};
+		};
+		ehci2: usb@c3420000 { // port1
+			compatible = "lge,lg115x-ehci", "generic-ehci";
+			reg = <0x0 0xc3420000 0x0 0x1000>;
+			interrupts = <GIC_SPI 103 IRQ_TYPE_LEVEL_HIGH>;
+			status = "skip";
+
+			#address-cells = <2>;
+			#size-cells = <2>;
+			ranges;
+
+			usb2phy2: phy@c3420000 {
+				compatible = "lge,lg1k-usb2phy";
+				reg = <0x0 0xc3420000 0x0 0x0100>, // base_addr
+				      <0x0 0xc3428000 0x0 0x0020>, // host_addr
+				      <0x0 0xc342c004 0x0 0x0010>, // phy_addr
+				      <0x2 0xc342c000 0x2 0x0004>, // phy_rst
+				      <0x2 0xc93084f4 0x2 0x0004>; // pinmux
+				reg-names = "base", "host", "phy", "phyrst",
+					    "pinmux";
+				phy-rst-msk = <0x0001 0x0001>;
+				// gpios = <90 91 0xff>;
+				// gpio-pinmux <mask invert>
+				gpio-pinmux = <0x00001100 0x0000>;
+				ctrl-gpios = <&gpio11 2 GPIO_ACTIVE_LOW>;
+				ocd-gpios = <&gpio11 3 GPIO_ACTIVE_LOW>;
+				status = "skip";
+			};
+		};
+		ehci3: usb@c3440000 { // bt-wifi
+			compatible = "lge,lg115x-ehci", "generic-ehci";
+			reg = <0x0 0xc3440000 0x0 0x1000>;
+			interrupts = <GIC_SPI 70 IRQ_TYPE_LEVEL_HIGH>;
+			status = "skip";
+
+			#address-cells = <2>;
+			#size-cells = <2>;
+			ranges;
+
+			usb2phy3: phy@c3440000 {
+				compatible = "lge,lg1k-usb2phy";
+				reg = <0x0 0xc3440000 0x0 0x0100>, // base_addr
+				      <0x0 0xc3448000 0x0 0x0020>, // host_addr
+				      <0x0 0xc344c004 0x0 0x0010>, // phy_addr
+				      <0x0 0xc344c000 0x0 0x0004>; // phy_rst
+				reg-names = "base", "host", "phy", "phyrst";
+				phy-rst-msk = <0x0001 0x0001>;
+				status = "skip";
+			};
+		};
+
+		ohci0: usb@c3404000 { // port3
+			compatible = "lge,lg115x-ohci", "generic-ohci";
+			reg = <0x0 0xc3404000 0x0 0x1000>;
+			interrupts = <GIC_SPI 98 IRQ_TYPE_LEVEL_HIGH>;
+			status = "skip";
+
+			#address-cells = <2>;
+			#size-cells = <2>;
+			ranges;
+
+			usb1phy0: phy@c3404000 {
+				compatible = "lge,lg1k-usb1phy";
+				reg = <0x0 0xc3404000 0x0 0x1000>, // base_addr
+				      <0x0 0xc3408000 0x0 0x0020>, // host_addr
+				      <0x0 0xc340c004 0x0 0x0010>, // phy_addr
+				      <0x0 0xc340c000 0x0 0x0004>, // phy_rst
+				      <0x0 0xc930b460 0x0 0x0004>; // pinmux
+				reg-names = "base", "host", "phy", "phyrst",
+					    "pinmux";
+				phy-rst-msk = <0x0001 0x0001>;
+				// gpios = <86 85 0xff>;
+				// gpio-pinmux <mask invert>
+				gpio-pinmux = <0x00000110 0x0000>;
+				ctrl-gpios = <&gpio10 6 GPIO_ACTIVE_LOW>;
+				ocd-gpios = <&gpio10 5 GPIO_ACTIVE_LOW>;
+				status = "skip";
+			};
+		};
+		ohci1: usb@c3414000 { // port2
+			compatible = "lge,lg115x-ohci", "generic-ohci";
+			reg = <0x0 0xc3414000 0x0 0x1000>;
+			interrupts = <GIC_SPI 100 IRQ_TYPE_LEVEL_HIGH>;
+			status = "skip";
+
+			#address-cells = <2>;
+			#size-cells = <2>;
+			ranges;
+
+			usb1phy1: phy@c3414000 {
+				compatible = "lge,lg1k-usb1phy";
+				reg = <0x0 0xc3414000 0x0 0x1000>, // base_addr
+				      <0x0 0xc3418000 0x0 0x0020>, // host_addr
+				      <0x0 0xc341c004 0x0 0x0010>, // phy_addr
+				      <0x0 0xc341c000 0x0 0x0004>; // phy_rst
+				reg-names = "base", "host", "phy", "phyrst";
+				phy-rst-msk = <0x0002 0x0002>;
+				// gpios = <95 94 0xff>;
+				ctrl-gpios = <&gpio11 7 GPIO_ACTIVE_LOW>;
+				ocd-gpios = <&gpio11 6 GPIO_ACTIVE_LOW>;
+				status = "skip";
+			};
+		};
+		ohci2: usb@c3424000 { // port1
+			compatible = "lge,lg115x-ohci", "generic-ohci";
+			reg = <0x0 0xc3424000 0x0 0x1000>;
+			interrupts = <GIC_SPI 102 IRQ_TYPE_LEVEL_HIGH>;
+			status = "skip";
+
+			#address-cells = <2>;
+			#size-cells = <2>;
+			ranges;
+
+			usb1phy2: phy@c3424000 {
+				compatible = "lge,lg1k-usb1phy";
+				reg = <0x0 0xc3424000 0x0 0x1000>, // base_addr
+				      <0x0 0xc3428000 0x0 0x0020>, // host_addr
+				      <0x0 0xc342c004 0x0 0x0010>, // phy_addr
+				      <0x0 0xc342c000 0x0 0x0004>, // phy_rst
+				      <0x0 0xc93084f4 0x0 0x0004>; // pinmux
+				reg-names = "base", "host", "phy", "phyrst",
+					    "pinmux";
+				phy-rst-msk = <0x0001 0x0001>;
+				// gpios = <90 91 0xff>;
+				// gpio-pinmux <mask invert>
+				gpio-pinmux = <0x00001100 0x0000>;
+				ctrl-gpios = <&gpio11 2 GPIO_ACTIVE_LOW>;
+				ocd-gpios = <&gpio11 3 GPIO_ACTIVE_LOW>;
+				status = "skip";
+			};
+		};
+		ohci3: usb@c3444000 { // bt-wifi
+			compatible = "lge,lg115x-ohci", "generic-ohci";
+			reg = <0x0 0xc3444000 0x0 0x1000>;
+			interrupts = <GIC_SPI 71 IRQ_TYPE_LEVEL_HIGH>;
+			status = "skip";
+
+			#address-cells = <2>;
+			#size-cells = <2>;
+			ranges;
+
+			usb1phy3: phy@c3444000 {
+				compatible = "lge,lg1k-usb1phy";
+				reg = <0x0 0xc3444000 0x0 0x1000>, // base_addr
+				      <0x0 0xc3448000 0x0 0x0020>, // host_addr
+				      <0x0 0xc344c004 0x0 0x0010>, // phy_addr
+				      <0x0 0xc344c000 0x0 0x0004>; // phy_rst
+				reg-names = "base", "host", "phy", "phyrst";
+				phy-rst-msk = <0x0001 0x0001>;
+				status = "skip";
+			};
+		};
+
+		dwmac_axi_config: dwmac-axi-config {
+			snps,rd_osr_lmt = <0x07>;
+			snps,wr_osr_lmt = <0x07>;
+			snps,blen = <0 0 16 0 0 0 0>;
+		};
+
+		ethernet@c3700000 {
+			compatible = "lge,lg115x-dwmac", "snps,dwmac";
+			reg = <0x0 0xc3700000 0x0 0x2000>;
+			interrupts = <GIC_SPI 91 IRQ_TYPE_LEVEL_HIGH>;
+			interrupt-names = "macirq";
+			clocks = <&clk_bus>, <&clk_bus>;
+			clock-names = "stmmaceth", "pclk";
+			max-frame-size = <1500>;
+			phy-mode = "rmii";
+			snps,pbl = <2>;
+			snps,fixed-burst;
+			snps,multicast-filter-bins = <64>;
+			snps,perfect-filter-entries = <32>;
+			snps,axi-config = <&dwmac_axi_config>;
+			/* Filled in by lxboot */
+			mac-address = [ 00 00 00 00 00 00 ];
+
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			ethernet-phy@01 {
+				compatible = "ethernet-phy-id0044.1400";
+				reg = <0x01>;
+				interrupts = <GIC_SPI 143 IRQ_TYPE_LEVEL_HIGH>;
+			};
+		};
+
+		crypto@e0000000 {
+			compatible = "lge,lg1k-zacc-enc";
+			reg = <0x0 0xe0000000 0x0 0x1000>;
+			interrupts = <GIC_SPI 42 IRQ_TYPE_LEVEL_HIGH>;
+			alignments = <0xfffff000>, <0xfffff000>;
+		};
+		crypto@e0001000 {
+			compatible = "lge,lg1k-zacc-dec";
+			reg = <0x0 0xe0001000 0x0 0x1000>;
+			interrupts = <GIC_SPI 43 IRQ_TYPE_LEVEL_HIGH>;
+			alignments = <0xfffff000>, <0xfffffff0>;
+		};
+		cec {
+			compatible = "lge,lg1k-ucom-cec";
+			reg = <0x0 0xf0004100 0x0 0x200>;
+			interrupts = <GIC_SPI 134 IRQ_TYPE_LEVEL_HIGH>;
+		};
+
+	};
+
+	amba {
+		compatible = "arm,amba-bus";
+		interrupt-parent = <&gic>;
+		ranges;
+
+		#address-cells = <2>;
+		#size-cells = <2>;
+		#interrupts-cells = <3>;
+
+		timer@fd100000 {
+			compatible = "arm,sp804";
+			reg = <0x0 0xfd100000 0x0 0x1000>;
+			interrupts = <GIC_SPI 6 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&clk_bus>;
+			clock-names = "apb_pclk";
+		};
+		watchdog@fd200000 {
+			compatible = "arm,sp805", "arm,primecell";
+			reg = <0x0 0xfd200000 0x0 0x1000>;
+			interrupts = <GIC_SPI 7 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&clk_bus>;
+			clock-names = "apb_pclk";
+		};
+		serial@fe000000 {
+			compatible = "arm,pl011", "arm,primecell";
+			reg = <0x0 0xfe000000 0x0 0x1000>;
+			interrupts = <GIC_SPI 0 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&clk_bus>;
+			clock-names = "apb_pclk";
+			static-map;
+			static-map-virt = "identical";
+		};
+		serial@fe100000 {
+			compatible = "arm,pl011", "arm,primecell";
+			reg = <0x0 0xfe100000 0x0 0x1000>;
+			interrupts = <GIC_SPI 1 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&clk_bus>;
+			clock-names = "apb_pclk";
+		};
+		serial@fe200000 {
+			compatible = "arm,pl011", "arm,primecell";
+			reg = <0x0 0xfe200000 0x0 0x1000>;
+			interrupts = <GIC_SPI 2 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&clk_bus>;
+			clock-names = "apb_pclk";
+		};
+		spi@fe800000 {
+			compatible = "arm,pl022", "arm,primecell";
+			reg = <0x0 0xfe800000 0x0 0x1000>;
+			interrupts = <GIC_SPI 3 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&clk_bus>;
+			clock-names = "apb_pclk";
+		};
+		spi@fe900000 {
+			compatible = "arm,pl022", "arm,primecell";
+			reg = <0x0 0xfe900000 0x0 0x1000>;
+			interrupts = <GIC_SPI 4 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&clk_bus>;
+			clock-names = "apb_pclk";
+			pinctrl-names = "default";
+			pinctrl-0 = <&spi1_state>;
+		};
+		dma@ff200000 {
+			compatible = "arm,pl080", "arm,primecell";
+			reg = <0x0 0xff200000 0x0 0x1000>;
+			interrupts = <GIC_SPI 36 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&clk_bus>;
+			clock-names = "apb_pclk";
+		};
+		gpio0: gpio@fd400000 {
+			compatible = "arm,pl061", "arm,primecell";
+			reg = <0x0 0xfd400000 0x0 0x1000>;
+			interrupts = <GIC_SPI 8 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&clk_bus>;
+			clock-names = "apb_pclk";
+			gpio-controller;
+			interrupt-controller;
+			gpio-base = <0x00>;
+			gpio-ranges = <&pinmux 0 0 1 &pinmux 1 1 1
+			               &pinmux 2 2 1 &pinmux 3 3 1
+			               &pinmux 4 4 1 &pinmux 5 5 1
+			               &pinmux 6 6 1 &pinmux 7 7 1>;
+			skip-resume = /bits/ 8 <0x00>;
+
+			#gpio-cells = <2>;
+			#interrupt-cells = <2>;
+		};
+		gpio1: gpio@fd410000 {
+			compatible = "arm,pl061", "arm,primecell";
+			reg = <0x0 0xfd410000 0x0 0x1000>;
+			interrupts = <GIC_SPI 9 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&clk_bus>;
+			clock-names = "apb_pclk";
+			gpio-controller;
+			interrupt-controller;
+			gpio-base = <0x08>;
+			gpio-ranges = <&pinmux 0 8 1 &pinmux 1 9 1
+			               &pinmux 2 10 1 &pinmux 3 11 1
+			               &pinmux 4 12 1 &pinmux 5 13 1
+			               &pinmux 6 14 1 &pinmux 7 15 1>;
+			skip-resume = /bits/ 8 <0x00>;
+
+			#gpio-cells = <2>;
+			#interrupt-cells = <2>;
+		};
+		gpio2: gpio@fd420000 {
+			compatible = "arm,pl061", "arm,primecell";
+			reg = <0x0 0xfd420000 0x0 0x1000>;
+			interrupts = <GIC_SPI 10 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&clk_bus>;
+			clock-names = "apb_pclk";
+			gpio-controller;
+			interrupt-controller;
+			gpio-base = <0x10>;
+			gpio-ranges = <&pinmux 0 16 1 &pinmux 1 17 1
+			               &pinmux 2 18 1 &pinmux 3 19 1
+			               &pinmux 4 20 1 &pinmux 5 21 1
+			               &pinmux 6 22 1 &pinmux 7 23 1>;
+			skip-resume = /bits/ 8 <0x00>;
+
+			#gpio-cells = <2>;
+			#interrupt-cells = <2>;
+		};
+		gpio3: gpio@fd430000 {
+			compatible = "arm,pl061", "arm,primecell";
+			reg = <0x0 0xfd430000 0x0 0x1000>;
+			interrupts = <GIC_SPI 11 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&clk_bus>;
+			clock-names = "apb_pclk";
+			gpio-controller;
+			interrupt-controller;
+			gpio-base = <0x18>;
+			gpio-ranges = <&pinmux 6 30 1 &pinmux 7 31 1>;
+			skip-resume = /bits/ 8 <0x00>;
+
+			#gpio-cells = <2>;
+			#interrupt-cells = <2>;
+		};
+		gpio4: gpio@fd440000 {
+			compatible = "arm,pl061", "arm,primecell";
+			reg = <0x0 0xfd440000 0x0 0x1000>;
+			interrupts = <GIC_SPI 12 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&clk_bus>;
+			clock-names = "apb_pclk";
+			gpio-controller;
+			interrupt-controller;
+			gpio-base = <0x20>;
+			gpio-ranges = <&pinmux 0 32 1 &pinmux 1 33 1
+			               &pinmux 2 34 1 &pinmux 3 35 1
+			               &pinmux 4 36 1 &pinmux 5 37 1
+			               &pinmux 6 38 1 &pinmux 7 39 1>;
+			skip-resume = /bits/ 8 <0x02>;
+
+			#gpio-cells = <2>;
+			#interrupt-cells = <2>;
+		};
+		gpio5: gpio@fd450000 {
+			compatible = "arm,pl061", "arm,primecell";
+			reg = <0x0 0xfd450000 0x0 0x1000>;
+			interrupts = <GIC_SPI 13 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&clk_bus>;
+			clock-names = "apb_pclk";
+			gpio-controller;
+			interrupt-controller;
+			gpio-base = <0x28>;
+			gpio-ranges = <&pinmux 5 45 1 &pinmux 6 46 1
+			               &pinmux 7 47 1>;
+			skip-resume = /bits/ 8 <0x00>;
+
+			#gpio-cells = <2>;
+			#interrupt-cells = <2>;
+		};
+		gpio6: gpio@fd460000 {
+			compatible = "arm,pl061", "arm,primecell";
+			reg = <0x0 0xfd460000 0x0 0x1000>;
+			interrupts = <GIC_SPI 14 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&clk_bus>;
+			clock-names = "apb_pclk";
+			gpio-controller;
+			interrupt-controller;
+			gpio-base = <0x30>;
+			gpio-ranges = <&pinmux 0 48 1 &pinmux 1 49 1
+			               &pinmux 2 50 1 &pinmux 3 51 1
+			               &pinmux 4 52 1 &pinmux 5 53 1>;
+			skip-resume = /bits/ 8 <0x00>;
+
+			#gpio-cells = <2>;
+			#interrupt-cells = <2>;
+		};
+		gpio7: gpio@fd470000 {
+			compatible = "arm,pl061", "arm,primecell";
+			reg = <0x0 0xfd470000 0x0 0x1000>;
+			interrupts = <GIC_SPI 15 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&clk_bus>;
+			clock-names = "apb_pclk";
+			gpio-controller;
+			interrupt-controller;
+			gpio-base = <0x38>;
+			gpio-ranges = <&pinmux 0 56 1 &pinmux 1 57 1
+			               &pinmux 2 58 1 &pinmux 3 59 1
+			               &pinmux 4 60 1 &pinmux 5 61 1
+			               &pinmux 6 62 1 &pinmux 7 63 1>;
+			skip-resume = /bits/ 8 <0x00>;
+
+			#gpio-cells = <2>;
+			#interrupt-cells = <2>;
+		};
+		gpio8: gpio@fd480000 {
+			compatible = "arm,pl061", "arm,primecell";
+			reg = <0x0 0xfd480000 0x0 0x1000>;
+			interrupts = <GIC_SPI 16 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&clk_bus>;
+			clock-names = "apb_pclk";
+			gpio-controller;
+			interrupt-controller;
+			gpio-base = <0x40>;
+			gpio-ranges = <&pinmux 4 68 1>;
+			skip-resume = /bits/ 8 <0x00>;
+
+			#gpio-cells = <2>;
+			#interrupt-cells = <2>;
+		};
+		gpio9: gpio@fd490000 {
+			compatible = "arm,pl061", "arm,primecell";
+			reg = <0x0 0xfd490000 0x0 0x1000>;
+			interrupts = <GIC_SPI 17 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&clk_bus>;
+			clock-names = "apb_pclk";
+			gpio-controller;
+			interrupt-controller;
+			gpio-base = <0x48>;
+			gpio-ranges = <&pinmux 0 72 1 &pinmux 1 73 1
+			               &pinmux 2 74 1 &pinmux 3 75 1
+			               &pinmux 4 76 1 &pinmux 5 77 1
+			               &pinmux 6 78 1 &pinmux 7 79 1>;
+			skip-resume = /bits/ 8 <0x00>;
+
+			#gpio-cells = <2>;
+			#interrupt-cells = <2>;
+		};
+		gpio10: gpio@fd4a0000 {
+			compatible = "arm,pl061", "arm,primecell";
+			reg = <0x0 0xfd4a0000 0x0 0x1000>;
+			interrupts = <GIC_SPI 18 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&clk_bus>;
+			clock-names = "apb_pclk";
+			gpio-controller;
+			interrupt-controller;
+			gpio-base = <0x50>;
+			gpio-ranges = <&pinmux 0 80 1 &pinmux 1 81 1
+			               &pinmux 2 82 1 &pinmux 3 83 1
+			               &pinmux 4 84 1 &pinmux 5 85 1
+			               &pinmux 6 86 1 &pinmux 7 87 1>;
+			skip-resume = /bits/ 8 <0x00>;
+
+			#gpio-cells = <2>;
+			#interrupt-cells = <2>;
+		};
+		gpio11: gpio@fd4b0000 {
+			compatible = "arm,pl061", "arm,primecell";
+			reg = <0x0 0xfd4b0000 0x0 0x1000>;
+			interrupts = <GIC_SPI 19 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&clk_bus>;
+			clock-names = "apb_pclk";
+			gpio-controller;
+			interrupt-controller;
+			gpio-base = <0x58>;
+			gpio-ranges = <&pinmux 0 88 1 &pinmux 1 89 1
+			               &pinmux 2 90 1 &pinmux 3 91 1
+			               &pinmux 4 92 1 &pinmux 5 93 1
+			               &pinmux 6 94 1 &pinmux 7 95 1>;
+			skip-resume = /bits/ 8 <0x00>;
+
+			#gpio-cells = <2>;
+			#interrupt-cells = <2>;
+		};
+		gpio12: gpio@fd4c0000 {
+			compatible = "arm,pl061", "arm,primecell";
+			reg = <0x0 0xfd4c0000 0x0 0x1000>;
+			interrupts = <GIC_SPI 20 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&clk_bus>;
+			clock-names = "apb_pclk";
+			gpio-controller;
+			interrupt-controller;
+			gpio-base = <0x60>;
+			gpio-ranges = <&pinmux 0 96 1 &pinmux 1 97 1
+			               &pinmux 2 98 1 &pinmux 3 99 1
+			               &pinmux 4 100 1 &pinmux 5 101 1
+			               &pinmux 6 102 1 &pinmux 7 103 1>;
+			skip-resume = /bits/ 8 <0x00>;
+
+			#gpio-cells = <2>;
+			#interrupt-cells = <2>;
+		};
+		gpio13: gpio@fd4d0000 {
+			compatible = "arm,pl061", "arm,primecell";
+			reg = <0x0 0xfd4d0000 0x0 0x1000>;
+			interrupts = <GIC_SPI 21 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&clk_bus>;
+			clock-names = "apb_pclk";
+			gpio-controller;
+			interrupt-controller;
+			gpio-base = <0x68>;
+			gpio-ranges = <&pinmux 1 105 1 &pinmux 2 106 1
+			               &pinmux 3 107 1 &pinmux 4 108 1
+			               &pinmux 5 109 1 &pinmux 6 110 1>;
+			skip-resume = /bits/ 8 <0x00>;
+
+			#gpio-cells = <2>;
+			#interrupt-cells = <2>;
+		};
+		gpio14: gpio@fd4e0000 {
+			compatible = "arm,pl061", "arm,primecell";
+			reg = <0x0 0xfd4e0000 0x0 0x1000>;
+			interrupts = <GIC_SPI 22 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&clk_bus>;
+			clock-names = "apb_pclk";
+			gpio-controller;
+			interrupt-controller;
+			gpio-base = <0x70>;
+			gpio-ranges = <&pinmux 0 112 1 &pinmux 1 113 1
+			               &pinmux 2 114 1 &pinmux 3 115 1
+			               &pinmux 4 116 1 &pinmux 5 117 1
+			               &pinmux 6 118 1 &pinmux 7 119 1>;
+			skip-resume = /bits/ 8 <0x00>;
+
+			#gpio-cells = <2>;
+			#interrupt-cells = <2>;
+		};
+		gpio15: gpio@fd4f0000 {
+			compatible = "arm,pl061", "arm,primecell";
+			reg = <0x0 0xfd4f0000 0x0 0x1000>;
+			interrupts = <GIC_SPI 23 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&clk_bus>;
+			clock-names = "apb_pclk";
+			gpio-controller;
+			interrupt-controller;
+			gpio-base = <0x78>;
+			gpio-ranges = <&pinmux 0 120 1 &pinmux 1 121 1
+			               &pinmux 2 122 1 &pinmux 3 123 1
+			               &pinmux 4 124 1 &pinmux 5 125 1
+			               &pinmux 6 126 1 &pinmux 7 127 1>;
+			skip-resume = /bits/ 8 <0x00>;
+
+			#gpio-cells = <2>;
+			#interrupt-cells = <2>;
+		};
+		gpio16: gpio@fd500000 {
+			compatible = "arm,pl061", "arm,primecell";
+			reg = <0x0 0xfd500000 0x0 0x1000>;
+			interrupts = <GIC_SPI 24 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&clk_bus>;
+			clock-names = "apb_pclk";
+			gpio-controller;
+			interrupt-controller;
+			gpio-base = <0x80>;
+			gpio-ranges = <&pinmux 2 130 1 &pinmux 3 131 1
+			               &pinmux 4 132 1 &pinmux 5 133 1
+			               &pinmux 6 134 1 &pinmux 7 135 1>;
+			skip-resume = /bits/ 8 <0x00>;
+
+			#gpio-cells = <2>;
+			#interrupt-cells = <2>;
+		};
+		gpio17: gpio@fd510000 {
+			compatible = "arm,pl061", "arm,primecell";
+			reg = <0x0 0xfd510000 0x0 0x1000>;
+			interrupts = <GIC_SPI 25 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&clk_bus>;
+			clock-names = "apb_pclk";
+			gpio-controller;
+			interrupt-controller;
+			gpio-base = <0x88>;
+			gpio-ranges = <&pinmux 0 136 1 &pinmux 1 137 1
+			               &pinmux 2 138 1 &pinmux 3 139 1>;
+			skip-resume = /bits/ 8 <0x00>;
+
+			#gpio-cells = <2>;
+			#interrupt-cells = <2>;
+		};
+		i2c0: i2c@fe300000 {
+			compatible = "lge,lg1k-i2c";
+			reg = <0x0 0xfe300000 0x0 0x1000>;
+			interrupts = <GIC_SPI 26 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&clk_bus>;
+			clock-names = "apb_pclk";
+
+			#address-cells = <1>;
+			#size-cells = <0>;
+		};
+		i2c1: i2c@fe400000 {
+			compatible = "lge,lg1k-i2c";
+			reg = <0x0 0xfe400000 0x0 0x1000>;
+			interrupts = <GIC_SPI 27 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&clk_bus>;
+			clock-names = "apb_pclk";
+
+			#address-cells = <1>;
+			#size-cells = <0>;
+		};
+		i2c2: i2c@fe500000 {
+			compatible = "lge,lg1k-i2c";
+			reg = <0x0 0xfe500000 0x0 0x1000>;
+			interrupts = <GIC_SPI 28 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&clk_bus>;
+			clock-names = "apb_pclk";
+
+			#address-cells = <1>;
+			#size-cells = <0>;
+		};
+		i2c3: i2c@fe600000 {
+			compatible = "lge,lg1k-i2c";
+			reg = <0x0 0xfe600000 0x0 0x1000>;
+			interrupts = <GIC_SPI 29 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&clk_bus>;
+			clock-names = "apb_pclk";
+
+			#address-cells = <1>;
+			#size-cells = <0>;
+		};
+		i2c4: i2c@f9000000 {
+			compatible = "lge,lg1k-i2c";
+			reg = <0x0 0xf9000000 0x0 0x1000>;
+			interrupts = <GIC_SPI 30 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&clk_bus>;
+			clock-names = "apb_pclk";
+
+			#address-cells = <1>;
+			#size-cells = <0>;
+		};
+		i2c5: i2c@f9100000 {
+			compatible = "lge,lg1k-i2c";
+			reg = <0x0 0xf9100000 0x0 0x1000>;
+			interrupts = <GIC_SPI 31 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&clk_bus>;
+			clock-names = "apb_pclk";
+
+			#address-cells = <1>;
+			#size-cells = <0>;
+		};
+		i2c6: i2c@f9200000 {
+			compatible = "lge,lg1k-i2c";
+			reg = <0x0 0xf9200000 0x0 0x1000>;
+			interrupts = <GIC_SPI 32 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&clk_bus>;
+			clock-names = "apb_pclk";
+
+			#address-cells = <1>;
+			#size-cells = <0>;
+		};
+		i2c7: i2c@f9300000 {
+			compatible = "lge,lg1k-i2c";
+			reg = <0x0 0xf9300000 0x0 0x1000>;
+			interrupts = <GIC_SPI 33 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&clk_bus>;
+			clock-names = "apb_pclk";
+
+			#address-cells = <1>;
+			#size-cells = <0>;
+		};
+		i2c8: i2c@f9400000 {
+			compatible = "lge,lg1k-i2c";
+			reg = <0x0 0xf9400000 0x0 0x1000>;
+			interrupts = <GIC_SPI 34 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&clk_bus>;
+			clock-names = "apb_pclk";
+
+			#address-cells = <1>;
+			#size-cells = <0>;
+		};
+		i2c9: i2c@f9500000 {
+			compatible = "lge,lg1k-i2c";
+			reg = <0x0 0xf9500000 0x0 0x1000>;
+			interrupts = <GIC_SPI 35 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&clk_bus>;
+			clock-names = "apb_pclk";
+
+			#address-cells = <1>;
+			#size-cells = <0>;
+		};
+	};
+};

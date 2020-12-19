@@ -23,6 +23,13 @@ config OF_UNITTEST
 
 	  If unsure, say N here, but this option is safe to enable.
 
+# RTK_patch: for realtek device tree
+config REALTEK_OF
+	bool "Realtek Open Firmwares"
+	help
+	  This option enables Realtek OpenFirmware. The Realtek device drivers
+	  (IRQ/eMMC/...) will be configured by refering to the DTS.
+
 config OF_ALL_DTBS
 	bool "Build all Device Tree Blobs"
 	depends on COMPILE_TEST
@@ -95,7 +102,8 @@ config OF_MTD
 
 config OF_RESERVED_MEM
 	depends on OF_EARLY_FLATTREE
-	bool
+	bool "Device Tree memory reservation"
+	def_bool y if OF && (ARM || ARM64)
 	help
 	  Helpers to allow for reservation of memory regions
 

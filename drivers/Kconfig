@@ -110,6 +110,10 @@ source "drivers/infiniband/Kconfig"
 
 source "drivers/edac/Kconfig"
 
+source "drivers/cec/Kconfig"
+
+source "drivers/smartcard/Kconfig"
+
 source "drivers/rtc/Kconfig"
 
 source "drivers/dma/Kconfig"
@@ -197,5 +201,11 @@ source "drivers/hwtracing/stm/Kconfig"
 source "drivers/hwtracing/intel_th/Kconfig"
 
 source "drivers/fpga/Kconfig"
+
+config LG_BUILTIN_KDRIVER
+       bool "DTV SoC specific Drivers (AKA, kdriver)"
+       default y
+
+source "drivers/tee/Kconfig"
 
 endmenu

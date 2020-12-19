@@ -12,6 +12,8 @@
 #include <linux/random.h>
 #include <linux/elf.h>
 #include <linux/cpu.h>
+#include <linux/ptrace.h>
+#include <asm/pvclock.h>
 #include <asm/vgtod.h>
 #include <asm/proto.h>
 #include <asm/vdso.h>
@@ -89,6 +91,94 @@ static unsigned long vdso_addr(unsigned long start, unsigned len)
 #endif
 }
 
+static int vdso_fault(const struct vm_special_mapping *sm,
+		      struct vm_area_struct *vma, struct vm_fault *vmf)
+{
+	const struct vdso_image *image = vma->vm_mm->context.vdso_image;
+
+	if (!image || (vmf->pgoff << PAGE_SHIFT) >= image->size)
+		return VM_FAULT_SIGBUS;
+
+	vmf->page = virt_to_page(image->data + (vmf->pgoff << PAGE_SHIFT));
+	get_page(vmf->page);
+	return 0;
+}
+
+static void vdso_fix_landing(const struct vdso_image *image,
+		struct vm_area_struct *new_vma)
+{
+#if defined CONFIG_X86_32 || defined CONFIG_IA32_EMULATION
+	if (in_ia32_syscall() && image == &vdso_image_32) {
+		struct pt_regs *regs = current_pt_regs();
+		unsigned long vdso_land = image->sym_int80_landing_pad;
+		unsigned long old_land_addr = vdso_land +
+			(unsigned long)current->mm->context.vdso;
+
+		/* Fixing userspace landing - look at do_fast_syscall_32 */
+		if (regs->ip == old_land_addr)
+			regs->ip = new_vma->vm_start + vdso_land;
+	}
+#endif
+}
+
+static int vdso_mremap(const struct vm_special_mapping *sm,
+		struct vm_area_struct *new_vma)
+{
+	unsigned long new_size = new_vma->vm_end - new_vma->vm_start;
+	const struct vdso_image *image = current->mm->context.vdso_image;
+
+	if (image->size != new_size)
+		return -EINVAL;
+
+	vdso_fix_landing(image, new_vma);
+	current->mm->context.vdso = (void __user *)new_vma->vm_start;
+
+	return 0;
+}
+
+static int vvar_fault(const struct vm_special_mapping *sm,
+		      struct vm_area_struct *vma, struct vm_fault *vmf)
+{
+	const struct vdso_image *image = vma->vm_mm->context.vdso_image;
+	long sym_offset;
+	int ret = -EFAULT;
+
+	if (!image)
+		return VM_FAULT_SIGBUS;
+
+	sym_offset = (long)(vmf->pgoff << PAGE_SHIFT) +
+		image->sym_vvar_start;
+
+	/*
+	 * Sanity check: a symbol offset of zero means that the page
+	 * does not exist for this vdso image, not that the page is at
+	 * offset zero relative to the text mapping.  This should be
+	 * impossible here, because sym_offset should only be zero for
+	 * the page past the end of the vvar mapping.
+	 */
+	if (sym_offset == 0)
+		return VM_FAULT_SIGBUS;
+
+	if (sym_offset == image->sym_vvar_page) {
+		ret = vm_insert_pfn(vma, (unsigned long)vmf->virtual_address,
+				    __pa_symbol(&__vvar_page) >> PAGE_SHIFT);
+	} else if (sym_offset == image->sym_pvclock_page) {
+		struct pvclock_vsyscall_time_info *pvti =
+			pvclock_pvti_cpu0_va();
+		if (pvti && vclock_was_used(VCLOCK_PVCLOCK)) {
+			ret = vm_insert_pfn(
+				vma,
+				(unsigned long)vmf->virtual_address,
+				__pa(pvti) >> PAGE_SHIFT);
+		}
+	}
+
+	if (ret == 0 || ret == -EBUSY)
+		return VM_FAULT_NOPAGE;
+
+	return VM_FAULT_SIGBUS;
+}
+
 static int map_vdso(const struct vdso_image *image, bool calculate_addr)
 {
 	struct mm_struct *mm = current->mm;
@@ -97,6 +187,13 @@ static int map_vdso(const struct vdso_image *image, bool calculate_addr)
 	int ret = 0;
 	static struct page *no_pages[] = {NULL};
 	static struct vm_special_mapping vvar_mapping = {
+
+	static const struct vm_special_mapping vdso_mapping = {
+		.name = "[vdso]",
+		.fault = vdso_fault,
+		.mremap = vdso_mremap,
+	};
+	static const struct vm_special_mapping vvar_mapping = {
 		.name = "[vvar]",
 		.pages = no_pages,
 	};
@@ -128,7 +225,7 @@ static int map_vdso(const struct vdso_image *image, bool calculate_addr)
 				       image->size,
 				       VM_READ|VM_EXEC|
 				       VM_MAYREAD|VM_MAYWRITE|VM_MAYEXEC,
-				       &image->text_mapping);
+				       &vdso_mapping);
 
 	if (IS_ERR(vma)) {
 		ret = PTR_ERR(vma);

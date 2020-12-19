@@ -417,5 +417,5 @@ MODULE_AUTHOR("Mark M. Hoffman <mhoffman@lightlink.com>");
 MODULE_DESCRIPTION("I2C stub driver");
 MODULE_LICENSE("GPL");
 
-module_init(i2c_stub_init);
+subsys_initcall(i2c_stub_init);
 module_exit(i2c_stub_exit);

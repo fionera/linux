@@ -373,10 +373,10 @@ static int _cpu_down(unsigned int cpu, int tasks_frozen)
 	 *
 	 * Do sync before park smpboot threads to take care the rcu boost case.
 	 */
-	if (IS_ENABLED(CONFIG_PREEMPT))
-		synchronize_rcu_mult(call_rcu, call_rcu_sched);
-	else
-		synchronize_rcu();
+#ifdef CONFIG_PREEMPT
+       synchronize_sched();
+#endif
+       synchronize_rcu();
 
 	smpboot_park_threads(cpu);
 
@@ -481,6 +481,28 @@ void smpboot_thread_init(void)
 {
 	register_cpu_notifier(&smpboot_thread_notifier);
 }
+
+#ifdef CONFIG_CPU_FREQ_GOV_INTERACTIVE
+static ATOMIC_NOTIFIER_HEAD(idle_notifier);
+
+void idle_notifier_register(struct notifier_block *n)
+{
+    atomic_notifier_chain_register(&idle_notifier, n);
+}
+EXPORT_SYMBOL_GPL(idle_notifier_register);
+
+void idle_notifier_unregister(struct notifier_block *n)
+{
+    atomic_notifier_chain_unregister(&idle_notifier, n);
+}
+EXPORT_SYMBOL_GPL(idle_notifier_unregister);
+
+void idle_notifier_call_chain(unsigned long val)
+{
+    atomic_notifier_call_chain(&idle_notifier, val, NULL);
+}
+EXPORT_SYMBOL_GPL(idle_notifier_call_chain);
+#endif
 
 /* Requires cpu_add_remove_lock to be held */
 static int _cpu_up(unsigned int cpu, int tasks_frozen)
@@ -620,6 +642,8 @@ void __weak arch_enable_nonboot_cpus_end(void)
 {
 }
 
+extern bool profiling_suspend_disabled;
+
 void enable_nonboot_cpus(void)
 {
 	int cpu, error;
@@ -630,7 +654,10 @@ void enable_nonboot_cpus(void)
 	if (cpumask_empty(frozen_cpus))
 		goto out;
 
-	pr_info("Enabling non-boot CPUs ...\n");
+	if ( !profiling_suspend_disabled )
+		pr_info("Enabling non-boot CPUs ... rtk_profiling\n");
+	else
+		pr_info("Enabling non-boot CPUs ...\n");
 
 	arch_enable_nonboot_cpus_begin();
 

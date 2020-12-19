@@ -12,6 +12,12 @@ ifneq ($(CONFIG_MMU),y)
 obj-y				+= nommu.o
 endif
 
+#kdriver
+ifdef CONFIG_RTK_KDRIVER_SUPPORT
+KBUILD_CPPFLAGS += -Idrivers/rtk_kdriver/include
+KBUILD_CPPFLAGS += -Idrivers/rtk_kdriver/include/rtk_kdriver
+endif
+
 obj-$(CONFIG_ARM_PTDUMP)	+= dump.o
 obj-$(CONFIG_MODULES)		+= proc-syms.o
 
@@ -104,3 +110,6 @@ obj-$(CONFIG_CACHE_L2X0)	+= cache-l2x0.o l2c-l2x0-resume.o
 obj-$(CONFIG_CACHE_XSC3L2)	+= cache-xsc3l2.o
 obj-$(CONFIG_CACHE_TAUROS2)	+= cache-tauros2.o
 obj-$(CONFIG_CACHE_UNIPHIER)	+= cache-uniphier.o
+
+KASAN_SANITIZE_kasan_init.o	:= n
+obj-$(CONFIG_KASAN)		+= kasan_init.o

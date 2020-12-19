@@ -47,6 +47,7 @@
 #include <linux/gfp.h>
 #include <linux/errno.h>
 #include <linux/export.h>
+#include <linux/module.h>
 
 #include <linux/usb/quirks.h>
 
@@ -63,6 +64,17 @@
 #include <linux/blkdev.h>
 #include "../../scsi/sd.h"
 
+/* define initial 64-byte descriptor request timeout in milliseconds */
+static int initial_slow_delay = 0;
+module_param(initial_slow_delay, int, S_IRUGO|S_IWUSR);
+MODULE_PARM_DESC(initial_slow_delay,
+		"delay between command and data phase of early scsi requests "
+		"in microseconds (default 0 - 0.0 microseconds)");
+
+static bool initial_slow_persist_disable = 1;
+module_param(initial_slow_persist_disable, bool, S_IRUGO | S_IWUSR);
+MODULE_PARM_DESC(initial_slow_persist_disable,
+		"disable usb persist for devices with initial_slow quirk");
 
 /***********************************************************************
  * Data transfer routines
@@ -863,8 +875,8 @@ Retry_Sense:
 	/* Error and abort processing: try to resynchronize with the device
 	 * by issuing a port reset.  If that fails, try a class-specific
 	 * device reset. */
-  Handle_Errors:
-
+  Handle_Errors:	
+			     
 	/* Set the RESETTING bit, and clear the ABORTING bit so that
 	 * the reset may proceed. */
 	scsi_lock(us_to_host(us));
@@ -872,6 +884,8 @@ Retry_Sense:
 	clear_bit(US_FLIDX_ABORTING, &us->dflags);
 	scsi_unlock(us_to_host(us));
 
+	pr_warn("-- usb_stor_invoke_transport, do port reset to recovery ---\n");
+	
 	/* We must release the device lock because the pre_reset routine
 	 * will want to acquire it. */
 	mutex_unlock(&us->dev_mutex);
@@ -1097,6 +1111,11 @@ int usb_stor_Bulk_transport(struct scsi_cmnd *srb, struct us_data *us)
 	memset(bcb->CDB, 0, sizeof(bcb->CDB));
 	memcpy(bcb->CDB, srb->cmnd, bcb->Length);
 
+	/* Some card reader chips need some delay before the command phase */
+	if (initial_slow_delay && us->initial_reqs)
+		if (unlikely(us->fflags & US_FL_GO_INITIAL_SLOW))
+			usleep_range(initial_slow_delay, initial_slow_delay+25);
+
 	/* send it to out endpoint */
 	usb_stor_dbg(us, "Bulk Command S 0x%x T 0x%x L %d F %d Trg %d LUN %d CL %d\n",
 		     le32_to_cpu(bcb->Signature), bcb->Tag,
@@ -1117,6 +1136,18 @@ int usb_stor_Bulk_transport(struct scsi_cmnd *srb, struct us_data *us)
 	 * more than that, probably because of clock rate inaccuracies. */
 	if (unlikely(us->fflags & US_FL_GO_SLOW))
 		usleep_range(125, 150);
+
+	/* Some card reader chips need some delay between the command phase
+	 * and the data phase.
+	 */
+	if (initial_slow_delay && us->initial_reqs) {
+		if (unlikely(us->fflags & US_FL_GO_INITIAL_SLOW)) {
+			us->initial_reqs--;
+			usleep_range(initial_slow_delay, initial_slow_delay+25);
+			if (initial_slow_persist_disable)
+				us->pusb_dev->persist_enabled = 0;
+		}
+	}
 
 	if (transfer_length) {
 		unsigned int pipe = srb->sc_data_direction == DMA_FROM_DEVICE ? 

@@ -273,6 +273,16 @@ void arch_cpu_idle_enter(void);
 void arch_cpu_idle_exit(void);
 void arch_cpu_idle_dead(void);
 
+#ifdef CONFIG_CPU_FREQ_GOV_INTERACTIVE
+#define IDLE_START 1
+#define IDLE_END 2
+
+void idle_notifier_register(struct notifier_block *n);
+void idle_notifier_unregister(struct notifier_block *n);
+void idle_notifier_call_chain(unsigned long val);
+#endif
+
+
 DECLARE_PER_CPU(bool, cpu_dead_idle);
 
 int cpu_report_state(int cpu);

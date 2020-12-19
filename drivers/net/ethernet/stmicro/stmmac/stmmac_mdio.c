@@ -29,6 +29,7 @@
 #include <linux/slab.h>
 #include <linux/of.h>
 #include <linux/of_gpio.h>
+#include <linux/of_mdio.h>
 
 #include <asm/io.h>
 
@@ -231,7 +232,10 @@ int stmmac_mdio_register(struct net_device *ndev)
 	new_bus->irq = irqlist;
 	new_bus->phy_mask = mdio_bus_data->phy_mask;
 	new_bus->parent = priv->device;
-	err = mdiobus_register(new_bus);
+	if (priv->device->of_node)
+		err = of_mdiobus_register(new_bus, priv->device->of_node);
+	else
+		err = mdiobus_register(new_bus);
 	if (err != 0) {
 		pr_err("%s: Cannot register as MDIO bus\n", new_bus->name);
 		goto bus_register_fail;

@@ -1303,6 +1303,9 @@ static int usb_suspend_both(struct usb_device *udev, pm_message_t msg)
 			udev->state == USB_STATE_SUSPENDED)
 		goto done;
 
+	if (!PMSG_IS_AUTO(msg) && udev->parent)
+		dev_info(&udev->dev, "suspend start: msg 0x%x\n", msg.event);
+
 	/* Suspend all the interfaces and then udev itself */
 	if (udev->actconfig) {
 		n = udev->actconfig->desc.bNumInterfaces;
@@ -1371,6 +1374,8 @@ static int usb_suspend_both(struct usb_device *udev, pm_message_t msg)
 
  done:
 	dev_vdbg(&udev->dev, "%s: status %d\n", __func__, status);
+	if (!PMSG_IS_AUTO(msg) && udev->parent)
+		dev_info(&udev->dev, "suspend done: status %d\n", status);
 	return status;
 }
 
@@ -1523,6 +1528,8 @@ int usb_resume(struct device *dev, pm_message_t msg)
  */
 void usb_enable_autosuspend(struct usb_device *udev)
 {
+	if (bus_to_hcd(udev->bus)->force_disable_auto_suspend)
+		return;
 	pm_runtime_allow(&udev->dev);
 }
 EXPORT_SYMBOL_GPL(usb_enable_autosuspend);

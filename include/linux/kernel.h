@@ -43,6 +43,7 @@
 #define S64_MIN		((s64)(-S64_MAX - 1))
 
 #define STACK_MAGIC	0xdeadbeef
+#define INVALID_VAL	0xffffffff
 
 #define REPEAT_BYTE(x)	((~0ul / 0xff) * (x))
 
@@ -356,7 +357,8 @@ int __must_check kstrtou16(const char *s, unsigned int base, u16 *res);
 int __must_check kstrtos16(const char *s, unsigned int base, s16 *res);
 int __must_check kstrtou8(const char *s, unsigned int base, u8 *res);
 int __must_check kstrtos8(const char *s, unsigned int base, s8 *res);
-int __must_check kstrtobool(const char *s, bool *res);
+// FIXME! rtk mark
+//int __must_check kstrtobool(const char *s, bool *res);
 
 int __must_check kstrtoull_from_user(const char __user *s, size_t count, unsigned int base, unsigned long long *res);
 int __must_check kstrtoll_from_user(const char __user *s, size_t count, unsigned int base, long long *res);
@@ -832,4 +834,26 @@ static inline void ftrace_dump(enum ftrace_dump_mode oops_dump_mode) { }
 	 /* OTHER_WRITABLE?  Generally considered a bad idea. */		\
 	 BUILD_BUG_ON_ZERO((perms) & 2) +					\
 	 (perms))
+
+#ifdef  CONFIG_REALTEK_SCHED_LOG
+//#include <mach/system.h>
+//#include <mach/timex.h>
+
+extern unsigned int            *sched_log_buf_head;
+extern unsigned int            *sched_log_buf_tail;
+extern unsigned int            *sched_log_buf_ptr;
+extern unsigned int            sched_log_flag;
+extern unsigned int            sched_log_time_scale;
+extern unsigned int            sched_log_start_time;
+
+#define TYPE_BLOCK             0xc0000000
+#define TYPE_YIELD             0x40000000
+#define TYPE_PREEMPT           0x80000000
+
+extern unsigned int log_get_time_stamp(void);
+extern void log_sched(int cpu, int pid, int type);
+extern void log_intr_enter(int cpu, int irq);
+extern void log_intr_exit(int cpu, int irq);
+#endif // CONFIG_REALTEK_SCHED_LOG
+
 #endif

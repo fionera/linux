@@ -329,6 +329,8 @@ static int serial_write(struct tty_struct *tty, const unsigned char *buf,
 	struct usb_serial_port *port = tty->driver_data;
 	int retval = -ENODEV;
 
+	if(port->disable_printk == 1)
+		return 0;
 	if (port->serial->dev->state == USB_STATE_NOTATTACHED)
 		goto exit;
 

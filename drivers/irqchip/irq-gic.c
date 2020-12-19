@@ -1203,6 +1203,45 @@ static bool gic_check_eoimode(struct device_node *node, void __iomem **base)
 
 	return true;
 }
+#include <dt-bindings/interrupt-controller/arm-gic.h>
+
+#ifdef CONFIG_ARM_GIC_IRQ_IDMAP
+static void __init gic_idmap(struct device_node *dn)
+{
+        struct irq_domain *host;
+        struct irq_fwspec fwspec;
+        int rc;
+
+        host = irq_find_host(dn);
+        if (!host) {
+                pr_err("irq_find_host failed\n");
+                return;
+        }
+
+        /*
+         * Pre-create identical(hwirq == virq) IRQ mappings for all
+         * possible SPIs to support IRQs to out-of-DT devices
+         */
+        rc = irq_create_strict_mappings(host, 32, 32, host->hwirq_max - 32);
+        if (rc < 0) {
+                pr_err("irq_create_strict_mappings failed: %d\n", rc);
+                return;
+        }
+
+        fwspec.fwnode = host->fwnode;
+        fwspec.param_count = 3;
+        fwspec.param[0] = GIC_SPI;
+        fwspec.param[1] = 0;
+        fwspec.param[2] = IRQ_TYPE_LEVEL_HIGH;
+
+        rc = __irq_domain_alloc_irqs(host, 32, host->hwirq_max - 32,
+                                     NUMA_NO_NODE, &fwspec, true);
+        if (rc < 0)
+                pr_err("__irq_domain_alloc_irqs failed: %d\n", rc);
+}
+#else
+static void __init gic_idmap(struct device_node *dn) {};
+#endif
 
 static int __init
 gic_of_init(struct device_node *node, struct device_node *parent)
@@ -1245,8 +1284,71 @@ gic_of_init(struct device_node *node, struct device_node *parent)
 		gicv2m_of_init(node, gic_data[gic_cnt].domain);
 
 	gic_cnt++;
+
+	gic_idmap(node);
 	return 0;
 }
+
+#ifdef CONFIG_REALTEK_OF
+int __init realtek_gic_of_init(struct device_node *node, struct device_node *parent)
+{
+	void __iomem *cpu_base;
+	void __iomem *dist_base;
+	u32 percpu_offset;
+	int irq;
+	struct resource of_reg_res;
+
+	if (WARN_ON(!node))
+		return -ENODEV;
+
+	dist_base = of_iomap(node, 0);
+	WARN(!dist_base, "unable to map gic dist registers\n");
+
+	cpu_base = of_iomap(node, 1);
+	WARN(!cpu_base, "unable to map gic cpu registers\n");
+
+#if 0 // old code
+	if (of_address_to_resource(node, 0, &of_reg_res))
+		of_reg_res.start = 0;
+
+	dist_base = (void __iomem *)of_reg_res.start;
+	WARN(!dist_base, "unable to map gic dist registers\n");
+
+	if (of_address_to_resource(node, 1, &of_reg_res))
+		of_reg_res.start = 0;
+
+	cpu_base = (void __iomem *)of_reg_res.start;
+	WARN(!cpu_base, "unable to map gic cpu registers\n");
+#endif
+
+	/*
+	 * Disable split EOI/Deactivate if either HYP is not available
+	 * or the CPU interface is too small.
+	 */
+	if (gic_cnt == 0 && !gic_check_eoimode(node, &cpu_base))
+		static_key_slow_dec(&supports_deactivate);
+
+	if (of_property_read_u32(node, "cpu-offset", &percpu_offset))
+		percpu_offset = 0;
+
+//	__gic_init_bases(gic_cnt, -1, dist_base, cpu_base, percpu_offset, &node->fwnode);
+	__gic_init_bases(gic_cnt, -1, dist_base, cpu_base, percpu_offset, NULL); // FIXME: about the NULL
+	if (!gic_cnt)
+		gic_init_physaddr(node);
+
+	if (parent) {
+		irq = irq_of_parse_and_map(node, 0);
+		gic_cascade_irq(gic_cnt, irq);
+	}
+
+	if (IS_ENABLED(CONFIG_ARM_GIC_V2M))
+		gicv2m_of_init(node, gic_data[gic_cnt].domain);
+
+	gic_cnt++;
+	return 0;
+}
+#endif
+
 IRQCHIP_DECLARE(gic_400, "arm,gic-400", gic_of_init);
 IRQCHIP_DECLARE(arm11mp_gic, "arm,arm11mp-gic", gic_of_init);
 IRQCHIP_DECLARE(arm1176jzf_dc_gic, "arm,arm1176jzf-devchip-gic", gic_of_init);
@@ -1256,6 +1358,10 @@ IRQCHIP_DECLARE(cortex_a7_gic, "arm,cortex-a7-gic", gic_of_init);
 IRQCHIP_DECLARE(msm_8660_qgic, "qcom,msm-8660-qgic", gic_of_init);
 IRQCHIP_DECLARE(msm_qgic2, "qcom,msm-qgic2", gic_of_init);
 IRQCHIP_DECLARE(pl390, "arm,pl390", gic_of_init);
+#ifdef CONFIG_REALTEK_OF
+IRQCHIP_DECLARE(realtek_gic, "realtek,cortex-a9-gic", realtek_gic_of_init);
+#endif
+
 
 #endif
 

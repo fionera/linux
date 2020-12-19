@@ -1243,21 +1243,17 @@ void page_add_new_anon_rmap(struct page *page,
  */
 void page_add_file_rmap(struct page *page)
 {
-	struct mem_cgroup *memcg;
-
-	memcg = mem_cgroup_begin_page_stat(page);
+	lock_page_memcg(page);
 	if (atomic_inc_and_test(&page->_mapcount)) {
 		__inc_zone_page_state(page, NR_FILE_MAPPED);
-		mem_cgroup_inc_page_stat(memcg, MEM_CGROUP_STAT_FILE_MAPPED);
+		mem_cgroup_inc_page_stat(page, MEM_CGROUP_STAT_FILE_MAPPED);
 	}
-	mem_cgroup_end_page_stat(memcg);
+	unlock_page_memcg(page);
 }
 
 static void page_remove_file_rmap(struct page *page)
 {
-	struct mem_cgroup *memcg;
-
-	memcg = mem_cgroup_begin_page_stat(page);
+	lock_page_memcg(page);
 
 	/* page still mapped by someone else? */
 	if (!atomic_add_negative(-1, &page->_mapcount))
@@ -1273,12 +1269,12 @@ static void page_remove_file_rmap(struct page *page)
 	 * pte lock(a spinlock) is held, which implies preemption disabled.
 	 */
 	__dec_zone_page_state(page, NR_FILE_MAPPED);
-	mem_cgroup_dec_page_stat(memcg, MEM_CGROUP_STAT_FILE_MAPPED);
+	mem_cgroup_dec_page_stat(page, MEM_CGROUP_STAT_FILE_MAPPED);
 
 	if (unlikely(PageMlocked(page)))
 		clear_page_mlock(page);
 out:
-	mem_cgroup_end_page_stat(memcg);
+	unlock_page_memcg(page);
 }
 
 /**
@@ -1398,10 +1394,7 @@ static int try_to_unmap_one(struct page *page, struct vm_area_struct *vma,
 		if (PageHuge(page)) {
 			hugetlb_count_sub(1 << compound_order(page), mm);
 		} else {
-			if (PageAnon(page))
-				dec_mm_counter(mm, MM_ANONPAGES);
-			else
-				dec_mm_counter(mm, MM_FILEPAGES);
+			dec_mm_counter(mm, mm_counter(page));
 		}
 		set_pte_at(mm, address, pte,
 			   swp_entry_to_pte(make_hwpoison_entry(page)));
@@ -1411,10 +1404,7 @@ static int try_to_unmap_one(struct page *page, struct vm_area_struct *vma,
 		 * interest anymore. Simply discard the pte, vmscan
 		 * will take care of the rest.
 		 */
-		if (PageAnon(page))
-			dec_mm_counter(mm, MM_ANONPAGES);
-		else
-			dec_mm_counter(mm, MM_FILEPAGES);
+		dec_mm_counter(mm, mm_counter(page));
 	} else if (IS_ENABLED(CONFIG_MIGRATION) && (flags & TTU_MIGRATION)) {
 		swp_entry_t entry;
 		pte_t swp_pte;
@@ -1454,7 +1444,7 @@ static int try_to_unmap_one(struct page *page, struct vm_area_struct *vma,
 			swp_pte = pte_swp_mksoft_dirty(swp_pte);
 		set_pte_at(mm, address, pte, swp_pte);
 	} else
-		dec_mm_counter(mm, MM_FILEPAGES);
+		dec_mm_counter(mm, mm_counter_file(page));
 
 	page_remove_rmap(page);
 	page_cache_release(page);

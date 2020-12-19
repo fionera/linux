@@ -1,0 +1,6 @@
+config RTK_KDRV_VDEC
+	bool "Driver for VDEC HAL Manager"
+	depends on RTK_KDRV_RPC
+	default n
+	help
+	  Driver for VDEC HAL Manager

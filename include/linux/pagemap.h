@@ -16,15 +16,14 @@
 #include <linux/hugetlb_inline.h>
 
 /*
- * Bits in mapping->flags.  The lower __GFP_BITS_SHIFT bits are the page
- * allocation mode flags.
+ * Bits in mapping->flags.
  */
 enum mapping_flags {
-	AS_EIO		= __GFP_BITS_SHIFT + 0,	/* IO error on async write */
-	AS_ENOSPC	= __GFP_BITS_SHIFT + 1,	/* ENOSPC on async write */
-	AS_MM_ALL_LOCKS	= __GFP_BITS_SHIFT + 2,	/* under mm_take_all_locks() */
-	AS_UNEVICTABLE	= __GFP_BITS_SHIFT + 3,	/* e.g., ramdisk, SHM_LOCK */
-	AS_EXITING	= __GFP_BITS_SHIFT + 4, /* final truncate in progress */
+	AS_EIO		= 0,	/* IO error on async write */
+	AS_ENOSPC	= 1,	/* ENOSPC on async write */
+	AS_MM_ALL_LOCKS	= 2,	/* under mm_take_all_locks() */
+	AS_UNEVICTABLE	= 3,	/* e.g., ramdisk, SHM_LOCK */
+	AS_EXITING	= 4,	/* final truncate in progress */
 };
 
 static inline void mapping_set_error(struct address_space *mapping, int error)
@@ -66,7 +65,7 @@ static inline int mapping_exiting(struct address_space *mapping)
 
 static inline gfp_t mapping_gfp_mask(struct address_space * mapping)
 {
-	return (__force gfp_t)mapping->flags & __GFP_BITS_MASK;
+	return mapping->gfp_mask;
 }
 
 /* Restricts the given gfp_mask to what the mapping allows. */
@@ -82,8 +81,7 @@ static inline gfp_t mapping_gfp_constraint(struct address_space *mapping,
  */
 static inline void mapping_set_gfp_mask(struct address_space *m, gfp_t mask)
 {
-	m->flags = (m->flags & ~(__force unsigned long)__GFP_BITS_MASK) |
-				(__force unsigned long)mask;
+	m->gfp_mask = mask;
 }
 
 /*
@@ -658,8 +656,7 @@ int add_to_page_cache_locked(struct page *page, struct address_space *mapping,
 int add_to_page_cache_lru(struct page *page, struct address_space *mapping,
 				pgoff_t index, gfp_t gfp_mask);
 extern void delete_from_page_cache(struct page *page);
-extern void __delete_from_page_cache(struct page *page, void *shadow,
-				     struct mem_cgroup *memcg);
+extern void __delete_from_page_cache(struct page *page, void *shadow);
 int replace_page_cache_page(struct page *old, struct page *new, gfp_t gfp_mask);
 
 /*

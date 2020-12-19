@@ -40,7 +40,7 @@
 #include "ion.h"
 #include "ion_priv.h"
 #include "compat_ion.h"
-
+#include <linux/module.h>
 /**
  * struct ion_device - the metadata of the ion device node
  * @dev:		the actual misc device
@@ -1256,7 +1256,7 @@ static unsigned int ion_ioctl_dir(unsigned int cmd)
 	switch (cmd) {
 	case ION_IOC_SYNC:
 	case ION_IOC_FREE:
-	case ION_IOC_CUSTOM:
+	//case ION_IOC_CUSTOM://RTKmodify: ION_IOC_CUSTOM is read & write!!
 		return _IOC_WRITE;
 	default:
 		return _IOC_DIR(cmd);
@@ -1353,11 +1353,30 @@ static long ion_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 	{
 		if (!dev->custom_ioctl)
 			return -ENOTTY;
-		ret = dev->custom_ioctl(client, data.custom.cmd,
-						data.custom.arg);
+
+        if( data.custom.cmd == 1) {
+            //RTKmodify: force data.custom.arg point to start of '&data' to pass back value to user level
+
+            struct RT_ION_QUERY_PHY_data to_callee;
+            to_callee.handle_id = data.custom.arg;
+
+            data.custom.arg = (unsigned long)&to_callee;
+            ret = dev->custom_ioctl(client, data.custom.cmd,
+                            data.custom.arg );
+            if(ret ==0) {
+                data.custom.arg = to_callee.phy_addr;
+            }
+
+        }
+        else {
+            //org code.
+        ret = dev->custom_ioctl(client, data.custom.cmd,
+                        data.custom.arg);
+        }
 		break;
 	}
 	default:
+        printk(KERN_ERR " ion invalid cmd:0x%x\n", cmd);
 		return -ENOTTY;
 	}
 

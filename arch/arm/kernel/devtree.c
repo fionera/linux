@@ -152,9 +152,9 @@ void __init arm_dt_init_cpu_maps(void)
 			i = cpuidx++;
 		}
 
-		if (WARN(cpuidx > nr_cpu_ids, "DT /cpu %u nodes greater than "
-					       "max cores %u, capping them\n",
-					       cpuidx, nr_cpu_ids)) {
+		if (cpuidx > nr_cpu_ids) {
+			pr_warn("DT /cpu %u nodes greater than max cores %u, capping them\n",
+				   cpuidx, nr_cpu_ids);
 			cpuidx = nr_cpu_ids;
 			of_node_put(cpu);
 			break;

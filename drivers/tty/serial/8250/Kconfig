@@ -96,6 +96,13 @@ config SERIAL_8250_GSC
 	depends on SERIAL_8250 && GSC
 	default SERIAL_8250
 
+config REALTEK_UART_DMA
+	bool "Uart1 DMA function support"
+	depends on SERIAL_8250
+	default n
+	help
+	  Uart1 DMA function support.
+
 config SERIAL_8250_DMA
 	bool "DMA support for 16550 compatible UART controllers" if EXPERT
 	depends on SERIAL_8250 && DMADEVICES=y

@@ -33,9 +33,25 @@ struct vm_area_struct;
 #define ___GFP_NOACCOUNT	0x100000u
 #define ___GFP_NOTRACK		0x200000u
 #define ___GFP_DIRECT_RECLAIM	0x400000u
+#ifdef CONFIG_ZONE_ZRAM
+#define ___GFP_ZONE_ZRAM	0x800000u
+#define ___GFP_OTHER_NODE	0
+#else
 #define ___GFP_OTHER_NODE	0x800000u
+#endif
 #define ___GFP_WRITE		0x1000000u
 #define ___GFP_KSWAPD_RECLAIM	0x2000000u
+#define ___GFP_CMA		0x4000000u
+
+#ifdef CONFIG_ZONE_ZRAM
+  #ifdef CONFIG_EKP_ROMEMPOOL
+  #error "gfpmask mismatch with enable CONFIG_EKP_ROMEMPOOL"
+  #else
+#define ___GFP_GPU_RENDER		0x8000000u
+  #endif
+#else
+#define ___GFP_READONLY		0x8000000u
+#endif
 /* If the above are modified, __GFP_BITS_SHIFT may need updating */
 
 /*
@@ -50,6 +66,7 @@ struct vm_area_struct;
 #define __GFP_DMA32	((__force gfp_t)___GFP_DMA32)
 #define __GFP_MOVABLE	((__force gfp_t)___GFP_MOVABLE)  /* Page is movable */
 #define __GFP_MOVABLE	((__force gfp_t)___GFP_MOVABLE)  /* ZONE_MOVABLE allowed */
+#define __GFP_CMA	((__force gfp_t)___GFP_CMA)  /* Page is cma */
 #define GFP_ZONEMASK	(__GFP_DMA|__GFP_HIGHMEM|__GFP_DMA32|__GFP_MOVABLE)
 
 /*
@@ -173,6 +190,8 @@ struct vm_area_struct;
  *   should not be accounted for as a remote allocation in vmstat. A
  *   typical user would be khugepaged collapsing a huge page on a remote
  *   node.
+ *
+ * __GFP_READONLY makes allocated memory read-only.
  */
 #define __GFP_COLD	((__force gfp_t)___GFP_COLD)
 #define __GFP_NOWARN	((__force gfp_t)___GFP_NOWARN)
@@ -180,10 +199,25 @@ struct vm_area_struct;
 #define __GFP_ZERO	((__force gfp_t)___GFP_ZERO)
 #define __GFP_NOTRACK	((__force gfp_t)___GFP_NOTRACK)
 #define __GFP_NOTRACK_FALSE_POSITIVE (__GFP_NOTRACK)
+#ifdef CONFIG_ZONE_ZRAM
+#define __GFP_ZONE_ZRAM ((__force gfp_t)___GFP_ZONE_ZRAM)
+#define __GFP_OTHER_NODE 0
+#else
 #define __GFP_OTHER_NODE ((__force gfp_t)___GFP_OTHER_NODE)
+#endif
+
+#ifdef CONFIG_ZONE_ZRAM
+  #ifdef CONFIG_EKP_ROMEMPOOL
+  #error "gfpmask mismatch with enable CONFIG_EKP_ROMEMPOOL"
+  #else
+#define __GFP_GPU_RENDER	((__force gfp_t)___GFP_GPU_RENDER)
+  #endif
+#else
+#define __GFP_READONLY	((__force gfp_t)___GFP_READONLY)
+#endif
 
 /* Room for N __GFP_FOO bits */
-#define __GFP_BITS_SHIFT 26
+#define __GFP_BITS_SHIFT 28
 #define __GFP_BITS_MASK ((__force gfp_t)((1 << __GFP_BITS_SHIFT) - 1))
 
 /*
@@ -292,6 +326,16 @@ static inline bool gfpflags_allow_blocking(const gfp_t gfp_flags)
 #define OPT_ZONE_DMA32 ZONE_NORMAL
 #endif
 
+#if defined(CONFIG_CMA) && defined(CONFIG_CMA_POPULATE)
+#ifdef CONFIG_HIGHMEM
+#define OPT_ZONE_CMA ZONE_CMA_HIGHMEM
+#else
+#define OPT_ZONE_CMA ZONE_CMA_LOWMEM
+#endif
+#else
+#define OPT_ZONE_CMA ZONE_MOVABLE
+#endif
+
 /*
  * GFP_ZONE_TABLE is a word size bitstring that is used for looking up the
  * zone to use given the lowest 4 bits of gfp_t. Entries are ZONE_SHIFT long
@@ -322,22 +366,25 @@ static inline bool gfpflags_allow_blocking(const gfp_t gfp_flags)
  *       0xe    => BAD (MOVABLE+DMA32+HIGHMEM)
  *       0xf    => BAD (MOVABLE+DMA32+HIGHMEM+DMA)
  *
- * ZONES_SHIFT must be <= 2 on 32 bit platforms.
  */
 
-#if 16 * ZONES_SHIFT > BITS_PER_LONG
-#error ZONES_SHIFT too large to create GFP_ZONE_TABLE integer
+#define GFP_ZONES_SHIFT ZONES_SHIFT
+
+#if !defined(CONFIG_64BITS) && GFP_ZONES_SHIFT > 2
+#define GFP_ZONE_TABLE_CAST unsigned long long
+#else
+#define GFP_ZONE_TABLE_CAST unsigned long
 #endif
 
 #define GFP_ZONE_TABLE ( \
-	(ZONE_NORMAL << 0 * ZONES_SHIFT)				      \
-	| (OPT_ZONE_DMA << ___GFP_DMA * ZONES_SHIFT)			      \
-	| (OPT_ZONE_HIGHMEM << ___GFP_HIGHMEM * ZONES_SHIFT)		      \
-	| (OPT_ZONE_DMA32 << ___GFP_DMA32 * ZONES_SHIFT)		      \
-	| (ZONE_NORMAL << ___GFP_MOVABLE * ZONES_SHIFT)			      \
-	| (OPT_ZONE_DMA << (___GFP_MOVABLE | ___GFP_DMA) * ZONES_SHIFT)	      \
-	| (ZONE_MOVABLE << (___GFP_MOVABLE | ___GFP_HIGHMEM) * ZONES_SHIFT)   \
-	| (OPT_ZONE_DMA32 << (___GFP_MOVABLE | ___GFP_DMA32) * ZONES_SHIFT)   \
+	((GFP_ZONE_TABLE_CAST) ZONE_NORMAL << 0 * GFP_ZONES_SHIFT)					\
+	| ((GFP_ZONE_TABLE_CAST) OPT_ZONE_DMA << ___GFP_DMA * GFP_ZONES_SHIFT)				\
+	| ((GFP_ZONE_TABLE_CAST) OPT_ZONE_HIGHMEM << ___GFP_HIGHMEM * GFP_ZONES_SHIFT)			\
+	| ((GFP_ZONE_TABLE_CAST) OPT_ZONE_DMA32 << ___GFP_DMA32 * GFP_ZONES_SHIFT)			\
+	| ((GFP_ZONE_TABLE_CAST) ZONE_NORMAL << ___GFP_MOVABLE * GFP_ZONES_SHIFT)			\
+	| ((GFP_ZONE_TABLE_CAST) OPT_ZONE_DMA << (___GFP_MOVABLE | ___GFP_DMA) * GFP_ZONES_SHIFT)	\
+	| ((GFP_ZONE_TABLE_CAST) OPT_ZONE_CMA << (___GFP_MOVABLE | ___GFP_HIGHMEM) * GFP_ZONES_SHIFT)	\
+	| ((GFP_ZONE_TABLE_CAST) OPT_ZONE_DMA32 << (___GFP_MOVABLE | ___GFP_DMA32) * GFP_ZONES_SHIFT)	\
 )
 
 /*
@@ -364,6 +411,20 @@ static inline enum zone_type gfp_zone(gfp_t flags)
 
 	z = (GFP_ZONE_TABLE >> (bit * ZONES_SHIFT)) &
 					 ((1 << ZONES_SHIFT) - 1);
+#if defined(CONFIG_CMA) && !defined(CONFIG_CMA_POPULATE)
+	if (z == ZONE_MOVABLE && flags & __GFP_CMA)
+#ifdef CONFIG_HIGHMEM
+		z = ZONE_CMA_HIGHMEM;
+#else
+		z = ZONE_CMA_LOWMEM;
+#endif
+#endif
+#ifdef CONFIG_ZONE_ZRAM
+	if (flags & __GFP_ZONE_ZRAM) {
+		z = ZONE_ZRAM;
+	}
+#endif
+
 	VM_BUG_ON((GFP_ZONE_BAD >> bit) & 1);
 	return z;
 }
@@ -542,8 +603,7 @@ static inline bool pm_suspended_storage(void)
 #ifdef CONFIG_CMA
 
 /* The below functions must be run on a range from a single zone. */
-extern int alloc_contig_range(unsigned long start, unsigned long end,
-			      unsigned migratetype);
+extern int alloc_contig_range(unsigned long start, unsigned long end);
 extern void free_contig_range(unsigned long pfn, unsigned nr_pages);
 
 /* CMA stuff */

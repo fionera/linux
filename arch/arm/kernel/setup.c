@@ -32,6 +32,7 @@
 #include <linux/compiler.h>
 #include <linux/sort.h>
 #include <linux/psci.h>
+#include <linux/clk-provider.h>
 
 #include <asm/unified.h>
 #include <asm/cp15.h>
@@ -60,6 +61,7 @@
 #include <asm/unwind.h>
 #include <asm/memblock.h>
 #include <asm/virt.h>
+#include <asm/arch_timer.h>
 
 #include "atags.h"
 
@@ -78,6 +80,7 @@ __setup("fpe=", fpe_setup);
 
 extern void init_default_cache_policy(unsigned long);
 extern void paging_init(const struct machine_desc *desc);
+extern void check_ext_mem_size(void);
 extern void early_paging_init(const struct machine_desc *);
 extern void sanity_check_meminfo(void);
 extern enum reboot_mode reboot_mode;
@@ -89,6 +92,8 @@ unsigned int __machine_arch_type __read_mostly;
 EXPORT_SYMBOL(__machine_arch_type);
 unsigned int cacheid __read_mostly;
 EXPORT_SYMBOL(cacheid);
+
+unsigned int vipt_aliasing;
 
 unsigned int __atags_pointer __initdata;
 
@@ -351,6 +356,8 @@ static void __init cacheid_init(void)
 		icache_is_vipt_aliasing() ? "VIPT aliasing" :
 		icache_is_pipt() ? "PIPT" :
 		cache_is_vipt_nonaliasing() ? "VIPT nonaliasing" : "unknown");
+
+	vipt_aliasing = cache_is_vipt_aliasing() ? 1 : 0;
 }
 
 /*
@@ -445,6 +452,25 @@ static void __init elf_hwcap_fixup(void)
 		elf_hwcap &= ~HWCAP_SWP;
 }
 
+#if defined (CONFIG_BRINGUP_RTD288O_HACK)
+static void arch_counter_set_user_access(void)
+{
+	u32 cntkctl = arch_timer_get_cntkctl();
+
+	/* Disable user access to the timers and the physical counter */
+	/* Also disable virtual event stream */
+	cntkctl &= ~(ARCH_TIMER_USR_PT_ACCESS_EN
+			| ARCH_TIMER_USR_VT_ACCESS_EN
+			| ARCH_TIMER_VIRT_EVT_EN
+			| ARCH_TIMER_USR_PCT_ACCESS_EN);
+
+	/* Enable user access to the virtual counter */
+	cntkctl |= ARCH_TIMER_USR_VCT_ACCESS_EN;
+
+	arch_timer_set_cntkctl(cntkctl);
+}
+#endif //#if defined (CONFIG_BRINGUP_RTD288O_HACK)
+
 /*
  * cpu_init - initialise one CPU.
  *
@@ -509,6 +535,11 @@ void notrace cpu_init(void)
 	      PLC (PSR_F_BIT | PSR_I_BIT | SVC_MODE)
 	    : "r14");
 #endif
+
+#if defined (CONFIG_BRINGUP_RTD288O_HACK)
+        arch_counter_set_user_access();
+#endif //#if defined (CONFIG_BRINGUP_RTD288O_HACK)
+
 }
 
 u32 __cpu_logical_map[NR_CPUS] = { [0 ... NR_CPUS-1] = MPIDR_INVALID };
@@ -830,6 +861,18 @@ static int __init customize_machine(void)
 	 * machine from the device tree, if no callback is provided,
 	 * otherwise we would always need an init_machine callback.
 	 */
+// RTK_patch: for dt support
+#ifdef CONFIG_REALTEK_OF
+	of_iommu_init();
+	if (machine_desc->init_machine)
+		machine_desc->init_machine();
+	of_clk_init(NULL);
+	of_platform_populate(NULL, of_default_bus_match_table,
+		NULL, NULL);
+	return 0;
+
+#else
+
 	of_iommu_init();
 	if (machine_desc->init_machine)
 		machine_desc->init_machine();
@@ -838,6 +881,9 @@ static int __init customize_machine(void)
 		of_platform_populate(NULL, of_default_bus_match_table,
 					NULL, NULL);
 #endif
+#endif
+
+        
 	return 0;
 }
 arch_initcall(customize_machine);
@@ -868,6 +914,12 @@ static int __init init_machine_late(void)
 late_initcall(init_machine_late);
 
 #ifdef CONFIG_KEXEC
+/*
+ * The crash region must be aligned to 128MB to avoid
+ * zImage relocating below the reserved region.
+ */
+#define CRASH_ALIGN	(128 << 20)
+
 static inline unsigned long long get_total_mem(void)
 {
 	unsigned long total;
@@ -894,6 +946,29 @@ static void __init reserve_crashkernel(void)
 				&crash_size, &crash_base);
 	if (ret)
 		return;
+
+	if (crash_base <= 0) {
+		unsigned long long crash_max = (u32)~0;
+		unsigned long long lowmem_max = __pa(high_memory - 1) + 1;
+		if (crash_max > lowmem_max)
+			crash_max = lowmem_max;
+		crash_base = memblock_find_in_range(CRASH_ALIGN, crash_max,
+						    crash_size, CRASH_ALIGN);
+		if (!crash_base) {
+			pr_err("crashkernel reservation failed - No suitable area found.\n");
+			return;
+		}
+	} else {
+		unsigned long long start;
+
+		start = memblock_find_in_range(crash_base,
+					       crash_base + crash_size,
+					       crash_size, SECTION_SIZE);
+		if (start != crash_base) {
+			pr_err("crashkernel reservation failed - memory is in use.\n");
+			return;
+		}
+	}
 
 	ret = memblock_reserve(crash_base, crash_size);
 	if (ret < 0) {
@@ -932,11 +1007,31 @@ void __init hyp_mode_check(void)
 #endif
 }
 
+#ifdef CONFIG_REALTEK_LOGBUF
+__attribute__((weak)) void rtdlog_parse_bufsize(char * str)
+{
+        return;
+}
+#endif
+
 void __init setup_arch(char **cmdline_p)
 {
 	const struct machine_desc *mdesc;
+#ifdef CONFIG_BUILD_ARM_APPENDED_DTB_IMAGE_EXT
+	extern char __dtb_start[], __dtb_end[];
+	extern int atags_to_fdt(void *atag_list, void *fdt, int total_space);
+#endif
 
 	setup_processor();
+
+	// RTK_patch: support atags to dtbs
+#ifdef CONFIG_BUILD_ARM_APPENDED_DTB_IMAGE_EXT
+	#ifdef CONFIG_ARM_ATAG_DTB_COMPAT_EXT
+		atags_to_fdt(phys_to_virt(__atags_pointer), &__dtb_start, 0x4000);
+	#endif
+	memcpy((void *)phys_to_virt(__atags_pointer), (void *)&__dtb_start, (int)&__dtb_end - (int)&__dtb_start);
+#endif
+
 	mdesc = setup_machine_fdt(__atags_pointer);
 	if (!mdesc)
 		mdesc = setup_machine_tags(__atags_pointer, __machine_arch_type);
@@ -965,7 +1060,11 @@ void __init setup_arch(char **cmdline_p)
 	early_paging_init(mdesc);
 #endif
 	setup_dma_zone(mdesc);
+	check_ext_mem_size();
 	sanity_check_meminfo();
+#ifdef CONFIG_REALTEK_LOGBUF
+        rtdlog_parse_bufsize(cmd_line);
+#endif
 	arm_memblock_init(mdesc);
 
 	paging_init(mdesc);

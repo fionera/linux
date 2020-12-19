@@ -69,6 +69,16 @@ void __weak panic_smp_self_stop(void)
  *
  *	This function never returns.
  */
+#ifdef CONFIG_REALTEK_UART2RBUS_CONTROL
+extern void enable_uart2rbus(unsigned int value);
+#endif
+#ifdef CONFIG_RTK_KDRV_WATCHDOG
+extern void DDR_scan_set_error(int cpu);
+#endif
+
+
+__weak void DDR_scan_set_error(int cpu) {}
+
 void panic(const char *fmt, ...)
 {
 	static DEFINE_SPINLOCK(panic_lock);
@@ -76,6 +86,12 @@ void panic(const char *fmt, ...)
 	va_list args;
 	long i, i_next = 0;
 	int state = 0;
+
+#ifdef CONFIG_REALTEK_UART2RBUS_CONTROL
+	enable_uart2rbus(1);
+#endif
+
+	DDR_scan_set_error(0);
 
 	/*
 	 * Disable local interrupts. This will prevent panic_smp_self_stop

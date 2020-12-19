@@ -3,16 +3,96 @@
 #include <linux/utsname.h>
 #include <linux/freezer.h>
 #include <linux/compiler.h>
+#include <mach/rtk_platform.h>
 
 struct swsusp_info {
 	struct new_utsname	uts;
 	u32			version_code;
+#if defined(CONFIG_LG_SNAPSHOT_BOOT)
+	unsigned int		num_physpages;
+	int			cpus;
+	unsigned int		image_pages;
+	unsigned int		pages;
+	unsigned int		size;
+#else
 	unsigned long		num_physpages;
 	int			cpus;
 	unsigned long		image_pages;
 	unsigned long		pages;
 	unsigned long		size;
+#endif
 } __aligned(PAGE_SIZE);
+
+
+struct hib_bio_batch {
+	atomic_t		count;
+	wait_queue_head_t	wait;
+	int			error;
+};
+
+extern struct block_device *hib_resume_bdev;
+extern int hib_submit_io(int rw, pgoff_t page_off, void *addr,
+		struct hib_bio_batch *hb);
+extern int hib_wait_io(struct hib_bio_batch *hb);
+extern void hib_init_batch(struct hib_bio_batch *hb);
+
+#ifdef CONFIG_LG_SNAPSHOT_BOOT
+#define GET_SNAP_HEADER(header) ((void *)((uintptr_t)header + PAGE_SIZE - ALIGN(sizeof(struct snapshot_header), 32)))
+
+#define LG_SNAPSHOT_MAGIC_CODE 0x03160326
+#define PART_TYPE_NAME_LEN 20
+#define VALUE_NAME_LEN 20
+#define MAX_DEP_PARTS 10
+#define MAX_PART_VALUES 2
+
+#ifdef CONFIG_SNAPSHOT_IMAGE_COMPRESSION
+#define SNAP_COMP_ALGO CONFIG_SNAPSHOT_COMPRESS_TYPE
+#else
+#define SNAP_COMP_ALGO ""
+#endif
+
+enum compress_algorithm {
+	UNCOMPRESSED,
+	LZO,
+	LZ4HC,
+	LZ4,
+};
+
+struct dep_parts {
+	char part_type[PART_TYPE_NAME_LEN];
+	char value_name[MAX_PART_VALUES][VALUE_NAME_LEN];
+	int nr_dep_parts;
+
+	struct dep_part_info {
+		int partnum;
+		unsigned int value[MAX_PART_VALUES];
+	} dep_part_info[MAX_DEP_PARTS];
+};
+
+struct snapshot_header {
+	unsigned int magic;
+	enum compress_algorithm compress_algo;
+	unsigned int image_size;
+	unsigned int pfn_mi_cnt;
+	unsigned int metadata_start_offset_for_comp;
+	unsigned int crc;
+	unsigned int pa_resume_func;
+	struct dep_parts deps;
+};
+
+/* For adjacent pfn merge */
+struct merge_block_info {
+	unsigned int merged_cnt;
+	unsigned int compblock_len;
+};
+
+struct pfn_merge_info {
+	unsigned int start_pfn;
+	unsigned int compressed;
+	struct merge_block_info info;
+};
+extern int arch_pfn_is_nosave(unsigned long);
+#endif //CONFIG_LG_SNAPSHOT_BOOT
 
 #ifdef CONFIG_HIBERNATION
 /* kernel/power/snapshot.c */
@@ -58,6 +138,14 @@ extern bool freezer_test_done;
 extern int hibernation_snapshot(int platform_mode);
 extern int hibernation_restore(int platform_mode);
 extern int hibernation_platform_enter(void);
+
+#ifdef CONFIG_LG_SNAPSHOT_BOOT
+#ifdef CONFIG_CUSTOMER_TV006
+extern const int GAL_MEM_SIZE;
+extern const int GAL_MEM_ADDR_START;
+#endif
+extern int hibernation_free_bootmem(void);
+#endif
 
 #else /* !CONFIG_HIBERNATION */
 
@@ -159,6 +247,12 @@ extern void swsusp_free(void);
 extern int swsusp_read(unsigned int *flags_p);
 extern int swsusp_write(unsigned int flags);
 extern void swsusp_close(fmode_t);
+
+#ifdef CONFIG_LG_SNAPSHOT_BOOT
+/* kernel/power/rawdev_snapshot_io.c */
+int rawdev_snapshot_write(unsigned int flags);
+#endif
+
 #ifdef CONFIG_SUSPEND
 extern int swsusp_unmark(void);
 #endif

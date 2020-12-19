@@ -44,6 +44,7 @@ enum dmxdev_type {
 	DMXDEV_TYPE_NONE,
 	DMXDEV_TYPE_SEC,
 	DMXDEV_TYPE_PES,
+	DMXDEV_TYPE_TEMI,
 };
 
 enum dmxdev_state {
@@ -70,6 +71,7 @@ struct dmxdev_filter {
 		/* list of TS and PES feeds (struct dmxdev_feed) */
 		struct list_head ts;
 		struct dmx_section_feed *sec;
+		struct dmx_temi_feed *temi;
 	} feed;
 
 	union {
@@ -100,13 +102,15 @@ struct dmxdev {
 
 	int filternum;
 	int capabilities;
+	int dvrActiveFilterCnt;
 
 	unsigned int exit:1;
 #define DMXDEV_CAP_DUPLEX 1
 	struct dmx_frontend *dvr_orig_fe;
 
 	struct dvb_ringbuffer dvr_buffer;
-#define DVR_BUFFER_SIZE (10*188*1024)
+	unsigned int dvr_buffer_total_readSize;//Mbytes
+#define DVR_BUFFER_SIZE (192*1024*20)//(10*188*1024)
 
 	struct mutex mutex;
 	spinlock_t lock;

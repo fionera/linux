@@ -12,6 +12,7 @@ menuconfig V4L_PLATFORM_DRIVERS
 if V4L_PLATFORM_DRIVERS
 
 source "drivers/media/platform/marvell-ccic/Kconfig"
+source "drivers/media/platform/lg1k/Kconfig"
 
 config VIDEO_VIA_CAMERA
 	tristate "VIAFB camera controller support"
@@ -271,6 +272,13 @@ config VIDEO_TI_VPE_DEBUG
 	depends on VIDEO_TI_VPE
 	---help---
 	  Enable debug messages on VPE driver.
+
+config RTK_KDRV_V4L2_VCODEC
+	bool "Realtek V4L2 video codec driver"
+	select V4L2_MEM2MEM_DEV
+	select VIDEOBUF2_DMA_CONTIG
+	---help---
+	  Enable realtek v4l2 codec.
 
 endif # V4L_MEM2MEM_DRIVERS
 

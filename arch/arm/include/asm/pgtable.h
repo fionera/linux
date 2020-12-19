@@ -116,6 +116,9 @@ extern pgprot_t		pgprot_s2_device;
 #define pgprot_noncached(prot) \
 	__pgprot_modify(prot, L_PTE_MT_MASK, L_PTE_MT_UNCACHED)
 
+// RTK_patch: add pgprot_rtk_device api
+#define pgprot_rtk_device(prot) \
+	__pgprot_modify(prot, L_PTE_MT_MASK, L_PTE_MT_UNCACHED | L_PTE_XN)
 #define pgprot_writecombine(prot) \
 	__pgprot_modify(prot, L_PTE_MT_MASK, L_PTE_MT_BUFFERABLE)
 

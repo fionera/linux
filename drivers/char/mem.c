@@ -739,8 +739,258 @@ static loff_t memory_lseek(struct file *file, loff_t offset, int orig)
 
 static int open_port(struct inode *inode, struct file *filp)
 {
-	return capable(CAP_SYS_RAWIO) ? 0 : -EPERM;
+	//return capable(CAP_SYS_RAWIO) ? 0 : -EPERM;
+	return 0;//hack for CP can't play
 }
+
+#ifdef CONFIG_REALTEK_DEV_MEM
+#include <linux/pageremap.h>
+
+#define MEM_IOCQALLOC           _IO('k', 0x20)
+#define MEM_IOCQFREE            _IO('k', 0x21)
+
+struct mem_record_head {
+	struct list_head        list;
+	struct mutex            mutex;
+};
+
+struct mem_record_node {
+	struct list_head        list;
+	unsigned long           addr;
+};
+
+static int mmap_rtkmem(struct file *file, struct vm_area_struct *vma)
+{
+	size_t size = vma->vm_end - vma->vm_start;
+    unsigned long start = 0, end = 0;
+    int idx;
+    int pa_query_map_ok = 0;
+
+    if ( (idx = carvedout_buf_query_is_in_range(PFN_PHYS(vma->vm_pgoff), (void **)&start, (void **)&end)) >= 0 ) {
+        if (size <= (end - start))
+            pa_query_map_ok |= 1;
+    }
+
+    if (check_cma_memory(vma->vm_pgoff)) {
+        if (check_cma_memory(PFN_DOWN(PFN_PHYS(vma->vm_pgoff - 1) + size)))
+            pa_query_map_ok |= 2;
+    }
+
+    if (!pa_query_map_ok) {
+        pr_err("(%s) mmap pa(%lx/%x) flag(%x) in not allow range\n", current->comm, PFN_PHYS(vma->vm_pgoff), size, pa_query_map_ok);
+        return -EPERM;
+    } else {
+        pr_debug("(%s) mmap pa(%lx/%x) flag(%x) OK range\n", current->comm, PFN_PHYS(vma->vm_pgoff), size, pa_query_map_ok);
+    }
+
+	if (!valid_mmap_phys_addr_range(vma->vm_pgoff, size))
+		return -EINVAL;
+
+	if (!private_mapping_ok(vma))
+		return -ENOSYS;
+
+	if (!range_is_allowed(vma->vm_pgoff, size))
+		return -EPERM;
+
+	if (!phys_mem_access_prot_allowed(file, vma->vm_pgoff, size,
+						&vma->vm_page_prot))
+		return -EINVAL;
+
+	if (file->f_flags & O_DSYNC)
+		vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot);
+
+	vma->vm_ops = &mmap_mem_ops;
+
+	/* Remap-pfn-range will mark the range VM_IO */
+	if (remap_pfn_range(vma,
+			    vma->vm_start,
+			    vma->vm_pgoff,
+			    size,
+			    vma->vm_page_prot)) {
+		return -EAGAIN;
+	}
+
+	vma->vm_flags = (vma->vm_flags | VM_PLI);
+
+	return 0;
+}
+
+static int open_rtkmem(struct inode * inode, struct file * filp)
+{
+	return 0;
+}
+
+static int release_rtkmem(struct inode * inode, struct file * filp)
+{
+	if (filp->private_data != NULL) {
+		struct mem_record_node *rec, *tmp;
+		struct list_head *plist;
+
+		plist = &((struct mem_record_head *)filp->private_data)->list;
+		list_for_each_entry_safe(rec, tmp, plist, list) {
+//			printk("*** remove2: %lx \n", rec->addr);
+			dvr_free_page(pfn_to_page(rec->addr));
+			list_del(&rec->list);
+			kfree(rec);
+		}
+
+		kfree(filp->private_data);
+		filp->private_data = NULL;
+	}
+	return 0;
+}
+
+static long ioctl_rtkmem(struct file *filp, unsigned int cmd, unsigned long arg)
+{
+	long ret = 0;
+
+	switch (cmd) {
+	case MEM_IOCQALLOC:
+	{
+		struct page *page;
+		struct mem_record_node *record;
+
+		page = dvr_malloc_page(arg, 0);
+		if (page != 0)
+			ret = page_to_pfn(page) << PAGE_SHIFT;
+		else
+			return -ENOMEM;
+
+		if (filp->private_data == NULL) {
+			struct mem_record_head *head;
+			head = kmalloc(sizeof(struct mem_record_head), GFP_KERNEL);
+			INIT_LIST_HEAD(&head->list);
+			mutex_init(&head->mutex);
+			filp->private_data = head;
+		}
+
+		if (mutex_lock_interruptible(&((struct mem_record_head *)filp->private_data)->mutex)) {
+			// we use return value 1 to represent an signal is caught...
+			printk("mem: interrupted by an signal...\n");
+			dvr_free_page(page);
+			return -EAGAIN;
+		}
+		record = kmalloc(sizeof(struct mem_record_node), GFP_KERNEL);
+		INIT_LIST_HEAD(&record->list);
+		record->addr = page_to_pfn(page);
+		list_add(&record->list, &((struct mem_record_head *)filp->private_data)->list);
+		mutex_unlock(&((struct mem_record_head *)filp->private_data)->mutex);
+	}
+	break;
+
+	case MEM_IOCQFREE:
+	{
+		if (filp->private_data != NULL) {
+			int flag = 0;
+			struct mem_record_node *rec, *tmp;
+			struct list_head *plist;
+
+			if (mutex_lock_interruptible(&((struct mem_record_head *)filp->private_data)->mutex)) {
+				// we use return value 1 to represent an signal is caught...
+				printk("mem: interrupted by an signal...\n");
+				return -EAGAIN;
+			}
+			plist = &((struct mem_record_head *)filp->private_data)->list;
+			list_for_each_entry_safe(rec, tmp, plist, list)
+				if (rec->addr == (arg >> PAGE_SHIFT)) {
+//					printk("*** remove1: %lx \n", rec->addr);
+					list_del(&rec->list);
+					kfree(rec);
+					flag = 1;
+					break;
+				}
+			mutex_unlock(&((struct mem_record_head *)filp->private_data)->mutex);
+
+			if (flag) {
+				dvr_free_page(pfn_to_page(arg >> PAGE_SHIFT));
+			} else {
+				printk("mem: invalid parameter %lu in MEM_IOCQFREE...\n", arg);
+				ret = -EINVAL;
+			}
+		}
+	}
+	break;
+
+	default:
+		return -EINVAL;
+
+	}
+	return ret;
+}
+#endif
+
+#ifdef HAVE_ARCH_UNMAPPED_AREA_TOPDOWN
+#include <linux/auth.h>
+#define COLOUR_ALIGN(addr,pgoff)		\
+	((((addr)+SHMLBA-1)&~(SHMLBA-1)) +	\
+	 (((pgoff)<<PAGE_SHIFT) & (SHMLBA-1)))
+
+static unsigned long 
+get_unmapped_area_rtkmem(struct file *filp, const unsigned long addr0,
+						const unsigned long len, const unsigned long pgoff,
+						const unsigned long flags)
+{
+	struct vm_area_struct *vma;
+	struct mm_struct *mm = current->mm;
+	unsigned long addr = addr0;
+	int do_align = 0;
+	int aliasing = cache_is_vipt_aliasing();
+	struct vm_unmapped_area_info info;
+
+	/*
+	 * We only need to do colour alignment if either the I or D
+	 * caches alias.
+	 */
+	if (aliasing)
+		do_align = filp || (flags & MAP_SHARED);
+
+	/*
+	 * We forbid the MAP_FIXED case.
+	 */
+	if (flags & MAP_FIXED) {
+		return -EINVAL;
+	}
+
+	if (len > TASK_SIZE)
+		return -ENOMEM;
+
+	if (addr) {
+		if (do_align)
+			addr = COLOUR_ALIGN(addr, pgoff);
+		else
+			addr = PAGE_ALIGN(addr);
+
+		vma = find_vma(mm, addr);
+		if (TASK_SIZE - len >= addr &&
+				(!vma || addr + len <= vma->vm_start))
+			return addr;
+	}
+
+	info.flags = VM_UNMAPPED_AREA_TOPDOWN;
+	info.length = len;
+	info.low_limit = DEF_MAP_ADDR + DEF_MAP_SIZE + 0x02000000; // given 32MB gap
+	info.high_limit = mm->mmap_base;
+	info.align_mask = do_align ? (PAGE_MASK & (SHMLBA - 1)) : 0;
+	info.align_offset = pgoff << PAGE_SHIFT;
+	addr = vm_unmapped_area(&info);
+
+	/*
+	 * A failed mmap() very likely causes application failure,
+	 * so fall back to the bottom-up function here. This scenario
+	 * can happen with large stack limits and large mmap()
+	 * allocations.
+	 */
+	if (addr & ~PAGE_MASK) {
+		VM_BUG_ON(addr != -ENOMEM);
+		info.flags = 0;
+		info.low_limit = DEF_MAP_ADDR + DEF_MAP_SIZE + 0x02000000; // given 32MB gap
+		info.high_limit = TASK_SIZE;
+		addr = vm_unmapped_area(&info);
+	}
+
+	return addr;
+}
+#endif
 
 #define zero_lseek	null_lseek
 #define full_lseek      null_lseek
@@ -806,6 +1056,73 @@ static const struct file_operations full_fops = {
 	.write		= write_full,
 };
 
+#ifdef CONFIG_DEVDBG
+static int open_lgmem(struct inode * inode, struct file * filp)
+{
+	return 0;
+}
+
+static ssize_t read_lgmem(struct file *file, char __user *buf,
+		size_t count, loff_t *ppos)
+{
+	struct vm_area_struct * vma;
+	struct mm_struct *mm ;
+	unsigned long p = *ppos;
+	unsigned int data[3];
+
+	if ((mm = current->mm) == NULL)
+		return -ENXIO;
+
+	if (count < sizeof(data))
+		return -EINVAL;
+
+	down_read(&mm->mmap_sem);
+
+	vma = find_vma(mm, p);
+
+	if (!vma)
+		goto bad_area;
+
+	if (vma->vm_start > p)
+		goto bad_area;
+
+	data[0] = vma->vm_start;
+	data[1] = vma->vm_end;
+	data[2] = vma->vm_flags;
+
+	up_read(&mm->mmap_sem);
+	if (copy_to_user(buf, data, sizeof(data)))
+		return -EFAULT;
+	else
+		return sizeof(data);
+
+bad_area:
+	up_read(&mm->mmap_sem);
+	return -ENXIO;
+}
+
+static const struct file_operations lgmem_fops = {
+	.llseek		= memory_lseek,
+	.open		= open_lgmem,
+	.read		= read_lgmem,
+};
+#endif
+
+#ifdef CONFIG_REALTEK_DEV_MEM
+static const struct file_operations rtkmem_fops = {
+//	.llseek         = memory_lseek,
+//	.read           = read_mem,
+//	.write          = write_mem,
+	.mmap           = mmap_rtkmem,
+	.open           = open_rtkmem,
+	.release        = release_rtkmem,
+	.unlocked_ioctl = ioctl_rtkmem,
+#ifdef HAVE_ARCH_UNMAPPED_AREA_TOPDOWN
+	.get_unmapped_area = get_unmapped_area_rtkmem,
+#endif
+};
+#endif
+
 static const struct memdev {
 	const char *name;
 	umode_t mode;
@@ -813,7 +1130,7 @@ static const struct memdev {
 	fmode_t fmode;
 } devlist[] = {
 #ifdef CONFIG_DEVMEM
-	 [1] = { "mem", 0, &mem_fops, FMODE_UNSIGNED_OFFSET },
+	 [1] = { "mem", 0666, &mem_fops, FMODE_UNSIGNED_OFFSET },
 #endif
 #ifdef CONFIG_DEVKMEM
 	 [2] = { "kmem", 0, &kmem_fops, FMODE_UNSIGNED_OFFSET },
@@ -828,6 +1145,12 @@ static const struct memdev {
 	 [9] = { "urandom", 0666, &urandom_fops, 0 },
 #ifdef CONFIG_PRINTK
 	[11] = { "kmsg", 0644, &kmsg_fops, 0 },
+#endif
+#ifdef CONFIG_DEVDBG
+	[13] = { "lgmem", 0, &lgmem_fops, 0},
+#endif
+#ifdef CONFIG_REALTEK_DEV_MEM
+	[14] = { "rtkmem", 0666, &rtkmem_fops, FMODE_UNSIGNED_OFFSET },
 #endif
 };
 

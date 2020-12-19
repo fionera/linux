@@ -2533,4 +2533,51 @@ static int __init cpufreq_core_init(void)
 
 	return 0;
 }
+
+
+int cpufreq_force_userspace(unsigned int cpufreq)
+{
+	int cpu=0;
+	struct cpufreq_policy *policy = cpufreq_cpu_get(cpu);
+	struct cpufreq_policy new_policy;
+	int ret;
+	
+	if (!policy)
+		return -ENODEV;
+	
+	down_write(&policy->rwsem);
+	
+	pr_debug("updating policy for CPU %u\n", cpu);
+	memcpy(&new_policy, policy, sizeof(*policy));
+	new_policy.min = policy->user_policy.min;
+	new_policy.max = policy->user_policy.max=cpufreq;
+	
+	/*
+	 * BIOS might change freq behind our back
+	 * -> ask driver for current freq and notify governors about a change
+	 */
+	if (cpufreq_driver->get && !cpufreq_driver->setpolicy) {
+		new_policy.cur = cpufreq_driver->get(cpu);
+		if (WARN_ON(!new_policy.cur)) {
+			ret = -EIO;
+			goto unlock;
+		}
+	
+		if (!policy->cur) {
+			pr_debug("Driver did not initialize current freq\n");
+			policy->cur = new_policy.cur;
+		} else {
+			if (policy->cur != new_policy.cur && has_target())
+				cpufreq_out_of_sync(policy, new_policy.cur);
+		}
+	}
+	
+	ret = cpufreq_set_policy(policy, &new_policy);
+	
+	unlock:
+	up_write(&policy->rwsem);
+	
+	cpufreq_cpu_put(policy);
+	return ret;
+}
 core_initcall(cpufreq_core_init);

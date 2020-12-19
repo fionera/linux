@@ -720,6 +720,14 @@ config SONY_FF
 	Say Y here if you have a Sony PS2/3/4 accessory and want to enable
 	force feedback support for it.
 
+config SONY_DUALSHOCK_4_USER_DRIVER
+	bool "Support Sony Dualshock 4 User-level Driver"
+	default n
+	depends on HID_SONY
+	---help---
+	Say y here if you want to use user-layer driver for sony dualshock 4
+	instead of the driver in kernel-layer.
+
 config HID_SPEEDLINK
 	tristate "Speedlink VAD Cezanne mouse support"
 	depends on HID

@@ -570,6 +570,15 @@
  *	@old is the set of credentials that are being replaces
  *	@flags contains one of the LSM_SETID_* values.
  *	Return 0 on success.
+ * @task_fix_setgid:
+ *	Update the module's state after setting one or more of the group
+ *	identity attributes of the current process.  The @flags parameter
+ *	indicates which of the set*gid system calls invoked this hook.
+ *	@new is the set of credentials that will be installed.  Modifications
+ *	should be made to this rather than to @current->cred.
+ *	@old is the set of credentials that are being replaced
+ *	@flags contains one of the LSM_SETID_* values.
+ *	Return 0 on success.
  * @task_setpgid:
  *	Check permission before setting the process group identifier of the
  *	process @p to @pgid.
@@ -1455,6 +1464,8 @@ union security_list_options {
 	int (*kernel_module_from_file)(struct file *file);
 	int (*task_fix_setuid)(struct cred *new, const struct cred *old,
 				int flags);
+	int (*task_fix_setgid)(struct cred *new, const struct cred *old,
+				int flags);
 	int (*task_setpgid)(struct task_struct *p, pid_t pgid);
 	int (*task_getpgid)(struct task_struct *p);
 	int (*task_getsid)(struct task_struct *p);
@@ -1714,6 +1725,7 @@ struct security_hook_heads {
 	struct list_head kernel_module_request;
 	struct list_head kernel_module_from_file;
 	struct list_head task_fix_setuid;
+	struct list_head task_fix_setgid;
 	struct list_head task_setpgid;
 	struct list_head task_getpgid;
 	struct list_head task_getsid;

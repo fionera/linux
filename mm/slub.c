@@ -34,6 +34,8 @@
 #include <linux/stacktrace.h>
 #include <linux/prefetch.h>
 #include <linux/memcontrol.h>
+#include <linux/ekp.h>
+#include <linux/romempool.h>
 
 #include <trace/events/kmem.h>
 
@@ -264,9 +266,19 @@ static inline void *get_freepointer_safe(struct kmem_cache *s, void *object)
 	return p;
 }
 
+/* Read-only slab is only allocated after EKP is initialized. */
+static inline bool is_slab_readonly(unsigned long flags)
+{
+	return ekp_initialized() && (flags & SLAB_READONLY);
+}
+
 static inline void set_freepointer(struct kmem_cache *s, void *object, void *fp)
 {
-	*(void **)(object + s->offset) = fp;
+	if (is_slab_readonly(s->flags))
+		ekp_tunnel(EKP_SLAB_SET_FP, __pa((unsigned long)(object + s->offset)),
+			   (unsigned long)fp, 0, 0, 0, 0);
+	else
+		*(void **)(object + s->offset) = fp;
 }
 
 /* Loop over all objects in a slab */
@@ -1214,12 +1226,20 @@ unsigned long kmem_cache_flags(unsigned long object_size,
 	void (*ctor)(void *))
 {
 	/*
+	 * If this cache has SLAB_READONLY, it doesn't support any debug
+	 * features
+	 */
+	if (is_slab_readonly(flags))
+		goto no_check;
+
+	/*
 	 * Enable debugging if selected on the kernel commandline.
 	 */
 	if (slub_debug && (!slub_debug_slabs || (name &&
 		!strncmp(slub_debug_slabs, name, strlen(slub_debug_slabs)))))
 		flags |= slub_debug;
 
+no_check:
 	return flags;
 }
 #else /* !CONFIG_SLUB_DEBUG */
@@ -1270,7 +1290,7 @@ static inline void dec_slabs_node(struct kmem_cache *s, int node,
 static inline void kmalloc_large_node_hook(void *ptr, size_t size, gfp_t flags)
 {
 	kmemleak_alloc(ptr, size, 1, flags);
-	kasan_kmalloc_large(ptr, size);
+	kasan_kmalloc_large(ptr, size, flags);
 }
 
 static inline void kfree_hook(const void *x)
@@ -1368,6 +1388,25 @@ static void setup_object(struct kmem_cache *s, struct page *page,
 	}
 }
 
+#ifdef CONFIG_EKP_ROMEMPOOL
+static int romempool_free_slab(void *address, unsigned long order)
+{
+	unsigned long addr = (unsigned long)address;
+
+	if (!is_romempool_addr(addr))
+		return -EFAULT;
+
+	romempool_free(addr, RMP_SLAB, order);
+
+	return 0;
+}
+#else
+static inline int romempool_free_slab(void *address, unsigned long order)
+{
+	return -EFAULT;
+}
+#endif
+
 /*
  * Slab allocation and freeing
  */
@@ -1379,13 +1418,36 @@ static inline struct page *alloc_slab_page(struct kmem_cache *s,
 
 	flags |= __GFP_NOTRACK;
 
+	if (is_slab_readonly(s->flags)) {
+#ifdef CONFIG_ZONE_ZRAM
+    #ifdef CONFIG_EKP_ROMEMPOOL
+    #error "gfpmask mismatch with enable CONFIG_EKP_ROMEMPOOL"
+    #endif
+#else
+		flags |= __GFP_READONLY;
+#endif
+		page = romempool_alloc_pages(flags, RMP_SLAB, order);
+		if (page)
+			goto allocated;
+	}
+
 	if (node == NUMA_NO_NODE)
 		page = alloc_pages(flags, order);
 	else
 		page = __alloc_pages_node(node, flags, order);
 
+allocated:
+	if (kasan_slab_page_alloc(page ? page_address(page) : NULL,
+				PAGE_SIZE << order, flags)) {
+		if (romempool_free_slab(page_address(page), order) < 0)
+			__free_pages(page, order);
+		page = NULL;
+	}
+
 	if (page && memcg_charge_slab(page, flags, order, s)) {
-		__free_pages(page, order);
+		kasan_slab_page_free(page_address(page), PAGE_SIZE << order);
+		if (romempool_free_slab(page_address(page), order) < 0)
+			__free_pages(page, order);
 		page = NULL;
 	}
 
@@ -1526,6 +1588,13 @@ static void __free_slab(struct kmem_cache *s, struct page *page)
 	page_mapcount_reset(page);
 	if (current->reclaim_state)
 		current->reclaim_state->reclaimed_slab += pages;
+	kasan_slab_page_free(page_address(page), PAGE_SIZE << order);
+	if (is_slab_readonly(s->flags)) {
+		if (!romempool_free_slab(page_address(page), order)) {
+			memcg_kmem_uncharge(page, order);
+			return;
+		}
+	}
 	__free_kmem_pages(page, order);
 }
 
@@ -2558,8 +2627,12 @@ redo:
 		stat(s, ALLOC_FASTPATH);
 	}
 
-	if (unlikely(gfpflags & __GFP_ZERO) && object)
-		memset(object, 0, s->object_size);
+	if (unlikely(gfpflags & __GFP_ZERO) && object) {
+		if (is_slab_readonly(s->flags))
+			ekp_clear_romem(__pa(object), s->object_size);
+		else
+			memset(object, 0, s->object_size);
+	}
 
 	slab_post_alloc_hook(s, gfpflags, 1, &object);
 
@@ -3232,6 +3305,9 @@ static int calculate_sizes(struct kmem_cache *s, int forced_order)
 	 * the possible location of the free pointer.
 	 */
 	size = ALIGN(size, sizeof(void *));
+#ifdef CONFIG_KASAN
+	size = ALIGN(size, 1UL << KASAN_SHADOW_SCALE_SHIFT);
+#endif
 
 #ifdef CONFIG_SLUB_DEBUG
 	/*
@@ -3607,7 +3683,7 @@ size_t ksize(const void *object)
 	size_t size = __ksize(object);
 	/* We assume that ksize callers could use whole allocated area,
 	   so we need unpoison this area. */
-	kasan_krealloc(object, size);
+	kasan_krealloc(object, size, GFP_NOWAIT);
 	return size;
 }
 EXPORT_SYMBOL(ksize);

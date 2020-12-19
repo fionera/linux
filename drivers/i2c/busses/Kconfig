@@ -622,6 +622,12 @@ config I2C_KEMPLD
 	  This driver can also be built as a module. If so, the module
 	  will be called i2c-kempld.
 
+config I2C_LG1K
+	tristate "I2C bus support for LG1K DTV SoCs"
+	depends on OF && ARCH_LG1K
+	help
+	  This enables support for the I2C bus interface on LG1K DTV SoCs.
+
 config I2C_LPC2K
 	tristate "I2C bus support for NXP LPC2K/LPC178x/18xx/43xx"
 	depends on OF && (ARCH_LPC18XX || COMPILE_TEST)
@@ -1197,5 +1203,39 @@ config I2C_OPAL
 
 	  This driver can also be built as a module. If so, the module will be
 	  called as i2c-opal.
+
+config I2C_RTK
+	tristate "Realtek I2C"
+	depends on I2C
+	select REALTEK_GPIO if ARCH_RTK299O
+	select CONFIG_RTK_KDRV_GPIO if ARCH_RTK289X
+	select I2C_ALGORTK
+	help
+		This driver supports I2C Controller on Realtek SoC
+
+config I2C_RTK_BUS_JAM_RECOVER
+	bool "Do recover if i2c bus is jammed"
+	depends on I2C_RTK
+	default y
+	help
+		Say Y here if you do recover procedure if i2c bus is jammed.
+		The I2c driver will detect bus status before an i2c transfer.
+		If the bus is jammed, then force output 10 extra clocks
+		on SCL to recover the bus jam problem.
+
+config I2C_RTK_NON_STOP_WRITE_XFER
+	bool "Support non stop write"
+	depends on I2C_RTK
+	default n
+	help
+		Say Y here if you want to supoort non stop write.
+
+config I2C_RTK_SLAVE
+	tristate "Support I2C slave mode"
+	depends on I2C_RTK
+	default n
+	help
+		Enable Realtek I2C slave function
+
 
 endmenu

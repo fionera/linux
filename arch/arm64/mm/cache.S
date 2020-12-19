@@ -24,8 +24,6 @@
 #include <asm/cpufeature.h>
 #include <asm/alternative.h>
 
-#include "proc-macros.S"
-
 /*
  *	flush_icache_range(start,end)
  *
@@ -113,7 +111,9 @@ ENTRY(__inval_cache_range)
  *	- start   - virtual start address of region
  *	- end     - virtual end address of region
  */
-__dma_inv_range:
+ENTRY(__dma_inv_range)
+ALTERNATIVE("nop", __stringify(SET_PSTATE_PAN(0)), ARM64_HAS_PAN, \
+	    CONFIG_ARM64_PAN)
 	dcache_line_size x2, x3
 	sub	x3, x2, #1
 	tst	x1, x3				// end cache line aligned?
@@ -126,10 +126,17 @@ __dma_inv_range:
 	dc	civac, x0			// clean & invalidate D / U line
 	b	3f
 2:	dc	ivac, x0			// invalidate D / U line
+#ifdef CONFIG_HANDLE_RO_INVAL
+	.pushsection __ex_table, "a"
+	.quad	2b, 2b
+	.popsection
+#endif
 3:	add	x0, x0, x2
 	cmp	x0, x1
 	b.lo	2b
 	dsb	sy
+ALTERNATIVE("nop", __stringify(SET_PSTATE_PAN(1)), ARM64_HAS_PAN, \
+	    CONFIG_ARM64_PAN)
 	ret
 ENDPIPROC(__inval_cache_range)
 ENDPROC(__dma_inv_range)
@@ -140,6 +147,8 @@ ENDPROC(__dma_inv_range)
  *	- end     - virtual end address of region
  */
 __dma_clean_range:
+ALTERNATIVE("nop", __stringify(SET_PSTATE_PAN(0)), ARM64_HAS_PAN, \
+	    CONFIG_ARM64_PAN)
 	dcache_line_size x2, x3
 	sub	x3, x2, #1
 	bic	x0, x0, x3
@@ -153,6 +162,8 @@ alternative_endif
 	cmp	x0, x1
 	b.lo	1b
 	dsb	sy
+ALTERNATIVE("nop", __stringify(SET_PSTATE_PAN(1)), ARM64_HAS_PAN, \
+	    CONFIG_ARM64_PAN)
 	ret
 ENDPROC(__dma_clean_range)
 

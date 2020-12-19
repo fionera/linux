@@ -59,6 +59,7 @@
 #include <linux/jump_label.h>
 #include <linux/pfn.h>
 #include <linux/bsearch.h>
+#include <linux/ekp.h>
 #include <uapi/linux/module.h>
 #include "module-internal.h"
 
@@ -1380,6 +1381,22 @@ static inline int check_modstruct_version(Elf_Shdr *sechdrs,
 static inline int same_magic(const char *amagic, const char *bmagic,
 			     bool has_crcs)
 {
+#ifdef CONFIG_MODULE_IGNORE_SUBVER
+	int i;
+	/* skip level: VERSION(1).PATCHLEVEL(2).SUBLEVEL(3) */
+	for (i = 0 ; i < 2; i++) {
+		size_t alen, blen;
+		alen = min(strcspn(amagic, ".") , strcspn(amagic, "-"));
+		blen = min(strcspn(bmagic, ".") , strcspn(bmagic, "-"));
+		if (alen != blen || strncmp(amagic, bmagic, alen) != 0)
+			return 0;
+		amagic += alen + 1;
+		bmagic += blen + 1;
+	}
+
+	amagic += strcspn(amagic, " ");
+	bmagic += strcspn(bmagic, " ");
+#endif
 	return strcmp(amagic, bmagic) == 0;
 }
 #endif /* CONFIG_MODVERSIONS */
@@ -1895,6 +1912,9 @@ static void set_section_ro_nx(void *base,
 	unsigned long begin_pfn;
 	unsigned long end_pfn;
 
+	if (IS_ENABLED(CONFIG_EKP_ROMEMPOOL) && ekp_initialized())
+		return;
+
 	/*
 	 * Set RO for module text and RO-data:
 	 * - Always protect first page.
@@ -1902,6 +1922,16 @@ static void set_section_ro_nx(void *base,
 	 */
 	if (ro_size > 0)
 		set_page_attributes(base, base + ro_size, set_memory_ro);
+
+#ifdef CONFIG_EKP_MODULE_PROTECTION
+	if (ekp_initialized()) {
+		if (likely(text_size > 0)) {
+			set_page_attributes(base, base + text_size,
+					    set_memory_x);
+		}
+		return;
+	}
+#endif
 
 	/*
 	 * Set NX permissions for module data:
@@ -1918,6 +1948,21 @@ static void set_section_ro_nx(void *base,
 
 static void unset_module_core_ro_nx(struct module *mod)
 {
+#ifdef CONFIG_EKP_MODULE_PROTECTION
+	if (ekp_initialized()) {
+		if (!IS_ENABLED(CONFIG_EKP_ROMEMPOOL)) {
+			/* Back to the W^X mapping */
+			set_page_attributes(mod->module_core,
+				mod->module_core + mod->core_size,
+				set_memory_nx);
+			set_page_attributes(mod->module_core,
+				mod->module_core + mod->core_size,
+				set_memory_rw);
+		}
+		ekp_unset_module_core_s2_pages(mod);
+		return;
+	}
+#endif
 	set_page_attributes(mod->module_core + mod->core_text_size,
 		mod->module_core + mod->core_size,
 		set_memory_x);
@@ -1928,6 +1973,21 @@ static void unset_module_core_ro_nx(struct module *mod)
 
 static void unset_module_init_ro_nx(struct module *mod)
 {
+#ifdef CONFIG_EKP_MODULE_PROTECTION
+	if (ekp_initialized()) {
+		if (!IS_ENABLED(CONFIG_EKP_ROMEMPOOL)) {
+			/* Back to the W^X mapping */
+			set_page_attributes(mod->module_init,
+				mod->module_init + mod->init_size,
+				set_memory_nx);
+			set_page_attributes(mod->module_init,
+				mod->module_init + mod->init_size,
+				set_memory_rw);
+		}
+		ekp_unset_module_init_s2_pages(mod);
+		return;
+	}
+#endif
 	set_page_attributes(mod->module_init + mod->init_text_size,
 		mod->module_init + mod->init_size,
 		set_memory_x);
@@ -2924,7 +2984,7 @@ static int find_module_sections(struct module *mod, struct load_info *info)
 	mod->unused_gpl_crcs = section_addr(info, "__kcrctab_unused_gpl");
 #endif
 #ifdef CONFIG_CONSTRUCTORS
-	mod->ctors = section_objs(info, ".ctors",
+	mod->ctors = section_objs(info, "CONFIG_GCOV_CTORS",
 				  sizeof(*mod->ctors), &mod->num_ctors);
 	if (!mod->ctors)
 		mod->ctors = section_objs(info, ".init_array",
@@ -3395,6 +3455,10 @@ static int complete_formation(struct module *mod, struct load_info *info)
 
 	/* This relies on module_mutex for list integrity. */
 	module_bug_finalize(info->hdr, info->sechdrs, mod);
+
+#ifdef CONFIG_EKP_MODULE_PROTECTION
+	ekp_set_module_sect_s2_pages(mod);
+#endif
 
 	/* Set RO and NX regions for core */
 	set_section_ro_nx(mod->module_core,

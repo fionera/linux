@@ -49,7 +49,7 @@ static const char *handler[]= {
 	"Error"
 };
 
-int show_unhandled_signals = 1;
+int show_unhandled_signals = 0;
 
 /*
  * Dump out the contents of some memory nicely...
@@ -338,6 +338,8 @@ exit:
 	return fn ? fn(regs, instr) : 1;
 }
 
+extern void DDR_scan_set_error(int cpu);
+
 asmlinkage void __exception do_undefinstr(struct pt_regs *regs)
 {
 	siginfo_t info;
@@ -349,6 +351,8 @@ asmlinkage void __exception do_undefinstr(struct pt_regs *regs)
 
 	if (call_undef_hook(regs) == 0)
 		return;
+
+	DDR_scan_set_error(0);
 
 	if (unhandled_signal(current, SIGILL) && show_unhandled_signals_ratelimited()) {
 		pr_info("%s[%d]: undefined instruction: pc=%p\n",
@@ -444,7 +448,6 @@ asmlinkage void bad_mode(struct pt_regs *regs, int reason, unsigned int esr)
 	pr_crit("Bad mode in %s handler detected, code 0x%08x -- %s\n",
 		handler[reason], esr, esr_get_class_string(esr));
 
-	die("Oops - bad mode", regs, 0);
 	local_irq_disable();
 	panic("bad mode");
 }

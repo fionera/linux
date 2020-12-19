@@ -126,6 +126,7 @@ struct us_data {
 
 	u8			ifnum;		 /* interface number   */
 	u8			ep_bInterval;	 /* interrupt interval */ 
+	u8			initial_reqs;	 /* for go_initial_slow quirk */
 
 	/* function pointers for this device */
 	trans_cmnd		transport;	 /* transport function	   */
@@ -161,6 +162,7 @@ struct us_data {
 	/* hacks for READ CAPACITY bug handling */
 	int			use_last_sector_hacks;
 	int			last_sector_retries;
+	struct list_head  us_data_list;
 };
 
 /* Convert between us_data and the corresponding Scsi_Host */

@@ -3428,6 +3428,34 @@ static int mntns_install(struct nsproxy *nsproxy, struct ns_common *ns)
 	return 0;
 }
 
+int get_mount_path_one(struct super_block *sb, char *buf, size_t size)
+{
+	struct mount *mnt;
+	char *p, *end;
+	int res = 0;
+
+	list_for_each_entry(mnt, &sb->s_mounts, mnt_instance) {
+		struct path mnt_path = {.dentry = mnt->mnt.mnt_root, .mnt = &mnt->mnt};
+		memset(buf, 0, size);
+
+		p = d_path(&mnt_path, buf, size);
+		if (IS_ERR(p)) /* try to get next mount path */
+			continue;
+
+		res = PTR_ERR(p);
+		end = mangle_path(buf, p, " \t\n\\");
+		if (end) {
+			res = end - buf;
+			break;
+		} else
+			res = -ENAMETOOLONG;
+	}
+
+	return res < 0 && res != -ENAMETOOLONG ? res : 0;
+}
+EXPORT_SYMBOL(get_mount_path_one);
+
+
 const struct proc_ns_operations mntns_operations = {
 	.name		= "mnt",
 	.type		= CLONE_NEWNS,

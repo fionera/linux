@@ -19,20 +19,86 @@
 #include <asm/pgtable.h>
 #include "internal.h"
 
+//RTK MARK for web4.0 (gpu memory info)
+struct gpu_info_driver {
+	int	(*getTotal)(void);		/* return total pages count*/
+	int	(*getCached)(void);		/* return internally cached pages count */
+	int	(*getReclaimable)(void);	/* return reclaimable pages count that can be shrinked by shrink_slab */
+};
+
+struct gpu_info_driver gpuMemInfo;
+
+int (*get_total_GPU_memory) (void);
+void get_total_GPU_memory_register (void (*fp)(void))
+{
+    if(fp != NULL)
+        gpuMemInfo.getTotal = fp;
+}
+EXPORT_SYMBOL(get_total_GPU_memory_register);
+
+int (*get_cached_GPU_memory) (void);
+void get_cached_GPU_memory_register (void (*fp)(void))
+{
+    if(fp != NULL)
+        gpuMemInfo.getCached = fp;
+}
+EXPORT_SYMBOL(get_cached_GPU_memory_register);
+
+int (*get_reclaimable_GPU_memory) (void);
+void get_reclaimable_GPU_memory_register (void (*fp)(void))
+{
+    if(fp != NULL)
+        gpuMemInfo.getReclaimable = fp;
+}
+EXPORT_SYMBOL(get_reclaimable_GPU_memory_register);
+
+//end-RTK MARK for web4.0 (gpu memory info)
+
+
 void __attribute__((weak)) arch_report_meminfo(struct seq_file *m)
 {
 }
+#ifdef CONFIG_CMA
+static unsigned long cma_get_device_alloc(void)
+{
+	int i;
+	struct zone *zone;
+	long device_alloc = totalcma_pages;
 
-static int meminfo_proc_show(struct seq_file *m, void *v)
+	for_each_populated_zone(zone) {
+		if (!is_zone_cma(zone))
+			continue;
+
+		device_alloc -= zone_page_state(zone, NR_INACTIVE_ANON);
+		device_alloc -= zone_page_state(zone, NR_ACTIVE_ANON);
+		device_alloc -= zone_page_state(zone, NR_INACTIVE_FILE);
+		device_alloc -= zone_page_state(zone, NR_ACTIVE_FILE);
+		device_alloc -= zone_page_state(zone, NR_FREE_PAGES);
+#if IS_ENABLED(CONFIG_ZSMALLOC)
+		device_alloc -= zone_page_state(zone, NR_ZSPAGES);
+#endif
+		for_each_online_cpu(i) {
+			struct per_cpu_pageset *pageset;
+
+			pageset = per_cpu_ptr(zone->pageset, i);
+			device_alloc -= pageset->pcp.count;
+		}
+	}
+
+	if(device_alloc < 0)
+		device_alloc = 0;
+
+	return device_alloc;
+}
+#endif
+
+int meminfo_proc_show(struct seq_file *m, void *v)
 {
 	struct sysinfo i;
 	unsigned long committed;
 	long cached;
 	long available;
-	unsigned long pagecache;
-	unsigned long wmark_low = 0;
 	unsigned long pages[NR_LRU_LISTS];
-	struct zone *zone;
 	int lru;
 
 /*
@@ -51,36 +117,7 @@ static int meminfo_proc_show(struct seq_file *m, void *v)
 	for (lru = LRU_BASE; lru < NR_LRU_LISTS; lru++)
 		pages[lru] = global_page_state(NR_LRU_BASE + lru);
 
-	for_each_zone(zone)
-		wmark_low += zone->watermark[WMARK_LOW];
-
-	/*
-	 * Estimate the amount of memory available for userspace allocations,
-	 * without causing swapping.
-	 *
-	 * Free memory cannot be taken below the low watermark, before the
-	 * system starts swapping.
-	 */
-	available = i.freeram - wmark_low;
-
-	/*
-	 * Not all the page cache can be freed, otherwise the system will
-	 * start swapping. Assume at least half of the page cache, or the
-	 * low watermark worth of cache, needs to stay.
-	 */
-	pagecache = pages[LRU_ACTIVE_FILE] + pages[LRU_INACTIVE_FILE];
-	pagecache -= min(pagecache / 2, wmark_low);
-	available += pagecache;
-
-	/*
-	 * Part of the reclaimable slab consists of items that are in use,
-	 * and cannot be freed. Cap this estimate at the low watermark.
-	 */
-	available += global_page_state(NR_SLAB_RECLAIMABLE) -
-		     min(global_page_state(NR_SLAB_RECLAIMABLE) / 2, wmark_low);
-
-	if (available < 0)
-		available = 0;
+	available = si_mem_available();
 
 	/*
 	 * Tagged format, for easy grepping and expansion.
@@ -141,6 +178,7 @@ static int meminfo_proc_show(struct seq_file *m, void *v)
 #ifdef CONFIG_CMA
 		"CmaTotal:       %8lu kB\n"
 		"CmaFree:        %8lu kB\n"
+		"CmaDeviceAlloc: %8lu kB\n"
 #endif
 		,
 		K(i.totalram),
@@ -199,10 +237,24 @@ static int meminfo_proc_show(struct seq_file *m, void *v)
 #endif
 #ifdef CONFIG_CMA
 		, K(totalcma_pages)
-		, K(global_page_state(NR_FREE_CMA_PAGES))
+		, K(cma_get_free())
+		, K(cma_get_device_alloc())
 #endif
 		);
-
+//RTK MARK for web4.0 (gpu memory info)
+	    if(gpuMemInfo.getTotal)
+	        seq_printf(m, "GPUTotal:       %8lu kB\n",gpuMemInfo.getTotal());
+	    else
+	        seq_printf(m, "GPUTotal:       %8lu kB\n",0);			
+		if(gpuMemInfo.getCached)
+		    seq_printf(m, "GPUCached:      %8lu kB\n",gpuMemInfo.getCached());
+		else
+		    seq_printf(m, "GPUCached:      %8lu kB\n",0);			
+        if(gpuMemInfo.getReclaimable)
+	        seq_printf(m, "GPUReclaimable: %8lu kB\n",gpuMemInfo.getReclaimable());
+		else
+	        seq_printf(m, "GPUReclaimable: %8lu kB\n",0);
+//end-RTK MARK for web4.0 (gpu memory info)	
 	hugetlb_report_meminfo(m);
 
 	arch_report_meminfo(m);
@@ -226,6 +278,11 @@ static const struct file_operations meminfo_proc_fops = {
 static int __init proc_meminfo_init(void)
 {
 	proc_create("meminfo", 0, NULL, &meminfo_proc_fops);
+    //RTK MARK for web4.0 (gpu memory info)
+	gpuMemInfo.getTotal = 0;
+    gpuMemInfo.getCached = 0;
+	gpuMemInfo.getReclaimable = 0;
+				
 	return 0;
 }
 fs_initcall(proc_meminfo_init);

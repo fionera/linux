@@ -131,7 +131,7 @@ static inline unsigned long kmem_cache_flags(unsigned long object_size,
 			  SLAB_RECLAIM_ACCOUNT | SLAB_TEMPORARY | SLAB_NOTRACK)
 #elif defined(CONFIG_SLUB)
 #define SLAB_CACHE_FLAGS (SLAB_NOLEAKTRACE | SLAB_RECLAIM_ACCOUNT | \
-			  SLAB_TEMPORARY | SLAB_NOTRACK)
+			  SLAB_TEMPORARY | SLAB_NOTRACK | SLAB_READONLY)
 #else
 #define SLAB_CACHE_FLAGS (0)
 #endif

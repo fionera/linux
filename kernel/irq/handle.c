@@ -32,6 +32,8 @@ void handle_bad_irq(struct irq_desc *desc)
 
 	print_irq_desc(irq, desc);
 	kstat_incr_irqs_this_cpu(desc);
+	printk(KERN_ERR "handle_bad_irq: irq/hwirq(%d/%d) \n",
+	       irq, (irq_desc_get_irq_data(desc)) ? (irq_desc_get_irq_data(desc)->hwirq): -1);
 	ack_bad_irq(irq);
 }
 EXPORT_SYMBOL_GPL(handle_bad_irq);

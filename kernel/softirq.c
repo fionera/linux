@@ -387,8 +387,34 @@ void irq_exit(void)
 
 	account_irq_exit_time(current);
 	preempt_count_sub(HARDIRQ_OFFSET);
-	if (!in_interrupt() && local_softirq_pending())
+	if (!in_interrupt() && local_softirq_pending()) {
+	#ifdef  CONFIG_REALTEK_SCHED_LOG
+	/* Use interrupt 128 as softirq... */
+		if (sched_log_flag & 0x1) {
+			int cpu;
+			extern spinlock_t sched_log_lock;
+
+			cpu = smp_processor_id();
+			spin_lock(&sched_log_lock);
+			log_intr_enter(cpu, 128);
+			spin_unlock(&sched_log_lock);
+		}
+	#endif // CONFIG_REALTEK_SCHED_LOG
+
 		invoke_softirq();
+
+	#ifdef  CONFIG_REALTEK_SCHED_LOG
+		if (sched_log_flag & 0x1) {
+			int cpu;
+			extern spinlock_t sched_log_lock;
+
+			cpu = smp_processor_id();
+			spin_lock(&sched_log_lock);
+			log_intr_exit(cpu, 128);
+			spin_unlock(&sched_log_lock);
+		}
+	#endif // CONFIG_REALTEK_SCHED_LOG
+	}
 
 	tick_irq_exit();
 	rcu_irq_exit();

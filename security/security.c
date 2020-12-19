@@ -916,6 +916,12 @@ int security_task_fix_setuid(struct cred *new, const struct cred *old,
 	return call_int_hook(task_fix_setuid, 0, new, old, flags);
 }
 
+int security_task_fix_setgid(struct cred *new, const struct cred *old,
+			     int flags)
+{
+	return call_int_hook(task_fix_setgid, 0, new, old, flags);
+}
+
 int security_task_setpgid(struct task_struct *p, pid_t pgid)
 {
 	return call_int_hook(task_setpgid, 0, p, pgid);
@@ -1693,6 +1699,8 @@ struct security_hook_heads security_hook_heads = {
 		LIST_HEAD_INIT(security_hook_heads.kernel_module_from_file),
 	.task_fix_setuid =
 		LIST_HEAD_INIT(security_hook_heads.task_fix_setuid),
+	.task_fix_setgid =
+		LIST_HEAD_INIT(security_hook_heads.task_fix_setgid),
 	.task_setpgid =	LIST_HEAD_INIT(security_hook_heads.task_setpgid),
 	.task_getpgid =	LIST_HEAD_INIT(security_hook_heads.task_getpgid),
 	.task_getsid =	LIST_HEAD_INIT(security_hook_heads.task_getsid),

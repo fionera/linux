@@ -446,9 +446,12 @@ ieee80211_tx_h_multicast_ps_buf(struct ieee80211_tx_data *tx)
 		purge_old_ps_buffers(tx->local);
 
 	if (skb_queue_len(&ps->bc_buf) >= AP_MAX_BC_BUFFER) {
+	       struct sk_buff *skb = NULL; 
 		ps_dbg(tx->sdata,
 		       "BC TX buffer full - dropping the oldest frame\n");
-		ieee80211_free_txskb(&tx->local->hw, skb_dequeue(&ps->bc_buf));
+		skb = skb_dequeue(&ps->bc_buf);
+		if(skb)
+		    ieee80211_free_txskb(&tx->local->hw, skb);
 	} else
 		tx->local->total_ps_buffered++;
 

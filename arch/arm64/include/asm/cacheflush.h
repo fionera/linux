@@ -19,6 +19,7 @@
 #ifndef __ASM_CACHEFLUSH_H
 #define __ASM_CACHEFLUSH_H
 
+#include <asm/outercache.h>
 #include <linux/mm.h>
 
 /*
@@ -65,6 +66,8 @@
  *		- kaddr  - page address
  *		- size   - region size
  */
+//extern void flush_cache_all(void);
+#define flush_cache_all() //FIXME
 extern void flush_cache_range(struct vm_area_struct *vma, unsigned long start, unsigned long end);
 extern void flush_icache_range(unsigned long start, unsigned long end);
 extern void __flush_dcache_area(void *addr, size_t len);
@@ -85,6 +88,13 @@ static inline void flush_cache_page(struct vm_area_struct *vma,
 extern void __dma_map_area(const void *, size_t, int);
 extern void __dma_unmap_area(const void *, size_t, int);
 extern void __dma_flush_range(const void *, const void *);
+extern void __dma_inv_range(const void *, const void *);
+
+#define dmac_flush_range	__dma_flush_range
+#define dmac_inv_range		__dma_inv_range
+
+#define outer_flush_range(a, b)
+#define outer_inv_range(a, b)
 
 /*
  * Copy user data from/to a page which is mapped into a different

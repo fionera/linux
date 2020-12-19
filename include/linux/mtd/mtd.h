@@ -36,6 +36,8 @@
 #define MTD_ERASE_FAILED	0x10
 
 #define MTD_FAIL_ADDR_UNKNOWN -1LL
+//rtk_mtd_patch
+#define MTD_SCRAMBLE_DISABLE	(0xDDCC)
 
 /*
  * If the erase fails, fail_addr might indicate exactly which block failed. If
@@ -141,6 +143,11 @@ struct mtd_info {
 	 */
 	uint32_t writebufsize;
 
+#if 1 // RTK_patch: add OOB block infos
+	u_int32_t oobblock;  // Size of OOB blocks (e.g. 512)		//rtk_mtd_patch
+	struct nand_oobinfo oobinfo;		//rtk_mtd_patch
+#endif
+
 	uint32_t oobsize;   // Amount of OOB data per block (e.g. 16)
 	uint32_t oobavail;  // Available OOB bytes per block
 
@@ -175,6 +182,9 @@ struct mtd_info {
 
 	/* max number of correctible bit errors per ecc step */
 	unsigned int ecc_strength;
+	//rtk_mtd_patch
+	u_int32_t ecctype;
+	u_int32_t eccsize;
 
 	/* Data for variable erase regions. If numeraseregions is zero,
 	 * it means that the whole device has erasesize as given above.
@@ -252,6 +262,39 @@ struct mtd_info {
 	struct module *owner;
 	struct device dev;
 	int usecount;
+	//add by kui_rong
+   	char *PartNum;
+   	int (*_reload_bbt)(struct mtd_info *mtd);
+   	void (*_shutdown) (struct mtd_info *mtd);
+
+
+	/* kvec-based read/write methods.
+	   NB: The 'count' parameter is the number of _vectors_, each of
+	   which contains an (ofs, len) tuple.
+	*/
+	int (*_readv) (struct mtd_info *mtd, struct kvec *vecs, unsigned long count, loff_t from, size_t *retlen);
+	int (*_readv_ecc) (struct mtd_info *mtd, struct kvec *vecs, unsigned long count, loff_t from, 
+		size_t *retlen, u_char *eccbuf, struct nand_oobinfo *oobsel);
+	int (*_writev_ecc) (struct mtd_info *mtd, const struct kvec *vecs, unsigned long count, loff_t to, 
+		size_t *retlen, u_char *eccbuf, struct nand_oobinfo *oobsel);
+	
+	int (*_read_ecc) (struct mtd_info *mtd, loff_t from, size_t len, size_t *retlen, u_char *buf, u_char *eccbuf, struct nand_oobinfo *oobsel);
+	int (*_write_ecc) (struct mtd_info *mtd, loff_t to, size_t len, size_t *retlen, const u_char *buf, const u_char *eccbuf, struct nand_oobinfo *oobsel);
+	/*For access bootcode area*/
+	int (*_erase_bootcode_area)(struct mtd_info *mtd, struct erase_info *instr);
+	int (*_write_bootcode_area)(struct mtd_info *mtd, loff_t to, size_t len, size_t *retlen, const u_char * buf, const u_char *oob_buf, unsigned char block_tag);
+	int (*_read_bootcode_area)(struct mtd_info *mtd, loff_t from, size_t len, size_t *retlen, u_char *buf, u_char *oob_buf);
+	int (*_write_profile)(struct mtd_info *mtd);
+	
+	int nModifySysArea;//add by alexchang 05-18-2010
+	unsigned int nEccMaxValue; // add by alexchang 01-28-2011
+	unsigned char isCPdisable_W;
+	unsigned char isCPdisable_R;
+	unsigned int *ptr_u32CacheAddr;
+	unsigned int isScramble;
+	unsigned int u32RBApercentage;// add by alexchang 10-08-2012
+	char *part_type;//Add by andyteng 0921-2012
+	
 };
 
 int mtd_erase(struct mtd_info *mtd, struct erase_info *instr);
@@ -278,6 +321,42 @@ static inline int mtd_write_oob(struct mtd_info *mtd, loff_t to,
 	if (!(mtd->flags & MTD_WRITEABLE))
 		return -EROFS;
 	return mtd->_write_oob(mtd, to, ops);
+}
+static inline int mtd_write_bootcode(struct mtd_info *mtd, loff_t to,
+				struct mtd_oob_ops *ops, unsigned char block_tag)
+{
+	ops->retlen = ops->oobretlen = 0;
+	if (!mtd->_write_bootcode_area)
+		return -EOPNOTSUPP;
+	if (!(mtd->flags & MTD_WRITEABLE))
+		return -EROFS;
+	return mtd->_write_bootcode_area(mtd, to, ops->len, &(ops->retlen), ops->datbuf, ops->oobbuf, block_tag);
+
+}
+
+static inline int mtd_erase_bootcode_area(struct mtd_info *mtd, struct erase_info *instr)
+{
+	if (!mtd->_erase_bootcode_area)
+		return -EOPNOTSUPP;
+	return mtd->_erase_bootcode_area(mtd, instr);
+}
+
+static inline int mtd_read_bootcode(struct mtd_info *mtd, loff_t from, struct mtd_oob_ops *ops)
+{
+	ops->retlen = ops->oobretlen = 0;
+	
+	if (!mtd->_read_bootcode_area)
+		return -EOPNOTSUPP;
+
+	return mtd->_read_bootcode_area(mtd, from, ops->len, &(ops->retlen), ops->datbuf, ops->oobbuf);
+}
+
+static inline int mtd_write_profile(struct mtd_info *mtd)
+{
+	if (!mtd->_write_profile)
+		return -EOPNOTSUPP;
+
+	return mtd->_write_profile(mtd);
 }
 
 int mtd_get_fact_prot_info(struct mtd_info *mtd, size_t len, size_t *retlen,
@@ -382,7 +461,7 @@ extern int __get_mtd_device(struct mtd_info *mtd);
 extern void __put_mtd_device(struct mtd_info *mtd);
 extern struct mtd_info *get_mtd_device_nm(const char *name);
 extern void put_mtd_device(struct mtd_info *mtd);
-
+extern int add_mtd_device(struct mtd_info *mtd);
 
 struct mtd_notifier {
 	void (*add)(struct mtd_info *mtd);

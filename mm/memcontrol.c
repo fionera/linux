@@ -67,6 +67,7 @@
 #include <net/sock.h>
 #include <net/ip.h>
 #include <net/tcp_memcontrol.h>
+#include <linux/psi.h>
 #include "slab.h"
 
 #include <asm/uaccess.h>
@@ -264,17 +265,6 @@ static inline bool mem_cgroup_is_root(struct mem_cgroup *memcg)
 	return (memcg == root_mem_cgroup);
 }
 
-/*
- * We restrict the id in the range of [1, 65535], so it can fit into
- * an unsigned short.
- */
-#define MEM_CGROUP_ID_MAX	USHRT_MAX
-
-static inline unsigned short mem_cgroup_id(struct mem_cgroup *memcg)
-{
-	return memcg->id.id;
-}
-
 /* Writing them here to avoid exposing memcg's inner layout */
 #if defined(CONFIG_INET) && defined(CONFIG_MEMCG_KMEM)
 
@@ -386,15 +376,6 @@ struct static_key memcg_kmem_enabled_key;
 EXPORT_SYMBOL(memcg_kmem_enabled_key);
 
 #endif /* CONFIG_MEMCG_KMEM */
-
-static struct mem_cgroup_per_zone *
-mem_cgroup_zone_zoneinfo(struct mem_cgroup *memcg, struct zone *zone)
-{
-	int nid = zone_to_nid(zone);
-	int zid = zone_idx(zone);
-
-	return &memcg->nodeinfo[nid]->zoneinfo[zid];
-}
 
 /**
  * mem_cgroup_css_from_page - css of the memcg associated with a page
@@ -711,9 +692,8 @@ static void mem_cgroup_charge_statistics(struct mem_cgroup *memcg,
 	__this_cpu_add(memcg->stat->nr_page_events, nr_pages);
 }
 
-static unsigned long mem_cgroup_node_nr_lru_pages(struct mem_cgroup *memcg,
-						  int nid,
-						  unsigned int lru_mask)
+unsigned long mem_cgroup_node_nr_lru_pages(struct mem_cgroup *memcg,
+					   int nid, unsigned int lru_mask)
 {
 	unsigned long nr = 0;
 	int zid;
@@ -1024,39 +1004,6 @@ static void invalidate_reclaim_iterators(struct mem_cgroup *dead_memcg)
 	for (iter = mem_cgroup_iter(NULL, NULL, NULL);	\
 	     iter != NULL;				\
 	     iter = mem_cgroup_iter(NULL, iter, NULL))
-
-/**
- * mem_cgroup_zone_lruvec - get the lru list vector for a zone and memcg
- * @zone: zone of the wanted lruvec
- * @memcg: memcg of the wanted lruvec
- *
- * Returns the lru list vector holding pages for the given @zone and
- * @mem.  This can be the global zone lruvec, if the memory controller
- * is disabled.
- */
-struct lruvec *mem_cgroup_zone_lruvec(struct zone *zone,
-				      struct mem_cgroup *memcg)
-{
-	struct mem_cgroup_per_zone *mz;
-	struct lruvec *lruvec;
-
-	if (mem_cgroup_disabled()) {
-		lruvec = &zone->lruvec;
-		goto out;
-	}
-
-	mz = mem_cgroup_zone_zoneinfo(memcg, zone);
-	lruvec = &mz->lruvec;
-out:
-	/*
-	 * Since a node can be onlined after the mem_cgroup was created,
-	 * we have to be prepared to initialize lruvec->zone here;
-	 * and if offlined then reonlined, we need to reinitialize it.
-	 */
-	if (unlikely(lruvec->zone != zone))
-		lruvec->zone = zone;
-	return lruvec;
-}
 
 /**
  * mem_cgroup_page_lruvec - return lruvec for isolating/putting an LRU page
@@ -1767,19 +1714,13 @@ cleanup:
 }
 
 /**
- * mem_cgroup_begin_page_stat - begin a page state statistics transaction
- * @page: page that is going to change accounted state
+ * lock_page_memcg - lock a page->mem_cgroup binding
+ * @page: the page
  *
- * This function must mark the beginning of an accounted page state
- * change to prevent double accounting when the page is concurrently
- * being moved to another memcg:
- *
- *   memcg = mem_cgroup_begin_page_stat(page);
- *   if (TestClearPageState(page))
- *     mem_cgroup_update_page_stat(memcg, state, -1);
- *   mem_cgroup_end_page_stat(memcg);
+ * This function protects unlocked LRU pages from being moved to
+ * another cgroup and stabilizes their page->mem_cgroup binding.
  */
-struct mem_cgroup *mem_cgroup_begin_page_stat(struct page *page)
+void lock_page_memcg(struct page *page)
 {
 	struct mem_cgroup *memcg;
 	unsigned long flags;
@@ -1788,25 +1729,18 @@ struct mem_cgroup *mem_cgroup_begin_page_stat(struct page *page)
 	 * The RCU lock is held throughout the transaction.  The fast
 	 * path can get away without acquiring the memcg->move_lock
 	 * because page moving starts with an RCU grace period.
-	 *
-	 * The RCU lock also protects the memcg from being freed when
-	 * the page state that is going to change is the only thing
-	 * preventing the page from being uncharged.
-	 * E.g. end-writeback clearing PageWriteback(), which allows
-	 * migration to go ahead and uncharge the page before the
-	 * account transaction might be complete.
 	 */
 	rcu_read_lock();
 
 	if (mem_cgroup_disabled())
-		return NULL;
+		return;
 again:
 	memcg = page->mem_cgroup;
 	if (unlikely(!memcg))
-		return NULL;
+		return;
 
 	if (atomic_read(&memcg->moving_account) <= 0)
-		return memcg;
+		return;
 
 	spin_lock_irqsave(&memcg->move_lock, flags);
 	if (memcg != page->mem_cgroup) {
@@ -1817,21 +1751,23 @@ again:
 	/*
 	 * When charge migration first begins, we can have locked and
 	 * unlocked page stat updates happening concurrently.  Track
-	 * the task who has the lock for mem_cgroup_end_page_stat().
+	 * the task who has the lock for unlock_page_memcg().
 	 */
 	memcg->move_lock_task = current;
 	memcg->move_lock_flags = flags;
 
-	return memcg;
+	return;
 }
-EXPORT_SYMBOL(mem_cgroup_begin_page_stat);
+EXPORT_SYMBOL(lock_page_memcg);
 
 /**
- * mem_cgroup_end_page_stat - finish a page state statistics transaction
- * @memcg: the memcg that was accounted against
+ * unlock_page_memcg - unlock a page->mem_cgroup binding
+ * @page: the page
  */
-void mem_cgroup_end_page_stat(struct mem_cgroup *memcg)
+void unlock_page_memcg(struct page *page)
 {
+	struct mem_cgroup *memcg = page->mem_cgroup;
+
 	if (memcg && memcg->move_lock_task == current) {
 		unsigned long flags = memcg->move_lock_flags;
 
@@ -1843,7 +1779,7 @@ void mem_cgroup_end_page_stat(struct mem_cgroup *memcg)
 
 	rcu_read_unlock();
 }
-EXPORT_SYMBOL(mem_cgroup_end_page_stat);
+EXPORT_SYMBOL(unlock_page_memcg);
 
 /*
  * size of first charge trial. "32" comes from vmscan.c's magic value.
@@ -3786,6 +3722,21 @@ static void memcg_wb_domain_size_changed(struct mem_cgroup *memcg)
 
 #endif	/* CONFIG_CGROUP_WRITEBACK */
 
+#ifdef CONFIG_PSI
+static int memcg_io_pressure_show(struct seq_file *seq, void *v)
+{
+	return psi_show(seq, &mem_cgroup_from_css(seq_css(seq))->psi, PSI_IO);
+}
+static int memcg_memory_pressure_show(struct seq_file *seq, void *v)
+{
+	return psi_show(seq, &mem_cgroup_from_css(seq_css(seq))->psi, PSI_MEM);
+}
+static int memcg_cpu_pressure_show(struct seq_file *seq, void *v)
+{
+	return psi_show(seq, &mem_cgroup_from_css(seq_css(seq))->psi, PSI_CPU);
+}
+#endif
+
 /*
  * DO NOT USE IN NEW FILES.
  *
@@ -4115,6 +4066,24 @@ static struct cftype mem_cgroup_legacy_files[] = {
 		.seq_show = memcg_slab_show,
 	},
 #endif
+
+#endif
+#ifdef CONFIG_PSI
+	{
+		.name = "io.pressure",
+		.flags = CFTYPE_NOT_ON_ROOT,
+		.seq_show = memcg_io_pressure_show,
+	},
+	{
+		.name = "memory.pressure",
+		.flags = CFTYPE_NOT_ON_ROOT,
+		.seq_show = memcg_memory_pressure_show,
+	},
+	{
+		.name = "cpu.pressure",
+		.flags = CFTYPE_NOT_ON_ROOT,
+		.seq_show = memcg_cpu_pressure_show,
+	},
 #endif
 	{ },	/* terminate */
 };
@@ -4169,18 +4138,6 @@ static inline void mem_cgroup_id_get(struct mem_cgroup *memcg)
 static inline void mem_cgroup_id_put(struct mem_cgroup *memcg)
 {
 	mem_cgroup_id_put_many(memcg, 1);
-}
-
-/**
- * mem_cgroup_from_id - look up a memcg from a memcg id
- * @id: the memcg id to look up
- *
- * Caller must hold rcu_read_lock().
- */
-struct mem_cgroup *mem_cgroup_from_id(unsigned short id)
-{
-	WARN_ON_ONCE(!rcu_read_lock_held());
-	return idr_find(&mem_cgroup_idr, id);
 }
 
 static int alloc_mem_cgroup_per_zone_info(struct mem_cgroup *memcg, int node)
@@ -4269,6 +4226,7 @@ static void __mem_cgroup_free(struct mem_cgroup *memcg)
 
 	mem_cgroup_remove_from_trees(memcg);
 
+	psi_mem_cgroup_free(memcg);
 	for_each_node(node)
 		free_mem_cgroup_per_zone_info(memcg, node);
 
@@ -4303,6 +4261,9 @@ mem_cgroup_css_alloc(struct cgroup_subsys_state *parent_css)
 		if (alloc_mem_cgroup_per_zone_info(memcg, node))
 			goto free_out;
 
+	if (psi_mem_cgroup_alloc(memcg))
+		goto free_out;
+
 	/* root ? */
 	if (parent_css == NULL) {
 		root_mem_cgroup = memcg;
@@ -4328,6 +4289,10 @@ mem_cgroup_css_alloc(struct cgroup_subsys_state *parent_css)
 #ifdef CONFIG_CGROUP_WRITEBACK
 	INIT_LIST_HEAD(&memcg->cgwb_list);
 #endif
+#ifdef CONFIG_MEMCG_SWAP_DEV_DISTANCE
+	atomic_set(&(memcg->sw_dev_distance), 0);
+#endif
+	atomic_set(&(memcg->critical_perf), 0);
 	idr_replace(&mem_cgroup_idr, memcg, memcg->id.id);
 	return &memcg->css;
 
@@ -4635,7 +4600,7 @@ static int mem_cgroup_move_account(struct page *page,
 		goto out;
 
 	/*
-	 * Prevent mem_cgroup_replace_page() from looking at
+	 * Prevent mem_cgroup_migrate() from looking at
 	 * page->mem_cgroup of its source page while we change it.
 	 */
 	if (!trylock_page(page))
@@ -5077,9 +5042,9 @@ static void mem_cgroup_move_charge(void)
 
 	lru_add_drain_all();
 	/*
-	 * Signal mem_cgroup_begin_page_stat() to take the memcg's
-	 * move_lock while we're moving its pages to another memcg.
-	 * Then wait for already started RCU-only updates to finish.
+	 * Signal lock_page_memcg() to take the memcg's move_lock
+	 * while we're moving its pages to another memcg. Then wait
+	 * for already started RCU-only updates to finish.
 	 */
 	atomic_inc(&mc.from->moving_account);
 	synchronize_rcu();
@@ -5654,16 +5619,17 @@ void mem_cgroup_uncharge_list(struct list_head *page_list)
 }
 
 /**
- * mem_cgroup_replace_page - migrate a charge to another page
- * @oldpage: currently charged page
- * @newpage: page to transfer the charge to
+ * mem_cgroup_migrate - charge a page's replacement
+ * @oldpage: currently circulating page
+ * @newpage: replacement page
  *
- * Migrate the charge from @oldpage to @newpage.
+ * Charge @newpage as a replacement page for @oldpage. @oldpage will
+ * be uncharged upon free.
  *
  * Both pages must be locked, @newpage->mapping must be set up.
  * Either or both pages might be on the LRU already.
  */
-void mem_cgroup_replace_page(struct page *oldpage, struct page *newpage)
+void mem_cgroup_migrate(struct page *oldpage, struct page *newpage)
 {
 	struct mem_cgroup *memcg;
 	int isolated;
@@ -5843,6 +5809,57 @@ static int really_do_swap_account __initdata = 1;
 static int really_do_swap_account __initdata;
 #endif
 
+#ifdef CONFIG_MEMCG_SWAP_DEV_DISTANCE
+static ssize_t mem_cgroup_write_sw_dev_distance(struct kernfs_open_file *of,
+					char *buf, size_t nbytes, loff_t off)
+{
+	struct mem_cgroup *memcg = mem_cgroup_from_css(of_css(of));
+	int distance;
+
+	buf = strstrip(buf);
+	if (kstrtoint(buf, 10, &distance) < 0)
+		return -EINVAL;
+
+	if (mem_cgroup_is_root(memcg))
+		return -EINVAL;
+
+	atomic_set(&(memcg->sw_dev_distance), distance);
+
+	return nbytes;
+}
+
+static s64 mem_cgroup_read_sw_dev_distance(struct cgroup_subsys_state *css,
+					   struct cftype *cft)
+{
+	struct mem_cgroup *memcg = mem_cgroup_from_css(css);
+	return (s64)atomic_read(&(memcg->sw_dev_distance));
+}
+#endif
+
+static ssize_t mem_cgroup_write_critical_perf(struct kernfs_open_file *of,
+					char *buf, size_t nbytes, loff_t off)
+{
+	struct mem_cgroup *memcg = mem_cgroup_from_css(of_css(of));
+	int distance;
+
+	buf = strstrip(buf);
+	if (kstrtoint(buf, 10, &distance) < 0)
+		return -EINVAL;
+
+	if (mem_cgroup_is_root(memcg))
+		return -EINVAL;
+
+	atomic_set(&(memcg->critical_perf), distance);
+
+	return nbytes;
+}
+
+static s64 mem_cgroup_read_critical_perf(struct cgroup_subsys_state *css,
+					   struct cftype *cft)
+{
+	struct mem_cgroup *memcg = mem_cgroup_from_css(css);
+	return (s64)atomic_read(&(memcg->critical_perf));
+}
 static int __init enable_swap_account(char *s)
 {
 	if (!strcmp(s, "1"))
@@ -5876,6 +5893,18 @@ static struct cftype memsw_cgroup_files[] = {
 		.private = MEMFILE_PRIVATE(_MEMSWAP, RES_FAILCNT),
 		.write = mem_cgroup_reset,
 		.read_u64 = mem_cgroup_read_u64,
+	},
+#ifdef CONFIG_MEMCG_SWAP_DEV_DISTANCE
+	{
+		.name = "memsw.dev_distance",
+		.write = mem_cgroup_write_sw_dev_distance,
+		.read_s64 = mem_cgroup_read_sw_dev_distance,
+	},
+#endif
+	{
+		.name = "memsw.critical_perf",
+		.write = mem_cgroup_write_critical_perf,
+		.read_s64 = mem_cgroup_read_critical_perf,
 	},
 	{ },	/* terminate */
 };

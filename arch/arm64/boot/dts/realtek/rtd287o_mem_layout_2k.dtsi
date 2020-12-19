@@ -1,0 +1,120 @@
+/*
+ * rtd287o memory layout (2K-model)
+ */
+
+#define _MB_ 1024*1024
+
+/ {
+
+	reserved-memory {
+		#address-cells = <2>;
+		#size-cells = <1>;
+		ranges;
+
+		boot@00000000 {
+			reg = <0x0 0x00000000 0x00100000>;
+		};
+
+		demod@15400000 {
+			reg = <0x0 0x15400000 0x00500000>;
+            /*
+			cma-ban;
+			ban-not-used;
+            */
+		};
+
+		dmem@10000000 {
+			reg = <0x0 0x10000000 0x00100000>;
+			cma-ban;
+			ban-normal;
+		};
+
+		/* for secure os */
+		kcpu@16000000 {
+			reg = <0x0 0x16000000 0x00e00000>;
+			no-map;
+		};
+
+		rbus@18000000 {
+			reg = <0x0 0x18000000 0x00200000>;
+			no-map;
+		};
+
+		avcpu@1a500000 {
+			reg = <0x0 0x1a500000 0x00800000>;
+		};
+
+		/*used for atf and rpc buffer*/
+		rtkrpc@1b100000 {
+			reg = <0x0 0x1b100000 0x00100000>;
+		};
+
+		vdec_ringbuffer@1b200000 {
+			reg = <0x0 0x1b200000 0x01000000>;
+			no-map;
+		};
+
+		logbuf@1ca00000 {
+			reg = <0x0 0x1ca00000 0x00080000>;
+		};
+
+		rom@1fc00000 {
+			reg = <0x0 0x1fc00000 0x00008000>;
+		};
+
+		gal@2d000000 {
+			reg = <0x0 0x2d000000 (96*_MB_)>;
+			cma-ban;
+			ban-not-used;
+		};
+
+		scaler@33000000 {
+			reg = <0x0 0x33000000 (36*_MB_)>;
+			cma-ban;
+			ban-not-used;
+
+			memc@33000000 {
+				reg = <0x0 0x33000000 (0*_MB_)>;
+				is-sub-region;
+			};
+
+			mdomain@33000000 {
+				reg = <0x0 0x33000000 (20*_MB_)>;
+				is-sub-region;
+			};
+
+			vip@35000000 {
+				reg = <0x0 0x35000000 (2*_MB_)>;
+				is-sub-region;
+			};
+
+			od@35200000 {
+				reg = <0x0 0x35200000 (1*_MB_)>;
+				is-sub-region;
+			};
+
+			scaler_band@35300000 {
+				reg = <0x0 0x35300000 (1*_MB_)>;
+				is-sub-region;
+			};
+		};
+
+		vbm@35400000 {
+			reg = <0x0 0x35400000 (68*_MB_)>;
+			cma-ban;
+			ban-not-used;
+		};
+
+		tp@39800000 {
+			reg = <0x0 0x39800000 (12*_MB_)>;
+			cma-ban;
+			ban-not-used;
+		}; 
+
+		vt@3a400000 {
+			reg = <0x0 0x3a400000 (4*_MB_)>;
+			cma-ban;
+			ban-not-used;
+		}; 
+	};
+};

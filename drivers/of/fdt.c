@@ -25,6 +25,8 @@
 #include <linux/debugfs.h>
 #include <linux/serial_core.h>
 #include <linux/sysfs.h>
+#include <linux/pageremap.h>
+#include <linux/rtkblueprint.h>
 
 #include <asm/setup.h>  /* for COMMAND_LINE_SIZE */
 #include <asm/page.h>
@@ -477,6 +479,9 @@ static int __init __reserved_mem_reserve_reg(unsigned long node,
 	int len;
 	const __be32 *prop;
 	int nomap, first = 1;
+	int cma_ban = 0;
+	int ban_type = BAN_ALL_TYPE;
+	int is_sub_region = 0;
 
 	prop = of_get_flat_dt_prop(node, "reg", &len);
 	if (!prop)
@@ -489,13 +494,23 @@ static int __init __reserved_mem_reserve_reg(unsigned long node,
 	}
 
 	nomap = of_get_flat_dt_prop(node, "no-map", NULL) != NULL;
+	cma_ban = of_get_flat_dt_prop(node, "cma-ban", NULL) != NULL;
+	if (cma_ban) {
+		if (of_get_flat_dt_prop(node, "ban-normal", NULL) != NULL)
+		    ban_type = BAN_NORMAL;
+		else if (of_get_flat_dt_prop(node, "ban-not-used", NULL) != NULL)
+		    ban_type = BAN_NOT_USED;
+	}
+	is_sub_region = of_get_flat_dt_prop(node, "is-sub-region", NULL) != NULL;
+	if (is_sub_region)
+		pr_debug("[MM] %s is SUB Region\n", uname);
 
 	while (len >= t_len) {
 		base = dt_mem_next_cell(dt_root_addr_cells, &prop);
 		size = dt_mem_next_cell(dt_root_size_cells, &prop);
 
 		if (size &&
-		    early_init_dt_reserve_memory_arch(base, size, nomap) == 0)
+		    early_init_dt_reserve_memory_arch_ext(base, size, nomap, cma_ban, ban_type, is_sub_region) == 0)
 			pr_debug("Reserved memory: reserved region for node '%s': base %pa, size %ld MiB\n",
 				uname, &base, (unsigned long)size / SZ_1M);
 		else
@@ -504,7 +519,7 @@ static int __init __reserved_mem_reserve_reg(unsigned long node,
 
 		len -= t_len;
 		if (first) {
-			fdt_reserved_mem_save_node(node, uname, base, size);
+			fdt_reserved_mem_save_node_ext(node, uname, base, size, is_sub_region);
 			first = 0;
 		}
 	}
@@ -584,6 +599,9 @@ void __init early_init_fdt_scan_reserved_mem(void)
 {
 	int n;
 	u64 base, size;
+
+	if (!IS_ENABLED(CONFIG_OF_RESERVED_MEM))
+		return;
 
 	if (!initial_boot_params)
 		return;
@@ -966,10 +984,16 @@ int __init early_init_dt_scan_chosen(unsigned long node, const char *uname,
 	 * is set in which case we override whatever was found earlier.
 	 */
 #ifdef CONFIG_CMDLINE
-#ifndef CONFIG_CMDLINE_FORCE
+#if defined(CONFIG_CMDLINE_EXTEND)
+	strlcat(data, " ", COMMAND_LINE_SIZE);
+	strlcat(data, CONFIG_CMDLINE, COMMAND_LINE_SIZE);
+#elif defined(CONFIG_CMDLINE_FORCE)
+	strlcpy(data, CONFIG_CMDLINE, COMMAND_LINE_SIZE);
+#else
+	/* No arguments from boot loader, use kernel's  cmdl*/
 	if (!((char *)data)[0])
-#endif
 		strlcpy(data, CONFIG_CMDLINE, COMMAND_LINE_SIZE);
+#endif
 #endif /* CONFIG_CMDLINE */
 
 	pr_debug("Command line is: %s\n", (char*)data);
@@ -986,7 +1010,9 @@ int __init early_init_dt_scan_chosen(unsigned long node, const char *uname,
 void __init __weak early_init_dt_add_memory_arch(u64 base, u64 size)
 {
 	const u64 phys_offset = __pa(PAGE_OFFSET);
-
+#ifdef CONFIG_ARM64
+	static int cnt = 0;
+#endif
 	if (!PAGE_ALIGNED(base)) {
 		if (size < PAGE_SIZE - (base & ~PAGE_MASK)) {
 			pr_warn("Ignoring memory block 0x%llx - 0x%llx\n",
@@ -1021,12 +1047,35 @@ void __init __weak early_init_dt_add_memory_arch(u64 base, u64 size)
 		size -= phys_offset - base;
 		base = phys_offset;
 	}
+
+#ifdef CONFIG_ARM64
+//	pr_info("mem=%lldMB @ 0x%08llx\n", size / 1024 / 1024, base);
+	if (!cnt++)
+		add_memory_size(GFP_DCU1, (int)size);
+	else
+		add_memory_size(GFP_DCU2, (int)size);
+#endif
+
 	memblock_add(base, size);
 }
 
 int __init __weak early_init_dt_reserve_memory_arch(phys_addr_t base,
 					phys_addr_t size, bool nomap)
 {
+	if (nomap)
+		return memblock_remove(base, size);
+	return memblock_reserve(base, size);
+}
+
+int __init __weak early_init_dt_reserve_memory_arch_ext(phys_addr_t base,
+					phys_addr_t size, bool nomap, bool cma_ban, int ban_type, int is_sub_region)
+{
+	if (is_sub_region) {
+		pr_debug("[MM] It's memory sub-region, no need to reserve memblock\n");
+		return 0;
+	}
+	if (cma_ban)
+		return add_ban_info(base, size, ban_type);
 	if (nomap)
 		return memblock_remove(base, size);
 	return memblock_reserve(base, size);
@@ -1051,6 +1100,14 @@ int __init __weak early_init_dt_reserve_memory_arch(phys_addr_t base,
 {
 	pr_err("Reserved memory not supported, ignoring range %pa - %pa%s\n",
 		  &base, &size, nomap ? " (nomap)" : "");
+	return -ENOSYS;
+}
+
+int __init __weak early_init_dt_reserve_memory_arch_ext(phys_addr_t base,
+					phys_addr_t size, bool nomap, bool cma_ban, int ban_type, int is_sub_region)
+{
+	pr_err("Reserved memory not supported, ignoring range %pa - %pa%s%s%s\n",
+		  &base, &size, nomap ? " (nomap)" : "", cma_ban ? " (cma-ban)" : "", is_sub_region ? " (is-sub-region)" : "");
 	return -ENOSYS;
 }
 

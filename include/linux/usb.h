@@ -394,6 +394,10 @@ struct usb_bus {
 	struct mon_bus *mon_bus;	/* non-null when associated */
 	int monitored;			/* non-zero when monitored */
 #endif
+#if defined(CONFIG_USB_DWC_OTG) || defined(CONFIG_USB_DWC_OTG_MODULE)
+	uint16_t otg_version;
+	uint32_t is_hnp_cap;
+#endif
 };
 
 struct usb_dev_state;
@@ -718,9 +722,13 @@ extern void usb_enable_ltm(struct usb_device *udev);
 
 static inline bool usb_device_supports_ltm(struct usb_device *udev)
 {
+#ifdef CONFIG_DISABLE_LTM_SUPPORT
+	return false;
+#else
 	if (udev->speed != USB_SPEED_SUPER || !udev->bos || !udev->bos->ss_cap)
 		return false;
 	return udev->bos->ss_cap->bmAttributes & USB_LTM_SUPPORT;
+#endif
 }
 
 static inline bool usb_device_no_sg_constraint(struct usb_device *udev)
@@ -1901,6 +1909,40 @@ extern void usb_led_activity(enum usb_led_event ev);
 #else
 static inline void usb_led_activity(enum usb_led_event ev) {}
 #endif
+
+
+#if (1)   /* RTK self-defined usb2_platform driver ops */
+struct rtk_ehci_platform_driver {
+	struct kref kref;      /* reference counter */
+	void (*usb_on)(void);
+	void (*usb_off)(void);
+};
+
+struct rtk_xhci_platform_driver {
+	struct kref kref;      /* reference counter */
+	void __iomem *xhci_global_regs;
+	int (*usb_on)(void *hc_data);
+	void (*usb_off)(void);
+	void (*hub_polling_check_on)(bool setup, void *priv_data);
+	void (*hub_polling_check_off)(void);
+	int (*create_sysfs)(void *hc_data);
+	void (*remove_sysfs)(void *hc_data);
+};
+
+extern bool disable_ehci_hub_polling_check __attribute__((weak));
+extern bool disable_xhci_hub_polling_check __attribute__((weak));
+extern void disable_u3_company_u2_port(void) __attribute__((weak));
+
+extern struct rtk_ehci_platform_driver *get_rtk_ehci_platform_driver(void) __attribute__((weak));
+extern void rtk_put_ehci_platform(struct rtk_ehci_platform_driver *rtk_ehci_plat) __attribute__((weak));
+extern int rtk_ehci_port_test_mode(struct usb_device *udev, int port1, int mode) __attribute__((weak));
+
+extern struct rtk_xhci_platform_driver *get_rtk_xhci_platform_driver(void) __attribute__((weak));
+extern void rtk_put_xhci_platform(struct rtk_xhci_platform_driver *rtk_xhci_plat) __attribute__((weak));
+extern int rtk_xhci_port_test_mode(struct usb_device *udev, int port1, int mode) __attribute__((weak));
+
+#endif
+
 
 #endif  /* __KERNEL__ */
 

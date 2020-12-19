@@ -65,6 +65,15 @@ static inline int thermal_gov_step_wise_register(void) { return 0; }
 static inline void thermal_gov_step_wise_unregister(void) {}
 #endif /* CONFIG_THERMAL_GOV_STEP_WISE */
 
+#ifdef CONFIG_RTK_KDRV_THERMAL_GOV_RTK_THERMAL_THROTTLE
+int thermal_gov_rtk_thermal_register(void);
+void thermal_gov_rtk_thermal_unregister(void);
+#else
+static inline int thermal_gov_rtk_thermal_register(void) { return 0; }
+static inline void thermal_gov_rtk_thermal_unregister(void) {}
+#endif /* CONFIG_THERMAL_GOV_STEP_WISE */
+
+
 #ifdef CONFIG_THERMAL_GOV_FAIR_SHARE
 int thermal_gov_fair_share_register(void);
 void thermal_gov_fair_share_unregister(void);

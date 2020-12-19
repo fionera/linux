@@ -1,0 +1,53 @@
+#if 1
+#include <generated/autoconf.h>
+#include <linux/module.h>
+#include <linux/moduleparam.h>
+#include <linux/init.h>
+#include <linux/string.h>
+#include <linux/kernel.h>
+#include <linux/slab.h>
+#include <linux/fs.h>
+#include <linux/errno.h>
+#include <linux/types.h>
+#include <linux/cdev.h>
+#include <linux/dma-mapping.h>
+#include <linux/uaccess.h>
+#include <asm/barrier.h>
+#include <asm/cacheflush.h>
+#include <mach/irqs.h>
+#include <mach/platform.h>
+#include <mach/system.h>
+#include <mach/timex.h>
+
+#include <linux/interrupt.h>
+#include <linux/device.h>
+#include <linux/delay.h>
+#include <linux/platform_device.h>
+#include <linux/dma-mapping.h>
+#include <linux/random.h>
+#ifdef CONFIG_CMA_RTK_ALLOCATOR
+#include <linux/pageremap.h>
+#endif
+#include <linux/kthread.h>  /* for threads */
+#include <linux/time.h>   /* for using jiffies */
+#include <linux/hrtimer.h>
+
+#include <linux/proc_fs.h>
+
+#if 0
+#include <rbus/timer_reg.h>
+#include <rbus/dmato3dtable_reg.h>
+#include <rbus/vgip_reg.h>
+#include <rbus/sb2_reg.h>
+#include <scaler/scalerCommon.h>
+#include <tvscalercontrol/scalerdrv/scalermemory.h>
+#include <rtk_kdriver/tvscalercontrol/vip/scalerColor.h>
+#endif
+#endif
+unsigned short LG_GSR_GetAdaptiveRgbGain(unsigned int * pstParams, unsigned short pApl[34][60], unsigned short maxGain)
+{
+
+	return 1;
+}
+EXPORT_SYMBOL(LG_GSR_GetAdaptiveRgbGain);
+

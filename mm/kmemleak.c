@@ -578,6 +578,7 @@ static struct kmemleak_object *create_object(unsigned long ptr, size_t size,
 		 * case, the command line is not correct.
 		 */
 		strncpy(object->comm, current->comm, sizeof(object->comm));
+		object->comm[TASK_COMM_LEN-1]=0;
 	}
 
 	/* kernel backtrace */

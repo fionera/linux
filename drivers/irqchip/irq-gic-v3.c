@@ -32,6 +32,7 @@
 #include <asm/exception.h>
 #include <asm/smp_plat.h>
 #include <asm/virt.h>
+#include <mach/platform.h>
 
 #include "irq-gic-common.h"
 
@@ -48,6 +49,8 @@ struct gic_chip_data {
 	u64			redist_stride;
 	u32			nr_redist_regions;
 	unsigned int		irq_nr;
+	unsigned int		saved_enable_register[32];
+	unsigned int __percpu	*saved_ppi_register;
 };
 
 static struct gic_chip_data gic_data __read_mostly;
@@ -59,6 +62,15 @@ static struct static_key supports_deactivate = STATIC_KEY_INIT_TRUE;
 
 /* Our default, arbitrary priority value. Linux only uses one anyway. */
 #define DEFAULT_PMR_VALUE	0xf0
+
+u32 gic_irq_find_mapping(u32 hwirq)
+{
+        struct gic_chip_data *gic = &gic_data;
+        u32 virq = irq_find_mapping(gic->domain, hwirq);
+//        pr_info("%s: virq = %d, hwirq = %d\n", __func__,virq, hwirq);
+        return virq;
+}
+EXPORT_SYMBOL(gic_irq_find_mapping);
 
 static inline unsigned int gic_irq(struct irq_data *d)
 {
@@ -128,6 +140,11 @@ static void gic_enable_redist(bool enable)
 
 	rbase = gic_data_rdist_rd_base();
 
+	/* Power on redistributor ,spec default off
+	   here just for safe, bootcode or redirect should also 
+	   open it*/
+	writel_relaxed(2, rbase + GICR_PWRR);
+
 	val = readl_relaxed(rbase + GICR_WAKER);
 	if (enable)
 		/* Wake up this CPU redistributor */
@@ -142,7 +159,7 @@ static void gic_enable_redist(bool enable)
 			return;	/* No PM support in this redistributor */
 	}
 
-	while (--count) {
+	while (count--) {
 		val = readl_relaxed(rbase + GICR_WAKER);
 		if (enable ^ (val & GICR_WAKER_ChildrenAsleep))
 			break;
@@ -331,13 +348,43 @@ static u64 gic_mpidr_to_affinity(unsigned long mpidr)
 	return aff;
 }
 
+static u64 gic_mpidr_to_affinity_by_cpu(unsigned long mpidr, int cpu)
+{
+	u64 aff=0;
+
+	//dump_stack();
+	if(cpu==3)
+		aff=(u64)MPIDR_AFFINITY_LEVEL(mpidr, 3) << 32;
+	else if(cpu==2)
+		aff=(u64)MPIDR_AFFINITY_LEVEL(mpidr, 2) << 24;
+	else if(cpu==1)
+		aff=(u64)MPIDR_AFFINITY_LEVEL(mpidr, 1) << 8;
+	else if(cpu==0)
+		aff=(u64)MPIDR_AFFINITY_LEVEL(mpidr, 0) << 0;
+	return aff;
+}
+
+/*MAC6RTANDN-355 record isr enter/exit.*/
+#define CONFIG_ENABLE_RECORD_IRQ 1
+#ifdef CONFIG_ENABLE_RECORD_IRQ
+struct record_irq{
+	unsigned int irq_number;
+	unsigned long enter_time;
+};
+static struct record_irq record_irqs[NR_CPUS];
+#endif
 static asmlinkage void __exception_irq_entry gic_handle_irq(struct pt_regs *regs)
 {
 	u32 irqnr;
-
+#ifdef CONFIG_ENABLE_RECORD_IRQ
+	unsigned int cpu = smp_processor_id();
+#endif
 	do {
 		irqnr = gic_read_iar();
-
+#ifdef CONFIG_ENABLE_RECORD_IRQ
+		record_irqs[cpu].irq_number = irqnr;
+		record_irqs[cpu].enter_time = jiffies;
+#endif
 		if (likely(irqnr > 15 && irqnr < 1020) || irqnr >= 8192) {
 			int err;
 
@@ -375,26 +422,37 @@ static asmlinkage void __exception_irq_entry gic_handle_irq(struct pt_regs *regs
 			continue;
 		}
 	} while (irqnr != ICC_IAR1_EL1_SPURIOUS);
+#ifdef CONFIG_ENABLE_RECORD_IRQ
+		record_irqs[cpu].irq_number = 0;
+#endif
 }
 
-static void __init gic_dist_init(void)
+#ifdef CONFIG_ENABLE_RECORD_IRQ
+void print_current_irq_records(void)
 {
-	unsigned int i;
+	unsigned int idx = 0;
+	for(idx = 0; idx <NR_CPUS; idx++)
+		pr_err("record_irqs[%d] : irq(%d), time(%lu)\n", idx, record_irqs[idx].irq_number, record_irqs[idx].enter_time);
+}
+#else
+void print_current_irq_records(void)
+{
+	return;
+}
+#endif
+
+static void gic_dist_init(void)
+{
+	unsigned int i; //mark off to let all cpu can service int
 	u64 affinity;
+	u64 affinity1;
+	unsigned int ver = get_ic_version();
+
 	void __iomem *base = gic_data.dist_base;
 
 	/* Disable the distributor */
 	writel_relaxed(0, base + GICD_CTLR);
 	gic_dist_wait_for_rwp();
-
-	/*
-	 * Configure SPIs as non-secure Group-1. This will only matter
-	 * if the GIC only has a single security state. This will not
-	 * do the right thing if the kernel is running in secure mode,
-	 * but that's not the intended use case anyway.
-	 */
-	for (i = 32; i < gic_data.irq_nr; i += 32)
-		writel_relaxed(~0, base + GICD_IGROUPR + i / 8);
 
 	gic_dist_config(base, gic_data.irq_nr, gic_dist_wait_for_rwp);
 
@@ -406,9 +464,16 @@ static void __init gic_dist_init(void)
 	 * Set all global interrupts to the boot CPU only. ARE must be
 	 * enabled.
 	 */
-	affinity = gic_mpidr_to_affinity(cpu_logical_map(smp_processor_id()));
-	for (i = 32; i < gic_data.irq_nr; i++)
-		gic_write_irouter(affinity, base + GICD_IROUTER + i * 8);
+	if(ver < VERSION_C) {
+		affinity = gic_mpidr_to_affinity_by_cpu(cpu_logical_map(smp_processor_id()),smp_processor_id());
+		affinity1 = gic_mpidr_to_affinity_by_cpu(cpu_logical_map(smp_processor_id()),1); //irq51 to cpu1
+		for (i = 32; i < gic_data.irq_nr; i++) {
+			if(i==51)
+				gic_write_irouter(affinity1, base + GICD_IROUTER + i * 8);
+			else if(i==34)
+				gic_write_irouter(affinity, base + GICD_IROUTER + i * 8);
+		}
+	}
 }
 
 static int gic_populate_rdist(void)
@@ -509,9 +574,6 @@ static void gic_cpu_init(void)
 	gic_enable_redist(true);
 
 	rbase = gic_data_rdist_sgi_base();
-
-	/* Configure SGIs/PPIs as non-secure Group-1 */
-	writel_relaxed(~0, rbase + GICR_IGROUPR0);
 
 	gic_cpu_config(rbase, gic_redist_wait_for_rwp);
 
@@ -631,6 +693,7 @@ static int gic_set_affinity(struct irq_data *d, const struct cpumask *mask_val,
 	void __iomem *reg;
 	int enabled;
 	u64 val;
+	unsigned int ver = get_ic_version();
 
 	if (cpu >= nr_cpu_ids)
 		return -EINVAL;
@@ -644,9 +707,21 @@ static int gic_set_affinity(struct irq_data *d, const struct cpumask *mask_val,
 		gic_mask_irq(d);
 
 	reg = gic_dist_base(d) + GICD_IROUTER + (gic_irq(d) * 8);
-	val = gic_mpidr_to_affinity(cpu_logical_map(cpu));
 
-	gic_write_irouter(val, reg);
+	val = gic_mpidr_to_affinity(cpu_logical_map(cpu));
+	//irq 34, 51 cannot set affinity
+
+	if((gic_irq(d)==34  || gic_irq(d)==51) &&  (ver < VERSION_C))
+	{
+		cpu = smp_processor_id(); //override to current cpu
+		val = gic_mpidr_to_affinity_by_cpu(cpu_logical_map(cpu),cpu);
+		gic_write_irouter(val, reg);
+	}
+	else
+	{
+		if(cpu!=0)
+			gic_write_irouter(val, reg);
+	}
 
 	/*
 	 * If the interrupt was enabled, enabled it again. Otherwise,
@@ -664,6 +739,39 @@ static int gic_set_affinity(struct irq_data *d, const struct cpumask *mask_val,
 #define gic_smp_init()		do { } while(0)
 #endif
 
+static void gic_cpu_save(void)
+{
+	unsigned int *ptr = raw_cpu_ptr(gic_data.saved_ppi_register);
+
+	*ptr = readl_relaxed((void*)(gic_data_rdist_sgi_base() + GICR_ISENABLER0));
+}
+
+static void gic_cpu_restore(void)
+{
+	unsigned int *ptr = raw_cpu_ptr(gic_data.saved_ppi_register);
+
+	gic_cpu_init();
+	writel_relaxed(*ptr, (void*)(gic_data_rdist_sgi_base() + GICR_ISENABLER0));
+}
+
+static void gic_dist_save(void)
+{
+        int i;
+
+        for(i = 0; i < 32; i++)
+                gic_data.saved_enable_register[i] = readl_relaxed((void*)(gic_data.dist_base + GICD_ISENABLER + i * 4));
+}
+
+static void gic_dist_restore(void)
+{
+        int i;
+
+	gic_dist_init();
+        for(i = 0; i < 32; i++)
+                writel_relaxed(gic_data.saved_enable_register[i], (void*)(gic_data.dist_base + GICD_ISENABLER + i * 4));
+}
+
+
 #ifdef CONFIG_CPU_PM
 static int gic_cpu_pm_notifier(struct notifier_block *self,
 			       unsigned long cmd, void *v)
@@ -671,9 +779,15 @@ static int gic_cpu_pm_notifier(struct notifier_block *self,
 	if (cmd == CPU_PM_EXIT) {
 		gic_enable_redist(true);
 		gic_cpu_sys_reg_init();
+		gic_cpu_restore();
 	} else if (cmd == CPU_PM_ENTER) {
+		gic_cpu_save();
 		gic_write_grpen1(0);
 		gic_enable_redist(false);
+	} else if (cmd == CPU_CLUSTER_PM_EXIT) {
+		gic_dist_restore();
+	} else if (cmd == CPU_CLUSTER_PM_ENTER) {
+		gic_dist_save();
 	}
 	return NOTIFY_OK;
 }
@@ -684,6 +798,7 @@ static struct notifier_block gic_cpu_pm_notifier_block = {
 
 static void gic_cpu_pm_init(void)
 {
+	gic_data.saved_ppi_register = __alloc_percpu(sizeof(unsigned int), sizeof(unsigned int));
 	cpu_pm_register_notifier(&gic_cpu_pm_notifier_block);
 }
 
@@ -846,7 +961,11 @@ static int __init gic_of_init(struct device_node *node, struct device_node *pare
 	int err;
 	int i;
 
+#ifndef CONFIG_ARM64
+	dist_base = (void __iomem *)GIC_BASE_VIRT;
+#else
 	dist_base = of_iomap(node, 0);
+#endif
 	if (!dist_base) {
 		pr_err("%s: unable to map gic dist registers\n",
 			node->full_name);
@@ -875,7 +994,11 @@ static int __init gic_of_init(struct device_node *node, struct device_node *pare
 		int ret;
 
 		ret = of_address_to_resource(node, 1 + i, &res);
+#ifndef CONFIG_ARM64
+		rdist_regs[i].redist_base = (void __iomem *)(GIC_BASE_VIRT + 0x00040000);
+#else
 		rdist_regs[i].redist_base = of_iomap(node, 1 + i);
+#endif
 		if (ret || !rdist_regs[i].redist_base) {
 			pr_err("%s: couldn't map region %d\n",
 			       node->full_name, i);
@@ -931,6 +1054,13 @@ static int __init gic_of_init(struct device_node *node, struct device_node *pare
 	gic_cpu_init();
 	gic_cpu_pm_init();
 
+	{
+		int i;
+		for(i=0;i<90;i++)
+		{
+			irq_of_parse_and_map(node, i);
+		}
+	}
 	return 0;
 
 out_free:

@@ -1638,23 +1638,35 @@ static void stmmac_check_ether_addr(struct stmmac_priv *priv)
  */
 static int stmmac_init_dma_engine(struct stmmac_priv *priv)
 {
-	int pbl = DEFAULT_DMA_PBL, fixed_burst = 0, burst_len = 0;
+	int pbl = DEFAULT_DMA_PBL, fixed_burst = 0, aal = 0;
 	int mixed_burst = 0;
 	int atds = 0;
+	int ret = 0;
 
 	if (priv->plat->dma_cfg) {
 		pbl = priv->plat->dma_cfg->pbl;
 		fixed_burst = priv->plat->dma_cfg->fixed_burst;
 		mixed_burst = priv->plat->dma_cfg->mixed_burst;
-		burst_len = priv->plat->dma_cfg->burst_len;
+		aal = priv->plat->dma_cfg->aal;
 	}
 
 	if (priv->extend_desc && (priv->mode == STMMAC_RING_MODE))
 		atds = 1;
 
-	return priv->hw->dma->init(priv->ioaddr, pbl, fixed_burst, mixed_burst,
-				   burst_len, priv->dma_tx_phy,
-				   priv->dma_rx_phy, atds);
+	ret = priv->hw->dma->reset(priv->ioaddr);
+	if (ret) {
+		dev_err(priv->device, "Failed to reset the dma\n");
+		return ret;
+	}
+
+	priv->hw->dma->init(priv->ioaddr, pbl, fixed_burst, mixed_burst,
+			    aal, priv->dma_tx_phy, priv->dma_rx_phy, atds);
+
+	if ((priv->synopsys_id >= DWMAC_CORE_3_50) &&
+	    (priv->plat->axi && priv->hw->dma->axi))
+		priv->hw->dma->axi(priv->ioaddr, priv->plat->axi);
+
+	return ret;
 }
 
 /**

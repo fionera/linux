@@ -98,6 +98,7 @@ void syscore_resume(void)
 	WARN_ONCE(!irqs_disabled(),
 		"Interrupts enabled before system core resume.\n");
 
+	pr_info("PM: Starting syscore resume\n");
 	list_for_each_entry(ops, &syscore_ops_list, node)
 		if (ops->resume) {
 			if (initcall_debug)

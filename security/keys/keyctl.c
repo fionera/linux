@@ -1479,7 +1479,11 @@ long keyctl_session_to_parent(void)
 	cred = cred_alloc_blank();
 	if (!cred)
 		goto error_keyring;
+#ifdef CONFIG_EKP_CRED_PROTECTION
+	newwork = &cred->rcu->rcu;
+#else
 	newwork = &cred->rcu;
+#endif
 
 	cred->session_keyring = key_ref_to_ptr(keyring_r);
 	keyring_r = NULL;
@@ -1539,7 +1543,11 @@ unlock:
 	write_unlock_irq(&tasklist_lock);
 	rcu_read_unlock();
 	if (oldwork)
+#ifdef CONFIG_EKP_CRED_PROTECTION
+		put_cred(container_of(oldwork, struct cred_rcu, rcu)->cred);
+#else
 		put_cred(container_of(oldwork, struct cred, rcu));
+#endif
 	if (newwork)
 		put_cred(cred);
 	return ret;

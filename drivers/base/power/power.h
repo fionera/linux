@@ -141,6 +141,8 @@ extern void device_pm_move_before(struct device *, struct device *);
 extern void device_pm_move_after(struct device *, struct device *);
 extern void device_pm_move_last(struct device *);
 
+static bool is_userresume(struct device *dev);
+
 #else /* !CONFIG_PM_SLEEP */
 
 static inline void device_pm_sleep_init(struct device *dev) {}

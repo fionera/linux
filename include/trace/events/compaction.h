@@ -37,12 +37,26 @@
 #define IFDEF_ZONE_HIGHMEM(X)
 #endif
 
+#ifdef CONFIG_CMA
+#ifdef CONFIG_HIGHMEM
+#define IFDEF_ZONE_CMA(X1, X2, Y1, Y2, Z) X1 Y1 Z
+#else
+#define IFDEF_ZONE_CMA(X1, X2, Y1, Y2, Z) X1 Y2
+#endif
+#else
+#define IFDEF_ZONE_CMA(X1, X2, Y1, Y2, Z) X2
+#endif
+
 #define ZONE_TYPE						\
 	IFDEF_ZONE_DMA(		EM (ZONE_DMA,	 "DMA"))	\
 	IFDEF_ZONE_DMA32(	EM (ZONE_DMA32,	 "DMA32"))	\
 				EM (ZONE_NORMAL, "Normal")	\
 	IFDEF_ZONE_HIGHMEM(	EM (ZONE_HIGHMEM,"HighMem"))	\
-				EMe(ZONE_MOVABLE,"Movable")
+	IFDEF_ZONE_CMA(		EM (ZONE_MOVABLE,"Movable"),	\
+				EMe(ZONE_MOVABLE,"Movable"),	\
+				EM(ZONE_CMA_LOWMEM,"CMALOW"),	\
+				EMe(ZONE_CMA_LOWMEM,"CMALOW"),	\
+				EMe(ZONE_CMA_HIGHMEM,"CMAHIGH"))
 
 /*
  * First define the enums in the above macros to be exported to userspace

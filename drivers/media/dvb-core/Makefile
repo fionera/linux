@@ -2,6 +2,11 @@
 # Makefile for the kernel DVB device drivers.
 #
 
+ifdef CONFIG_RTK_KDRIVER_SUPPORT
+KBUILD_CPPFLAGS += -Idrivers/rtk_kdriver/common
+KBUILD_CPPFLAGS += -Idrivers/rtk_kdriver/common/linux/dvbv5-ext
+endif
+
 dvb-net-$(CONFIG_DVB_NET) := dvb_net.o
 
 dvb-core-objs := dvbdev.o dmxdev.o dvb_demux.o dvb_filter.o 	\

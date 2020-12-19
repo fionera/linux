@@ -28,6 +28,7 @@
 #include <linux/irq.h>
 
 #include <linux/atomic.h>
+#include <linux/mm.h>
 #include <asm/cacheflush.h>
 #include <asm/exception.h>
 #include <asm/unistd.h>
@@ -50,7 +51,7 @@ static const char *handler[]= {
 void *vectors_page;
 
 #ifdef CONFIG_DEBUG_USER
-unsigned int user_debug;
+unsigned int user_debug = (UDBG_UNDEFINED | UDBG_SYSCALL | UDBG_BADABORT | UDBG_SEGV | UDBG_BUS);
 
 static int __init user_debug_setup(char *str)
 {
@@ -60,7 +61,7 @@ static int __init user_debug_setup(char *str)
 __setup("user_debug=", user_debug_setup);
 #endif
 
-static void dump_mem(const char *, const char *, unsigned long, unsigned long);
+static void dump_mem2(const char *lvl, const char *str, unsigned long start, unsigned long end, unsigned long base, int user);
 
 void dump_backtrace_entry(unsigned long where, unsigned long from, unsigned long frame)
 {
@@ -71,7 +72,7 @@ void dump_backtrace_entry(unsigned long where, unsigned long from, unsigned long
 #endif
 
 	if (in_exception_text(where))
-		dump_mem("", "Exception stack", frame + 4, frame + 4 + sizeof(struct pt_regs));
+		dump_mem2("", "Exception stack", frame + 4, frame + 4 + sizeof(struct pt_regs)+256, frame+4, 0);
 }
 
 #ifndef CONFIG_ARM_UNWIND
@@ -90,16 +91,81 @@ static int verify_stack(unsigned long sp)
 }
 #endif
 
+/** please notice,
+ * the SW_DOMAIN_PAN feature will block user mode mapping lookup.
+ */
+unsigned long PAR(unsigned long addr, int user)
+{
+	unsigned long ret;
+
+	__asm__ __volatile__ (
+		"cmp  %2, #0 \n\t"
+		"MCReq p15, 0, %1, c7, c8, 0  @; ATS1CPR operation \n\t"
+		"MCRne p15, 0, %1, c7, c8, 2  @; ATS1CUR operation \n\t"
+		"isb \n\t"
+		"dsb \n\t"
+		"MRC p15, 0, %0, c7, c4, 0    @PAR \n\t"
+		"dsb \n\t"
+		:"=r"(ret)
+		:"r"(addr), "r"(user));
+	
+	return ret;
+}
+
 /*
  * Dump out the contents of some memory nicely...
  */
-static void dump_mem(const char *lvl, const char *str, unsigned long bottom,
-		     unsigned long top)
+#define RBUS_START  (RBUS_BASE_PHYS)
+#define RBUS_END    (RBUS_BASE_PHYS + RBUS_BASE_SIZE)
+static void dump_mem2(const char *lvl, const char *str, unsigned long bottom,
+		      unsigned long top, unsigned long base, int user)
 {
-	unsigned long first;
+	unsigned long first, par, parx;
 	mm_segment_t fs;
 	int i;
+	int uflags;
 
+	// shape the underflow and overflow
+	if ((base < PAGE_SIZE) && ((long)bottom < 0))
+		bottom = 0;
+	if ((PAGE_ALIGN(base) == 0) && ((long)top >= 0))
+		top = (unsigned long)(0-1);
+	if ((base < bottom) || (base > top) || (top-bottom) > PAGE_SIZE ) {
+		printk("%s%s 0x%08lx (NA) - par(0x%lx)\n",  lvl, str, base, PAR(base, user));
+		return;
+	}
+
+	uflags = uaccess_save_and_enable();
+	par = PAR(base, user);
+	if (par & 1) {
+		printk("%s%s 0x%08lx (no mapping) - par(0x%lx)\n", 
+		       lvl, str, base, par);
+		uaccess_restore(uflags);
+		return;
+	}
+	/* skip RBUS */
+	if ((par >= RBUS_START) && (par < RBUS_END)) {
+		printk("%s%s 0x%08lx (RBUS) - par(0x%lx)\n", 
+		       lvl, str, base, par);
+		uaccess_restore(uflags);
+		return;
+	}
+
+        parx = PAR(bottom, user);
+        if ((parx & 1) || ((parx >= RBUS_START) && (parx < RBUS_END))) {
+                printk("%s%s bottom 0x%08lx (%s) - par(0x%lx)\n", 
+		       lvl, str, bottom, (parx & 1) ? "no mapping": "RBUS", parx);
+                
+                bottom = PAGE_ALIGN(bottom);
+        }
+        
+        parx = PAR(top, user);
+        if ((parx & 1) || ((parx >= RBUS_START) && (parx < RBUS_END))) {
+                printk("%s%s top 0x%08lx (%s) - par(0x%lx)\n", 
+		       lvl, str, top, (parx & 1) ? "no mapping": "RBUS", parx);
+
+                top = (PAGE_MASK&(top))-1;
+        }
 	/*
 	 * We need to switch to kernel mode so that we can use __get_user
 	 * to safely read from kernel space.  Note that we now dump the
@@ -108,7 +174,7 @@ static void dump_mem(const char *lvl, const char *str, unsigned long bottom,
 	fs = get_fs();
 	set_fs(KERNEL_DS);
 
-	printk("%s%s(0x%08lx to 0x%08lx)\n", lvl, str, bottom, top);
+	printk("%s%s 0x%08lx (0x%08lx to 0x%08lx) - par(0x%lx)\n", lvl, str, base, bottom, top, par);
 
 	for (first = bottom & ~31; first < top; first += 32) {
 		unsigned long p;
@@ -130,6 +196,33 @@ static void dump_mem(const char *lvl, const char *str, unsigned long bottom,
 	}
 
 	set_fs(fs);
+	uaccess_restore(uflags);
+}
+
+
+#define DUMP_REG_REFS(lvl, reg, user, range)					\
+	dump_mem2(lvl, #reg ": ", regs->ARM_##reg - (range), regs->ARM_##reg + (range), regs->ARM_##reg, user)
+
+void dump_regs_refs(const char *lvl, struct pt_regs *regs)
+{
+	int user = (user_mode(regs) != 0) ? 1: 0;
+
+	DUMP_REG_REFS(lvl, r0, user, 256);
+	DUMP_REG_REFS(lvl, r1, user, 256);
+	DUMP_REG_REFS(lvl, r2, user, 256);
+	DUMP_REG_REFS(lvl, r3, user, 256);
+	DUMP_REG_REFS(lvl, r4, user, 256);
+	DUMP_REG_REFS(lvl, r5, user, 256);
+	DUMP_REG_REFS(lvl, r6, user, 256);
+	DUMP_REG_REFS(lvl, r7, user, 256);
+	DUMP_REG_REFS(lvl, r8, user, 256);
+	DUMP_REG_REFS(lvl, r9, user, 256);
+	DUMP_REG_REFS(lvl, r10, user, 256);
+	DUMP_REG_REFS(lvl, fp, user, 256);
+	DUMP_REG_REFS(lvl, ip, user, 256);
+	DUMP_REG_REFS(lvl, sp, user, 512);
+	DUMP_REG_REFS(lvl, lr, user, 256);
+	DUMP_REG_REFS(lvl, pc, user, 256);
 }
 
 static void dump_instr(const char *lvl, struct pt_regs *regs)
@@ -218,6 +311,26 @@ void show_stack(struct task_struct *tsk, unsigned long *sp)
 	barrier();
 }
 
+#if defined(CONFIG_REALTEK_WATCHPOINT) || defined(CONFIG_RTK_KDRV_WATCHPOINT)
+void dump_info(struct pt_regs *regs, struct task_struct *tsk)
+{
+	print_modules();
+	__show_regs(regs);
+	printk(KERN_EMERG "Process %.*s (pid: %d, stack limit = 0x%p)\n",
+		TASK_COMM_LEN, tsk->comm, task_pid_nr(tsk), end_of_stack(tsk));
+
+	if (!user_mode(regs) || in_interrupt()) {
+		dump_mem2(KERN_EMERG, "Stack: ", regs->ARM_sp-128,
+			  THREAD_SIZE + (unsigned long)task_stack_page(tsk)+128, regs->ARM_sp, user_mode(regs));
+		dump_backtrace(regs, tsk);
+		dump_instr(KERN_EMERG, regs);
+		dump_regs_refs(KERN_EMERG, regs);
+	} else if (user_mode(regs)) {
+		;
+	}
+}
+#endif
+
 #ifdef CONFIG_PREEMPT
 #define S_PREEMPT " PREEMPT"
 #else
@@ -254,10 +367,11 @@ static int __die(const char *str, int err, struct pt_regs *regs)
 		 TASK_COMM_LEN, tsk->comm, task_pid_nr(tsk), end_of_stack(tsk));
 
 	if (!user_mode(regs) || in_interrupt()) {
-		dump_mem(KERN_EMERG, "Stack: ", regs->ARM_sp,
-			 THREAD_SIZE + (unsigned long)task_stack_page(tsk));
+		dump_mem2(KERN_EMERG, "Stack: ", regs->ARM_sp-128,
+			  THREAD_SIZE + (unsigned long)task_stack_page(tsk)+128, regs->ARM_sp, user_mode(regs));
 		dump_backtrace(regs, tsk);
 		dump_instr(KERN_EMERG, regs);
+		dump_regs_refs(KERN_EMERG, regs);
 	}
 
 	return 0;
@@ -403,11 +517,15 @@ static int call_undef_hook(struct pt_regs *regs, unsigned int instr)
 	return fn ? fn(regs, instr) : 1;
 }
 
+extern void DDR_scan_set_error(int cpu);
+
 asmlinkage void __exception do_undefinstr(struct pt_regs *regs)
 {
 	unsigned int instr;
 	siginfo_t info;
 	void __user *pc;
+
+	DDR_scan_set_error(0);
 
 	pc = (void __user *)instruction_pointer(regs);
 
@@ -446,12 +564,26 @@ asmlinkage void __exception do_undefinstr(struct pt_regs *regs)
 die_sig:
 #ifdef CONFIG_DEBUG_USER
 	if (user_debug & UDBG_UNDEFINED) {
+		int i;
+		void __user *lr = regs->ARM_lr;
+
 		pr_info("%s (%d): undefined instruction: pc=%p\n",
 			current->comm, task_pid_nr(current), pc);
-		__show_regs(regs);
+
+		show_pte(current->mm, pc);
 		dump_instr(KERN_INFO, regs);
+		__show_regs(regs);
+		dump_stack();
+		dump_regs_refs(KERN_INFO, regs);
+		
+		if (user_mode(regs) && current->mm)
+			show_maps(current->mm);
 	}
+
 #endif
+#if defined(PANIC_AT_USER_FAULT)
+	panic("user undef");
+#endif //#if defined(PANIC_AT_USER_FAULT)
 
 	info.si_signo = SIGILL;
 	info.si_errno = 0;
@@ -517,8 +649,16 @@ static int bad_syscall(int n, struct pt_regs *regs)
 		pr_err("[%d] %s: obsolete system call %08x.\n",
 			task_pid_nr(current), current->comm, n);
 		dump_instr(KERN_ERR, regs);
+		dump_regs_refs(KERN_ERR, regs);
+		if (user_mode(regs) && current->mm)
+			show_maps(current->mm);
 	}
+
 #endif
+
+#if defined(PANIC_AT_USER_FAULT)    /* fixme, just to force stop */
+	panic("bad syscall ");
+#endif //#if defined(PANIC_AT_USER_FAULT)
 
 	info.si_signo = SIGILL;
 	info.si_errno = 0;
@@ -565,6 +705,15 @@ do_cache_op(unsigned long start, unsigned long end, int flags)
 	return __do_cache_op(start, end);
 }
 
+unsigned partcr0 = 0x118CEf;
+unsigned sidovr0 = 0x00000;
+unsigned partcr1 = 0x118CEf;
+unsigned sidovr1 = 0x00000;
+module_param(partcr0, uint, 0644);
+module_param(sidovr0, uint, 0644);
+module_param(partcr1, uint, 0644);
+module_param(sidovr1, uint, 0644);
+
 /*
  * Handle all unrecognised system calls.
  *  0x9f0000 - 0x9fffff are some more esoteric system calls
@@ -574,8 +723,10 @@ asmlinkage int arm_syscall(int no, struct pt_regs *regs)
 {
 	siginfo_t info;
 
-	if ((no >> 16) != (__ARM_NR_BASE>> 16))
+	if ((no >> 16) != (__ARM_NR_BASE>> 16)) {
+                printk ("arm_syscall: no(%x), __ARM_NR_BASE(%x) \n", no, __ARM_NR_BASE);
 		return bad_syscall(no, regs);
+        }
 
 	switch (no & 0xffff) {
 	case 0: /* branch through 0 */
@@ -624,7 +775,66 @@ asmlinkage int arm_syscall(int no, struct pt_regs *regs)
 	case NR(set_tls):
 		set_tls(regs->ARM_r0);
 		return 0;
+                
+#if defined (CONFIG_RTK_NON_TEMPORAL)
+        case NR(nontemp_begin):
+		set_thread_flag(TIF_IS_NONTEMP);
+                {
+                        const int sid = NONTEMP_SID;
+                        unsigned int tmp;
+                        // set cluster_thread_sid as 5, to limit 1/4 
+                        //cp15 c15 0 c4 0
+                        asm volatile (
+                                "mcr p15, 0, %[cr], c15, c4, 3 ;"
+                                "mcr p15, 0, %[ovr], c15, c4, 7 ;"
+                                "mcr p15, 0, %[sid], c15, c4, 0 ;"
+                                : 
+                                : [sid] "r"(sid), [cr] "r"(partcr0), [ovr]"r"(sidovr0)
+                                : "memory");
+#if defined (NONTEMP_SID_DEBUG)
+                        {
+                                unsigned int  id, cr, ovr;
+                                asm volatile (
+                                        "mrc    p15, 0, %[cr], c15, c4, 3 ;"
+                                        "mrc    p15, 0, %[ovr], c15, c4, 7 ;"
+                                        "mrc    p15, 0, %[sid], c15, c4, 0 ;"
+                                        : [sid] "=r"(id), [cr] "=r"(cr), [ovr]"=r"(ovr));
+                                
+                                if (1) //sid != NONTEMP_SID)
+                                        pr_emerg("nontemp set sid: %d, ovr:%x cr:%x \n", id, ovr, cr);
+                        }
+#endif // #if defined (NONTEMP_SID_DEBUG)
+                }
+		return 0;
 
+        case NR(nontemp_end):
+                {
+                        const int sid = 0;
+                        unsigned int tmp;
+                        // set cluster_thread_sid as 5, to limit 1/4 
+                        //cp15 c15 0 c4 0 
+                        asm volatile (
+                                "mcr p15, 0, %[cr], c15, c4, 3 ;"
+                                "mcr p15, 0, %[ovr], c15, c4, 7 ;"
+                                "mcr p15, 0, %[sid], c15, c4, 0 ;"
+                                : 
+                                : [sid] "r"(sid), [cr] "r"(partcr1), [ovr]"r"(sidovr1)
+                                : "memory");
+
+#if defined (NONTEMP_SID_DEBUG)
+                        asm volatile (
+                                "mrc p15, 0, %[sid], c15, c4, 0 ;"
+                                : [sid] "=r"(sid));
+                                
+                        if (sid != 0)
+                                pr_emerg("nontemp clear sid: %d %d \n", sid);
+#endif // #if defined (NONTEMP_SID_DEBUG)
+                }
+
+		clear_thread_flag(TIF_IS_NONTEMP);
+		return 0;
+#endif //#if defined (CONFIG_RTK_NON_TEMPORAL)
+                
 	default:
 		/* Calls 9f00xx..9f07ff are defined to return -ENOSYS
 		   if not implemented, rather than raising SIGILL.  This
@@ -713,8 +923,17 @@ baddataabort(int code, unsigned long instr, struct pt_regs *regs)
 		       task_pid_nr(current), current->comm, code, instr);
 		dump_instr(KERN_ERR, regs);
 		show_pte(current->mm, addr);
+		dump_regs_refs(KERN_ERR, regs);
+		if (user_mode(regs) && current->mm)
+			show_maps(current->mm);
+
 	}
+
 #endif
+
+#if defined (PANIC_AT_USER_FAULT)   /* fixme, just to force stop */
+	panic("bad user dabt");
+#endif //#if defined (PANIC_AT_USER_FAULT)
 
 	info.si_signo = SIGILL;
 	info.si_errno = 0;

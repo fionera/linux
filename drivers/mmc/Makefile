@@ -2,6 +2,12 @@
 # Makefile for the kernel mmc device drivers.
 #
 
+#kdriver support
+ifdef CONFIG_RTK_KDRIVER_SUPPORT
+KBUILD_CPPFLAGS += -Idrivers/rtk_kdriver/include/
+KBUILD_CPPFLAGS += -Idrivers/rtk_kdriver/include/rtk_kdriver
+KBUILD_CPPFLAGS += -Idrivers/rtk_kdriver
+endif
 subdir-ccflags-$(CONFIG_MMC_DEBUG) := -DDEBUG
 
 obj-$(CONFIG_MMC)		+= core/

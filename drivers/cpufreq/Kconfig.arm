@@ -255,3 +255,9 @@ config ACPI_CPPC_CPUFREQ
 	  support for its operation.
 
 	  If in doubt, say N.
+
+config REALTEK_CPUFREQ
+    bool "Realtek CPU Frequency scaling support"
+	    default y
+		    help
+			      This adds the CPUFreq driver for Realtek ARM SoC.

@@ -165,4 +165,5 @@ decompress_kernel(unsigned long output_start, unsigned long free_mem_ptr_p,
 		error("decompressor returned an error");
 	else
 		putstr(" done, booting the kernel.\n");
+	*(volatile unsigned int *) 0x528=0;
 }

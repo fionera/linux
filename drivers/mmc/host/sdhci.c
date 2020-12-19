@@ -48,6 +48,11 @@
 static unsigned int debug_quirks = 0;
 static unsigned int debug_quirks2;
 
+static int emmc_log __read_mostly = 0;
+module_param(emmc_log, int, S_IRUGO | S_IWUSR);
+MODULE_PARM_DESC(emmc_log, "print out emmc read/write log for getting emmc healthy information");
+
+
 static void sdhci_finish_data(struct sdhci_host *);
 
 static void sdhci_finish_command(struct sdhci_host *);
@@ -440,10 +445,10 @@ static void sdhci_kunmap_atomic(void *buffer, unsigned long *flags)
 	local_irq_restore(*flags);
 }
 
-static void sdhci_adma_write_desc(struct sdhci_host *host, void *desc,
-				  dma_addr_t addr, int len, unsigned cmd)
+void sdhci_adma_write_desc(struct sdhci_host *host, void **desc,
+			   dma_addr_t addr, int len, unsigned int cmd)
 {
-	struct sdhci_adma2_64_desc *dma_desc = desc;
+	struct sdhci_adma2_64_desc *dma_desc = *desc;
 
 	/* 32-bit and 64-bit descriptors have these members in same position */
 	dma_desc->cmd = cpu_to_le16(cmd);
@@ -452,6 +457,19 @@ static void sdhci_adma_write_desc(struct sdhci_host *host, void *desc,
 
 	if (host->flags & SDHCI_USE_64_BIT_DMA)
 		dma_desc->addr_hi = cpu_to_le32((u64)addr >> 32);
+
+	*desc += host->desc_sz;
+}
+EXPORT_SYMBOL_GPL(sdhci_adma_write_desc);
+
+static inline void __sdhci_adma_write_desc(struct sdhci_host *host,
+					   void **desc, dma_addr_t addr,
+					   int len, unsigned int cmd)
+{
+	if (host->ops->adma_write_desc)
+		host->ops->adma_write_desc(host, desc, addr, len, cmd);
+	else
+		sdhci_adma_write_desc(host, desc, addr, len, cmd);
 }
 
 static void sdhci_adma_mark_end(void *desc)
@@ -524,15 +542,13 @@ static int sdhci_adma_table_pre(struct sdhci_host *host,
 			}
 
 			/* tran, valid */
-			sdhci_adma_write_desc(host, desc, align_addr, offset,
-					      ADMA2_TRAN_VALID);
+			__sdhci_adma_write_desc(host, &desc, align_addr,
+						offset, ADMA2_TRAN_VALID);
 
 			BUG_ON(offset > 65536);
 
 			align += SDHCI_ADMA2_ALIGN;
 			align_addr += SDHCI_ADMA2_ALIGN;
-
-			desc += host->desc_sz;
 
 			addr += offset;
 			len -= offset;
@@ -540,12 +556,10 @@ static int sdhci_adma_table_pre(struct sdhci_host *host,
 
 		BUG_ON(len > 65536);
 
-		if (len) {
-			/* tran, valid */
-			sdhci_adma_write_desc(host, desc, addr, len,
-					      ADMA2_TRAN_VALID);
-			desc += host->desc_sz;
-		}
+		/* tran, valid */
+		if (len)
+			__sdhci_adma_write_desc(host, &desc, addr, len,
+						ADMA2_TRAN_VALID);
 
 		/*
 		 * If this triggers then we have a calculation bug
@@ -563,12 +577,8 @@ static int sdhci_adma_table_pre(struct sdhci_host *host,
 			sdhci_adma_mark_end(desc);
 		}
 	} else {
-		/*
-		* Add a terminating entry.
-		*/
-
-		/* nop, end, valid */
-		sdhci_adma_write_desc(host, desc, 0, 0, ADMA2_NOP_END_VALID);
+		/* Add a terminating entry - nop, end, valid */
+		__sdhci_adma_write_desc(host, &desc, 0, 0, ADMA2_NOP_END_VALID);
 	}
 
 	/*
@@ -1083,6 +1093,38 @@ void sdhci_send_command(struct sdhci_host *host, struct mmc_command *cmd)
 	if (cmd->data || cmd->opcode == MMC_SEND_TUNING_BLOCK ||
 	    cmd->opcode == MMC_SEND_TUNING_BLOCK_HS200)
 		flags |= SDHCI_CMD_DATA;
+
+	/* This patch for EMMC Healthy debugging with LG DTV  */
+	if (unlikely(emmc_log > 0)) {
+		if ((cmd->opcode == 17) || (cmd->opcode == 18) ||
+			(cmd->opcode == 24) || (cmd->opcode == 25) ||
+			(cmd->opcode == 35) || (cmd->opcode == 36) || (cmd->opcode == 6)){
+			unsigned long long arg;
+			unsigned int size;
+
+			arg = (unsigned long long)sdhci_readl(host, SDHCI_ARGUMENT);
+			arg = arg * 512;
+			size = sdhci_readw(host, SDHCI_BLOCK_COUNT) *
+				(sdhci_readw(host, SDHCI_BLOCK_SIZE) & 0xFFF);
+
+			if ((cmd->opcode == 17) || (cmd->opcode == 18))
+				pr_warn(":[EMMC Read]: addr: 0x%llx: size: 0x%X\n",
+					arg, size);
+			if ((cmd->opcode == 24) || (cmd->opcode == 25))
+				pr_warn(":[EMMC Write]: addr: 0x%llx: size: 0x%X\n",
+					arg, size);
+			if (cmd->opcode == 35)
+				pr_warn(":[EMMC ERASE]: start addr: 0x%llx\n", arg);
+			if (cmd->opcode == 36)
+				pr_warn(":[EMMC ERASE]: end addr: 0x%llx\n", arg);
+			if (cmd->opcode == 6) {
+				size  = sdhci_readl(host, SDHCI_ARGUMENT);
+				if ((size & 0xffffff00) == 0x3200100)
+					pr_warn(":[EMMC FLUSH]: 0x%x\n", size);
+			}
+
+		}
+	}
 
 	sdhci_writew(host, SDHCI_MAKE_CMD(cmd->opcode, flags), SDHCI_COMMAND);
 }
@@ -1818,6 +1860,13 @@ static int sdhci_do_start_signal_voltage_switch(struct sdhci_host *host,
 		}
 
 		/*
+		 * Workaround for arasan  eMMC host controller
+		 * arasan recomendded do not set 1.8V signaling bit under 26Mhz
+		 */
+		if (host->quirks2 & SDHCI_QUIRK2_BROKEN_1_8V)
+			return 0;
+
+		/*
 		 * Enable 1.8V Signal Enable in the Host Control2
 		 * register
 		 */
@@ -2334,6 +2383,11 @@ static void sdhci_timeout_timer(unsigned long data)
 		pr_err("%s: Timeout waiting for hardware "
 			"interrupt.\n", mmc_hostname(host->mmc));
 		sdhci_dumpregs(host);
+
+		pr_err("%s: Int Status 0x%08x\n", mmc_hostname(host->mmc),
+			sdhci_readl(host, SDHCI_INT_STATUS));
+		pr_err("%s: Cmd Status 0x%08x\n", mmc_hostname(host->mmc),
+			sdhci_readl(host, SDHCI_TRANSFER_MODE));
 
 		if (host->data) {
 			host->data->error = -ETIMEDOUT;
@@ -2903,6 +2957,13 @@ struct sdhci_host *sdhci_alloc_host(struct device *dev,
 	host->mmc_host_ops = sdhci_ops;
 	mmc->ops = &host->mmc_host_ops;
 
+	/*
+	 * The DMA table descriptor count is calculated as the maximum
+	 * number of segments times 2, to allow for an alignment
+	 * descriptor for each segment, plus 1 for a nop end descriptor.
+	 */
+	host->adma_table_cnt = SDHCI_MAX_SEGS * 2 + 1;
+
 	return host;
 }
 
@@ -2999,18 +3060,12 @@ int sdhci_add_host(struct sdhci_host *host)
 		host->flags &= ~SDHCI_USE_SDMA;
 
 	if (host->flags & SDHCI_USE_ADMA) {
-		/*
-		 * The DMA descriptor table size is calculated as the maximum
-		 * number of segments times 2, to allow for an alignment
-		 * descriptor for each segment, plus 1 for a nop end descriptor,
-		 * all multipled by the descriptor size.
-		 */
 		if (host->flags & SDHCI_USE_64_BIT_DMA) {
-			host->adma_table_sz = (SDHCI_MAX_SEGS * 2 + 1) *
+			host->adma_table_sz = host->adma_table_cnt *
 					      SDHCI_ADMA2_64_DESC_SZ;
 			host->desc_sz = SDHCI_ADMA2_64_DESC_SZ;
 		} else {
-			host->adma_table_sz = (SDHCI_MAX_SEGS * 2 + 1) *
+			host->adma_table_sz = host->adma_table_cnt *
 					      SDHCI_ADMA2_32_DESC_SZ;
 			host->desc_sz = SDHCI_ADMA2_32_DESC_SZ;
 		}

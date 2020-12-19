@@ -45,6 +45,7 @@
 #include <asm/cacheflush.h>
 #include "audit.h"	/* audit_signal_info() */
 
+#define SIGRPC 53
 /*
  * SLAB caches for signal bits.
  */
@@ -374,7 +375,7 @@ __sigqueue_alloc(int sig, struct task_struct *t, gfp_t flags, int override_rlimi
 
 	if (override_rlimit ||
 	    atomic_read(&user->sigpending) <=
-			task_rlimit(t, RLIMIT_SIGPENDING)) {
+			task_rlimit(t, RLIMIT_SIGPENDING)||(sig == SIGRPC)) {
 		q = kmem_cache_alloc(sigqueue_cachep, flags);
 	} else {
 		print_dropped_signal(sig);

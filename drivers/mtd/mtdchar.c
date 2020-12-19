@@ -37,11 +37,15 @@
 #include <linux/mtd/partitions.h>
 #include <linux/mtd/map.h>
 
+#include <linux/pageremap.h>
+
+
 #include <asm/uaccess.h>
 
 #include "mtdcore.h"
 
 static DEFINE_MUTEX(mtd_mutex);
+int g_disNFWP = 0;
 
 /*
  * Data structure to hold the pointer to the mtd device as well
@@ -591,8 +595,16 @@ static int mtdchar_ioctl(struct file *file, u_int cmd, u_long arg)
 	int ret = 0;
 	u_long size;
 	struct mtd_info_user info;
+	//-------------------------------------------------------------
+	struct mtd_info_user_64 info_64;
+	struct mtd_data_oob DataOobLocal;
+	struct mtd_data_oob64 DataOobLocal64;
+	void *databuf, *oobbuf;
+	size_t retlen;
+	struct mtd_oob_ops *ops;
+	//--------------------------------------------------------------
 
-	pr_debug("MTD_ioctl\n");
+	pr_debug("MTD_ioctl , cmd no = %d\n",_IOC_NR (cmd));
 
 	size = (cmd & IOCSIZE_MASK) >> IOCSIZE_SHIFT;
 	if (cmd & IOC_IN) {
@@ -605,6 +617,9 @@ static int mtdchar_ioctl(struct file *file, u_int cmd, u_long arg)
 	}
 
 	switch (cmd) {
+	case DISABLE_NF_WP:
+			g_disNFWP=1;
+		break;
 	case MEMGETREGIONCOUNT:
 		if (copy_to_user(argp, &(mtd->numeraseregions), sizeof(int)))
 			return -EFAULT;
@@ -632,7 +647,15 @@ static int mtdchar_ioctl(struct file *file, u_int cmd, u_long arg)
 		break;
 	}
 
+	case GETRBAPERCENTAGE:
+	{
+		if (copy_to_user(argp, &(mtd->u32RBApercentage), sizeof(unsigned int)))
+			return -EFAULT;
+		break;
+	}
+	
 	case MEMGETINFO:
+		pr_debug("[linux kernel]get mtd info!!!\n");
 		memset(&info, 0, sizeof(info));
 		info.type	= mtd->type;
 		info.flags	= mtd->flags;
@@ -646,6 +669,24 @@ static int mtdchar_ioctl(struct file *file, u_int cmd, u_long arg)
 			return -EFAULT;
 		break;
 
+	case MEMGETINFO_64:
+	{
+		//printk("[linux kernel]get mtd info64!!!\n");
+		//printk("Call there.....argp : %s\n",argp);
+			
+		info_64.type	= mtd->type;
+		info_64.flags	= mtd->flags;
+		info_64.size	= mtd->size;
+		info_64.erasesize	= mtd->erasesize;
+		info_64.writesize	= mtd->writesize;
+		info_64.oobsize	= mtd->oobsize;
+		/* The below fields are obsolete */
+		info_64.ecctype	= -1;
+		info_64.eccsize	= 0;
+		if (copy_to_user(argp, &info_64, sizeof(struct mtd_info_user_64)))
+			return -EFAULT;
+		break;
+	}
 	case MEMERASE:
 	case MEMERASE64:
 	{
@@ -810,6 +851,7 @@ static int mtdchar_ioctl(struct file *file, u_int cmd, u_long arg)
 		break;
 	}
 
+#if 0
 	/* Legacy interface */
 	case MEMGETOOBSEL:
 	{
@@ -850,6 +892,712 @@ static int mtdchar_ioctl(struct file *file, u_int cmd, u_long arg)
 		return mtd_block_markbad(mtd, offs);
 		break;
 	}
+#endif
+	//------------------------------------------------------------------------------
+	//for access bootcode-area
+	case MEMWRITEDATABOOTCODE:
+	{	
+		unsigned char block_tag;		
+		
+		if(!(file->f_mode & 2))
+			return -EPERM;
+
+		if (copy_from_user(&DataOobLocal, argp, sizeof(struct mtd_data_oob)))
+			return -EFAULT;
+#if 0		
+		if (DataOobLocal.rtk_data.length > 0x4096 || DataOobLocal.rtk_oob.length > 0x4096)
+			return -EINVAL;
+#endif
+		if (!mtd->_write_bootcode_area)
+			ret = -EOPNOTSUPP;
+		else{
+			ret = access_ok(VERIFY_READ, DataOobLocal.rtk_data.ptr,
+					DataOobLocal.rtk_data.length) ? 0 : EFAULT;
+			if (ret)
+				return ret;
+			
+			ret = access_ok(VERIFY_READ, DataOobLocal.rtk_oob.ptr,
+					DataOobLocal.rtk_oob.length) ? 0 : EFAULT;
+			if (ret)
+				return ret;						
+		}
+
+		databuf = dvr_malloc(DataOobLocal.rtk_data.length);//dvr_malloc-->vmalloc
+		if (!databuf)
+			return -ENOMEM;
+
+		oobbuf = dvr_malloc(DataOobLocal.rtk_oob.length);//dvr_malloc-->vmalloc
+		if (!oobbuf){
+			dvr_free(databuf); //dvr_free-->vfree
+			return -ENOMEM;
+		}
+
+		ops = dvr_malloc(sizeof(struct mtd_oob_ops));//dvr_malloc-->vmalloc
+		if (!ops){
+			dvr_free(databuf); //dvr_free-->vfree
+			dvr_free(oobbuf);  //dvr_free-->vfree
+			return -ENOMEM;
+		}
+
+
+		if (copy_from_user(databuf, DataOobLocal.rtk_data.ptr, DataOobLocal.rtk_data.length)) {
+			dvr_free(databuf); //dvr_free-->vfree
+			dvr_free(oobbuf);  //dvr_free-->vfree
+			dvr_free(ops);    //dvr_free-->vfree
+			return -EFAULT;
+		}
+
+		if (copy_from_user(oobbuf, DataOobLocal.rtk_oob.ptr, DataOobLocal.rtk_oob.length)) {
+			dvr_free(databuf);  //dvr_free-->vfree
+			dvr_free(oobbuf);	//dvr_free-->vfree
+			dvr_free(ops);			//dvr_free-->vfree
+			return -EFAULT;
+		}
+		printk("%d data: length 0x%x,buf 0x%x start 0x%x oob: length 0x%x,buf 0x%x start 0x%x \n",
+		__LINE__,
+		DataOobLocal.rtk_data.length,DataOobLocal.rtk_data.ptr,DataOobLocal.rtk_data.start,
+		DataOobLocal.rtk_oob.length,DataOobLocal.rtk_oob.ptr,DataOobLocal.rtk_oob.start);
+		ops->len = DataOobLocal.rtk_data.length;
+		ops->retlen = retlen;
+		ops->datbuf = databuf;
+		ops->oobbuf = oobbuf;
+
+		//from
+		block_tag = ((unsigned char *)oobbuf)[0];
+		//printk("111[%s]ops->oobbuf: 0x%x\n",__FUNCTION__,ops->oobbuf);
+		ret = mtd_write_bootcode(mtd, DataOobLocal.rtk_data.start, ops, block_tag);
+		if(ret < 0 ){
+			dvr_free(databuf);	//dvr_free-->vfree
+			dvr_free(oobbuf);		//dvr_free-->vfree
+			dvr_free(ops);			//dvr_free-->vfree
+			return ret;
+		}
+		if (copy_to_user(argp + sizeof(uint32_t), &retlen, sizeof(uint32_t)))
+			ret = -EFAULT;
+
+		dvr_free(databuf);	//dvr_free-->vfree
+		dvr_free(oobbuf);		//dvr_free-->vfree
+		dvr_free(ops);			//dvr_free-->vfree
+		break;
+	}
+
+	case MEMWRITEDATABOOTCODE64:
+	{
+		unsigned char block_tag;
+		
+		if(!(file->f_mode & 2))
+			return -EPERM;
+
+		if (copy_from_user(&DataOobLocal64, argp, sizeof(struct mtd_data_oob64)))
+			return -EFAULT;
+
+		if (!mtd->_write_oob)
+			ret = -EOPNOTSUPP;
+		else{
+			ret = access_ok(VERIFY_READ, DataOobLocal64.rtk_data.ptr,
+					DataOobLocal64.rtk_data.length) ? 0 : EFAULT;
+			if (ret)
+				return ret;
+			
+			ret = access_ok(VERIFY_READ, DataOobLocal64.rtk_oob.ptr,
+					DataOobLocal64.rtk_oob.length) ? 0 : EFAULT;
+			if (ret)
+				return ret;						
+		}
+		
+		databuf = dvr_malloc(DataOobLocal64.rtk_data.length); //dvr_malloc-->vmalloc
+		if (!databuf)
+			return -ENOMEM;
+
+		oobbuf = dvr_malloc(DataOobLocal64.rtk_oob.length);	//dvr_malloc-->vmalloc
+		if (!oobbuf){
+			dvr_free(databuf);		//dvr_free-->vfree
+			return -ENOMEM;
+		}
+
+		ops = dvr_malloc(sizeof(struct mtd_oob_ops));	//dvr_malloc-->vmalloc
+		if (!ops){
+			dvr_free(databuf);		//dvr_free-->vfree
+			dvr_free(oobbuf);			//dvr_free-->vfree
+			return -ENOMEM;
+		}
+					
+		if (copy_from_user(databuf, DataOobLocal64.rtk_data.ptr, DataOobLocal64.rtk_data.length)) {
+			dvr_free(databuf);	//dvr_free-->vfree
+			dvr_free(oobbuf);		//dvr_free-->vfree
+			dvr_free(ops);			//dvr_free-->vfree
+			return -EFAULT;
+		}
+
+		if (copy_from_user(oobbuf, DataOobLocal64.rtk_oob.ptr, DataOobLocal64.rtk_oob.length)) {
+			dvr_free(databuf);		//dvr_free-->vfree
+			dvr_free(oobbuf);			//dvr_free-->vfree
+			dvr_free(ops);				//dvr_free-->vfree
+			return -EFAULT;
+		}
+		ops->len = DataOobLocal64.rtk_data.length;
+		ops->retlen = retlen;
+		ops->datbuf = databuf;
+		ops->oobbuf = oobbuf;
+
+		block_tag = ((unsigned char *)oobbuf)[0];
+		
+		//ret = mtd_write_oob(mtd, DataOobLocal64.rtk_data.start, ops);
+		ret = mtd_write_bootcode(mtd, DataOobLocal.rtk_data.start, ops, block_tag);
+		if(ret < 0 ){
+			dvr_free(databuf);		//dvr_free-->vfree
+			dvr_free(oobbuf);			//dvr_free-->vfree
+			dvr_free(ops);				//dvr_free-->vfree
+			return ret;
+		}
+		if (copy_to_user(argp + sizeof(uint32_t), &retlen, sizeof(uint32_t)))
+			ret = -EFAULT;
+
+		dvr_free(databuf);		//dvr_free-->vfree
+		dvr_free(oobbuf);			//dvr_free-->vfree
+		dvr_free(ops);				//dvr_free-->vfree
+		
+		break;
+	}
+
+	case MEMERASEBOOTCODE:
+	case MEMERASEBOOTCODE64:
+	{
+		struct erase_info *erase;
+
+		if(!(file->f_mode & FMODE_WRITE))
+			return -EPERM;
+
+		erase=kzalloc(sizeof(struct erase_info),GFP_KERNEL);
+		if (!erase)
+			ret = -ENOMEM;
+		else {
+
+			if (cmd == MEMERASEBOOTCODE64) {
+				struct erase_info_user64 einfo64;
+
+				if (copy_from_user(&einfo64, argp,
+					    sizeof(struct erase_info_user64))) {
+					kfree(erase);
+					return -EFAULT;
+				}
+				erase->addr = einfo64.start;
+				erase->len = einfo64.length;
+			} else {
+				struct erase_info_user einfo32;
+
+				if (copy_from_user(&einfo32, argp,
+					    sizeof(struct erase_info_user))) {
+					kfree(erase);
+					return -EFAULT;
+				}
+				erase->addr = einfo32.start;
+				erase->len = einfo32.length;
+			}
+
+			ret = mtd_erase_bootcode_area(mtd, erase);
+			if(ret !=0 )
+				return ret;
+			
+			kfree(erase);
+		}
+		break;
+	}
+
+	case MEMREADDATABOOTCODE:
+	{
+
+		if (copy_from_user(&DataOobLocal, argp, sizeof(struct mtd_data_oob)))
+			return -EFAULT;
+#if 0		
+		if (DataOobLocal.rtk_data.length > 0x4096 || DataOobLocal.rtk_oob.length > 0x4096)
+		{
+			return -EINVAL;
+		}
+#endif
+		if (!mtd->_read_bootcode_area){
+			ret = -EOPNOTSUPP;
+		}else{
+			ret = access_ok(VERIFY_WRITE, DataOobLocal.rtk_data.ptr,
+					DataOobLocal.rtk_data.length) ? 0 : -EFAULT;
+
+			if (ret)
+				return ret;
+			
+			ret = access_ok(VERIFY_WRITE, DataOobLocal.rtk_oob.ptr,
+					DataOobLocal.rtk_oob.length) ? 0 : -EFAULT;
+
+			if (ret)
+				return ret;						
+		}
+
+		databuf = dvr_malloc(DataOobLocal.rtk_data.length);	//dvr_malloc-->vmalloc
+		if (!databuf)
+			return -ENOMEM;
+
+		oobbuf = dvr_malloc(DataOobLocal.rtk_oob.length);	//dvr_malloc-->vmalloc
+		if (!oobbuf){
+			dvr_free(databuf);			//dvr_free-->vfree
+			return -ENOMEM;
+		}
+
+		ops = dvr_malloc(sizeof(struct mtd_oob_ops));	//dvr_malloc-->vmalloc
+		if (!ops){
+			dvr_free(databuf);		//dvr_free-->vfree
+			dvr_free(oobbuf);			//dvr_free-->vfree
+			return -ENOMEM;
+		}
+		//printk("000[%s]oobbuf: 0x%x\n",__FUNCTION__,oobbuf);
+		
+		ops->len = DataOobLocal.rtk_data.length;
+		ops->retlen = retlen;
+		ops->datbuf = databuf;
+		ops->oobbuf = oobbuf;
+		ops->mode = mtd->oobinfo.useecc;	
+		
+		ret = mtd_read_bootcode(mtd, DataOobLocal.rtk_data.start, ops);
+
+		if ( copy_to_user(DataOobLocal.rtk_oob.ptr, oobbuf, DataOobLocal.rtk_oob.length) )
+		{
+			ret = -EFAULT;
+
+		}
+		if (put_user(retlen, (uint32_t __user *)argp))
+		{
+			ret = -EFAULT;
+
+		}
+		else if (copy_to_user(DataOobLocal.rtk_data.ptr, databuf, DataOobLocal.rtk_data.length))
+		{
+			ret = -EFAULT;
+		}
+	
+		dvr_free(databuf);		//dvr_free-->vfree
+		dvr_free(oobbuf);			//dvr_free-->vfree
+		dvr_free(ops);				//dvr_free-->vfree
+		break;
+		
+	}
+	case MEMWRITEPROFILE:
+	{
+		ret = mtd_write_profile(mtd);
+		break;
+	}
+	//Add by alexchang 1210-2010
+	case MEMENABLESCRAMBLE:
+	{
+		mtd->isScramble = 1;
+		//printk("EN[%s]isScramble:0x%x\n",__FUNCTION__,mtd->isScramble);
+		break;
+	}
+	case MEMDISABLESCRAMBLE:
+	{
+		mtd->isScramble = MTD_SCRAMBLE_DISABLE;
+		//printk("DIS[%s]isScramble:0x%x\n",__FUNCTION__,mtd->isScramble);
+		break;
+	}
+	case MEMSETOOBSEL:
+	{
+		if (copy_from_user(&mtd->oobinfo, argp, sizeof(struct nand_oobinfo)))
+			return -EFAULT;
+		break;
+	}
+
+	case MEMGETOOBSEL:
+	{
+		if (copy_to_user(argp, &(mtd->oobinfo), sizeof(struct nand_oobinfo)))
+			return -EFAULT;
+		break;
+	}
+
+	case MEMGETBADBLOCK:
+	{
+		loff_t offs;
+		
+		if (copy_from_user(&offs, argp, sizeof(loff_t)))
+			return -EFAULT;
+		
+		return mtd_block_isbad(mtd, offs);
+		
+		break;
+	}
+
+	case MEMSETBADBLOCK:
+	{
+		loff_t offs;
+
+		if (copy_from_user(&offs, argp, sizeof(loff_t)))
+			return -EFAULT;
+		
+		return mtd_block_markbad(mtd, offs);
+		break;
+	}
+
+	
+//==========================================================================================
+//Add by alexchang 1008-2010
+
+
+	case MEMSETSYSINFO://addby alexchang2131 0519-2010
+		 mtd->nModifySysArea = 0x57;
+	case MEMWRITEDATAOOB:
+	{
+		//struct mtd_data_oob DataOobLocal;
+		//void *databuf, *oobbuf;
+		//ssize_t retlen;
+		//struct mtd_oob_ops *ops;
+//printk("mtd->oobblock is 0x%x\n",mtd->oobblock);	
+//		if(!mtd->oobblock)
+//		{
+//			printk("use oobblock 512 as default");
+//			mtd->oobblock = 512;
+//		}	
+		if(!(file->f_mode & 2))
+			return -EPERM;
+
+		if (copy_from_user(&DataOobLocal, argp, sizeof(struct mtd_data_oob)))
+			return -EFAULT;
+		if (DataOobLocal.rtk_data.length > 0x4096 || DataOobLocal.rtk_oob.length > 0x4096)
+			return -EINVAL;
+
+		if (!mtd->_write_oob)
+			ret = -EOPNOTSUPP;
+		else{
+			ret = access_ok(VERIFY_READ, DataOobLocal.rtk_data.ptr,
+					DataOobLocal.rtk_data.length) ? 0 : EFAULT;
+			if (ret)
+				return ret;
+			
+			ret = access_ok(VERIFY_READ, DataOobLocal.rtk_oob.ptr,
+					DataOobLocal.rtk_oob.length) ? 0 : EFAULT;
+			if (ret)
+				return ret;						
+		}
+		
+		databuf = kmalloc(DataOobLocal.rtk_data.length, GFP_KERNEL);
+		if (!databuf)
+			return -ENOMEM;
+
+		oobbuf = kmalloc(DataOobLocal.rtk_oob.length, GFP_KERNEL);
+		if (!oobbuf)
+			return -ENOMEM;
+
+		ops = kmalloc(sizeof(struct mtd_oob_ops), GFP_KERNEL);
+		if (!ops)
+			return -ENOMEM;
+					
+		if (copy_from_user(databuf, DataOobLocal.rtk_data.ptr, DataOobLocal.rtk_data.length)) {
+			kfree(databuf);
+			return -EFAULT;
+		}
+
+		if (copy_from_user(oobbuf, DataOobLocal.rtk_oob.ptr, DataOobLocal.rtk_oob.length)) {
+			kfree(oobbuf);
+			return -EFAULT;
+		}
+		ops->len = DataOobLocal.rtk_data.length;
+		ops->retlen = retlen;
+		ops->datbuf = databuf;
+		ops->oobbuf = oobbuf;
+		//printk("111[%s]ops->oobbuf: 0x%x\n",__FUNCTION__,ops->oobbuf);
+		ret = mtd_write_oob(mtd, DataOobLocal.rtk_data.start, ops);
+			
+		if (copy_to_user(argp + sizeof(uint32_t), &retlen, sizeof(uint32_t)))
+			ret = -EFAULT;
+
+		kfree(databuf);
+		kfree(oobbuf);
+		kfree(ops);
+		
+		break;
+	}
+	case MEMWRITEDATAOOB64:
+	{
+		if(!(file->f_mode & 2))
+			return -EPERM;
+
+		if (copy_from_user(&DataOobLocal64, argp, sizeof(struct mtd_data_oob64)))
+			return -EFAULT;
+
+		if (!mtd->_write_oob)
+			ret = -EOPNOTSUPP;
+		else{
+			ret = access_ok(VERIFY_READ, DataOobLocal64.rtk_data.ptr,
+					DataOobLocal64.rtk_data.length) ? 0 : EFAULT;
+			if (ret)
+				return ret;
+			
+			ret = access_ok(VERIFY_READ, DataOobLocal64.rtk_oob.ptr,
+					DataOobLocal64.rtk_oob.length) ? 0 : EFAULT;
+			if (ret)
+				return ret;						
+		}
+		
+		databuf = kmalloc(DataOobLocal64.rtk_data.length, GFP_KERNEL);
+		if (!databuf)
+			return -ENOMEM;
+
+		oobbuf = kmalloc(DataOobLocal64.rtk_oob.length, GFP_KERNEL);
+		if (!oobbuf)
+			return -ENOMEM;
+
+		ops = kmalloc(sizeof(struct mtd_oob_ops), GFP_KERNEL);
+		if (!ops)
+			return -ENOMEM;
+					
+		if (copy_from_user(databuf, DataOobLocal64.rtk_data.ptr, DataOobLocal64.rtk_data.length)) {
+			kfree(databuf);
+			return -EFAULT;
+		}
+
+		if (copy_from_user(oobbuf, DataOobLocal64.rtk_oob.ptr, DataOobLocal64.rtk_oob.length)) {
+			kfree(oobbuf);
+			return -EFAULT;
+		}
+		ops->len = DataOobLocal64.rtk_data.length;
+		ops->retlen = retlen;
+		ops->datbuf = databuf;
+		ops->oobbuf = oobbuf;
+
+		ret = mtd_write_oob(mtd, DataOobLocal64.rtk_data.start, ops);
+			
+		if (copy_to_user(argp + sizeof(uint32_t), &retlen, sizeof(uint32_t)))
+			ret = -EFAULT;
+
+		kfree(databuf);
+		kfree(oobbuf);
+		kfree(ops);
+		
+		break;
+	}
+	
+	
+	case MEMGETSYSINFO://addby alexchang2131 0519-2010
+	case MEMREADDATAOOB:
+	{
+		//struct mtd_data_oob DataOobLocal;
+		//void *databuf, *oobbuf;
+		//ssize_t retlen;
+		//struct mtd_oob_ops *ops;
+//	        if(!mtd->oobblock)	
+//		{
+//			printk("Set mtd->oobblock 512 as default\n");
+ //			mtd->oobblock = 512;
+//		}
+		if (copy_from_user(&DataOobLocal, argp, sizeof(struct mtd_data_oob)))
+			return -EFAULT;
+		
+		if (DataOobLocal.rtk_data.length > 0x4096 || DataOobLocal.rtk_oob.length > 0x4096)
+		{
+			return -EINVAL;
+		}
+
+		if (!mtd->_read_oob){
+			ret = -EOPNOTSUPP;
+		}else{
+			ret = access_ok(VERIFY_WRITE, DataOobLocal.rtk_data.ptr,
+					DataOobLocal.rtk_data.length) ? 0 : -EFAULT;
+
+			if (ret)
+				return ret;
+			
+			ret = access_ok(VERIFY_WRITE, DataOobLocal.rtk_oob.ptr,
+					DataOobLocal.rtk_oob.length) ? 0 : -EFAULT;
+
+			if (ret)
+				return ret;						
+		}
+
+		databuf = kmalloc(DataOobLocal.rtk_data.length, GFP_KERNEL);
+		if (!databuf)
+			return -ENOMEM;
+
+		oobbuf = kmalloc(DataOobLocal.rtk_oob.length, GFP_KERNEL);
+		if (!oobbuf)
+			return -ENOMEM;
+
+		ops = kmalloc(sizeof(struct mtd_oob_ops), GFP_KERNEL);
+		if (!ops)
+			return -ENOMEM;
+		//printk("000[%s]oobbuf: 0x%x\n",__FUNCTION__,oobbuf);
+		
+		ops->len = DataOobLocal.rtk_data.length;
+		ops->retlen = retlen;
+		ops->datbuf = databuf;
+		ops->oobbuf = oobbuf;
+		ops->mode = mtd->oobinfo.useecc;	
+		
+		//if ( mtd->oobinfo.useecc == 3 ){
+		//	ret = (mtd->read_ecc)(mtd, DataOobLocal.rtk_data.start, &ops);
+		//}else{	
+		//printk("111[%s]ops->oobbuf: 0x%x\n",__FUNCTION__,ops->oobbuf);
+		ret = mtd_read_oob(mtd, DataOobLocal.rtk_data.start, ops);
+		//}
+
+		if ( copy_to_user(DataOobLocal.rtk_oob.ptr, oobbuf, DataOobLocal.rtk_oob.length) )
+		{
+			ret = -EFAULT;
+
+		}
+		if (put_user(retlen, (uint32_t __user *)argp))
+		{
+			ret = -EFAULT;
+
+		}
+		else if (copy_to_user(DataOobLocal.rtk_data.ptr, databuf, DataOobLocal.rtk_data.length))
+		{
+			ret = -EFAULT;
+		}
+	
+		kfree(databuf);
+		kfree(oobbuf);
+		kfree(ops);
+		break;
+	}
+
+	case MEMREADDATAOOB64:
+	{
+		if (copy_from_user(&DataOobLocal64, argp, sizeof(struct mtd_data_oob64)))
+			return -EFAULT;
+		
+		//if (DataOobLocal64.rtk_data.length > 0x4096 || DataOobLocal64.rtk_oob.length > 0x4096)
+		//{
+		//	return -EINVAL;
+		//}
+
+		if (!mtd->_read_oob)
+			ret = -EOPNOTSUPP;
+		else{
+			ret = access_ok(VERIFY_WRITE, DataOobLocal64.rtk_data.ptr,
+					DataOobLocal64.rtk_data.length) ? 0 : -EFAULT;
+
+			if (ret)
+				return ret;
+			
+			ret = access_ok(VERIFY_WRITE, DataOobLocal64.rtk_oob.ptr,
+					DataOobLocal64.rtk_oob.length) ? 0 : -EFAULT;
+
+			if (ret)
+				return ret; 					
+		}
+
+		databuf = kmalloc(DataOobLocal64.rtk_data.length, GFP_KERNEL);
+		if (!databuf)
+			return -ENOMEM;
+
+		oobbuf = kmalloc(DataOobLocal64.rtk_oob.length, GFP_KERNEL);
+		if (!oobbuf)
+			return -ENOMEM;
+
+		ops = kmalloc(sizeof(struct mtd_oob_ops), GFP_KERNEL);
+		if (!ops)
+			return -ENOMEM;
+
+		ops->len = DataOobLocal64.rtk_data.length;
+		ops->retlen = retlen;
+		ops->datbuf = databuf;
+		ops->oobbuf = oobbuf;
+		ops->mode = mtd->oobinfo.useecc;	
+		ret = mtd_read_oob(mtd, DataOobLocal64.rtk_data.start, ops);
+		
+		if ( copy_to_user(DataOobLocal64.rtk_oob.ptr, oobbuf, DataOobLocal64.rtk_oob.length) )
+		{
+			ret = -EFAULT;
+
+		}
+			
+		if (put_user(retlen, (uint32_t __user *)argp))
+		{
+			ret = -EFAULT;
+
+		}
+		else if (copy_to_user(DataOobLocal64.rtk_data.ptr, databuf, DataOobLocal64.rtk_data.length))
+		{
+			ret = -EFAULT;
+
+		}
+		kfree(databuf);
+		kfree(oobbuf);
+		kfree(ops);
+		break;
+	}
+	
+	case MEMRELOADBBT:
+	{
+		if (mtd->_reload_bbt)
+			ret = (mtd->_reload_bbt)(mtd);
+		else{
+			printk("Warning: do not set reload bbt function.\n");
+			ret = -EOPNOTSUPP;
+		}
+		break;
+	}
+	case RTKMEMERASE:
+	{
+		struct erase_info *erase;
+		struct erase_info_user *erase_u;
+		
+		if(!(file->f_mode & 2))
+		{
+			return -EPERM;
+		}
+
+		erase_u = kmalloc(sizeof(struct erase_info_user),GFP_KERNEL);
+		if (!erase_u)
+			ret = -ENOMEM;
+					
+		erase = kmalloc(sizeof(struct erase_info),GFP_KERNEL);
+		if (!erase)
+			ret = -ENOMEM;
+		else {
+			wait_queue_head_t waitq;
+			DECLARE_WAITQUEUE(wait, current);
+
+			init_waitqueue_head(&waitq);
+
+			memset (erase,0,sizeof(struct erase_info));
+			memset (erase_u,0,sizeof(struct erase_info_user));
+			
+			if (copy_from_user(erase_u, argp,
+				    sizeof(struct erase_info_user))) {
+				kfree(erase);
+				kfree(erase_u);
+				return -EFAULT;
+			}
+			
+			erase->mtd = mtd;
+			erase->callback = mtdchar_erase_callback;
+			erase->priv = (unsigned long)&waitq;
+			erase->addr = erase_u->start;
+			erase->len = erase_u->length;
+			
+			/*
+			  FIXME: Allow INTERRUPTIBLE. Which means
+			  not having the wait_queue head on the stack.
+			  
+			  If the wq_head is on the stack, and we
+			  leave because we got interrupted, then the
+			  wq_head is no longer there when the
+			  callback routine tries to wake us up.
+			*/
+			ret = mtd_erase(mtd, erase);
+			if (!ret) {
+				set_current_state(TASK_UNINTERRUPTIBLE);
+				add_wait_queue(&waitq, &wait);
+				if (erase->state != MTD_ERASE_DONE &&
+				    erase->state != MTD_ERASE_FAILED)
+					schedule();
+				remove_wait_queue(&waitq, &wait);
+				set_current_state(TASK_RUNNING);
+
+				ret = (erase->state == MTD_ERASE_FAILED)?-EIO:0;
+			}
+			kfree(erase);
+			kfree(erase_u);
+		}
+		break;
+	}
+	//==========================================================================================
 
 	case OTPSELECT:
 	{

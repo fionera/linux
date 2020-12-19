@@ -36,6 +36,7 @@
 #include <asm/mach/time.h>
 #include <asm/tls.h>
 #include <asm/vdso.h>
+#include <asm/dump_around_register.h>
 
 #ifdef CONFIG_CC_STACKPROTECTOR
 #include <linux/stackprotector.h>
@@ -90,6 +91,116 @@ void arch_cpu_idle_exit(void)
 {
 	ledtrig_cpu(CPU_LED_IDLE_END);
 }
+
+static int default_address_checker(unsigned long addr, int user)
+{
+	/*
+	 * don't attempt to dump non-kernel addresses or
+	 * values that are probably just small negative numbers
+	 */
+	if (addr < PAGE_OFFSET || addr > -256UL)
+		return 0;
+
+	return 1;
+}
+
+static struct address_check_ops default_check_ops = {default_address_checker, probe_kernel_read};
+static struct address_check_ops *check_ops = &default_check_ops;
+static DEFINE_MUTEX(address_check_lock);
+
+/*
+ * dump a block of kernel memory from around the given address
+ */
+static void show_data(unsigned long addr, int nbytes, int user, const char *name)
+{
+	int	i, j;
+	int	nlines;
+	u32	*p;
+
+	if(!check_ops->address_checker(addr, user))
+		return;
+
+	printk("\n%s: %#lx:\n", name, addr);
+
+	addr -= nbytes;
+	nbytes *= 2;
+	/*
+	 * round address down to a 32 bit boundary
+	 * and always dump a multiple of 32 bytes
+	 */
+	p = (u32 *)(addr & ~(sizeof(u32) - 1));
+	nbytes += (addr & (sizeof(u32) - 1));
+	nlines = (nbytes + 31) / 32;
+
+	for (i = 0; i < nlines; i++) {
+		/*
+		 * just display low 16 bits of address to keep
+		 * each line of the dump < 80 characters
+		 */
+		printk("%04lx ", (unsigned long)p & 0xffff);
+		for (j = 0; j < 8; j++) {
+			u32	data;
+			if (check_ops->probe_read(&data, p, sizeof(data))) {
+				printk(" ********");
+			} else {
+				printk(" %08x", data);
+			}
+			++p;
+		}
+		printk("\n");
+	}
+}
+
+void show_extra_register_data(struct pt_regs *regs, int nbytes)
+{
+	mm_segment_t fs;
+	int user = (user_mode(regs) != 0) ? 1: 0;
+
+	fs = get_fs();
+	set_fs(KERNEL_DS);
+	show_data(regs->ARM_pc, nbytes, user, "PC");
+	show_data(regs->ARM_lr, nbytes, user, "LR");
+	show_data(regs->ARM_sp, nbytes, user, "SP");
+	show_data(regs->ARM_ip, nbytes, user, "IP");
+	show_data(regs->ARM_fp, nbytes, user, "FP");
+	show_data(regs->ARM_r0, nbytes, user, "R0");
+	show_data(regs->ARM_r1, nbytes, user, "R1");
+	show_data(regs->ARM_r2, nbytes, user, "R2");
+	show_data(regs->ARM_r3, nbytes, user, "R3");
+	show_data(regs->ARM_r4, nbytes, user, "R4");
+	show_data(regs->ARM_r5, nbytes, user, "R5");
+	show_data(regs->ARM_r6, nbytes, user, "R6");
+	show_data(regs->ARM_r7, nbytes, user, "R7");
+	show_data(regs->ARM_r8, nbytes, user, "R8");
+	show_data(regs->ARM_r9, nbytes, user, "R9");
+	show_data(regs->ARM_r10, nbytes, user, "R10");
+	set_fs(fs);
+}
+EXPORT_SYMBOL(show_extra_register_data);
+
+int register_address_check_ops(struct address_check_ops *ops)
+{
+	int ret = 0;
+
+	mutex_lock(&address_check_lock);
+	if(!ops) {
+		ret = -EINVAL;
+		goto out;
+	}
+
+	if(check_ops != &default_check_ops) {
+		WARN(1, "address_check_ops already registered!");
+		ret = -EBUSY;
+		goto out;
+	}
+
+	check_ops = ops;
+
+out:
+	mutex_unlock(&address_check_lock);
+	return ret;
+}
+EXPORT_SYMBOL(register_address_check_ops);
 
 void __show_regs(struct pt_regs *regs)
 {
@@ -169,8 +280,8 @@ void __show_regs(struct pt_regs *regs)
 			unsigned int transbase;
 			asm("mrc p15, 0, %0, c2, c0\n\t"
 			    : "=r" (transbase));
-			snprintf(buf, sizeof(buf), "  Table: %08x  DAC: %08x",
-				transbase, domain);
+			snprintf(buf, sizeof(buf), "  Table: %08x  DAC: %08x/%08x",
+				 transbase, get_domain(), domain);
 		}
 #endif
 		asm("mrc p15, 0, %0, c1, c0\n" : "=r" (ctrl));
@@ -178,6 +289,14 @@ void __show_regs(struct pt_regs *regs)
 		printk("Control: %08x%s\n", ctrl, buf);
 	}
 #endif
+
+#if 0
+	/* show_extra_register_data() is crude to deal with pointer 
+	 * to platform specific space and gets access violation again.
+	 * K projects should use dump_regs_refs(). 
+	 */
+	show_extra_register_data(regs, 128);
+#endif  //#if 0
 }
 
 void show_regs(struct pt_regs * regs)
@@ -398,9 +517,17 @@ static unsigned long sigpage_addr(const struct mm_struct *mm,
 static struct page *signal_page;
 extern struct page *get_signal_page(void);
 
+static int sigpage_mremap(const struct vm_special_mapping *sm,
+		struct vm_area_struct *new_vma)
+{
+	current->mm->context.sigpage = new_vma->vm_start;
+	return 0;
+}
+
 static const struct vm_special_mapping sigpage_mapping = {
 	.name = "[sigpage]",
 	.pages = &signal_page,
+	.mremap = sigpage_mremap,
 };
 
 int arch_setup_additional_pages(struct linux_binprm *bprm, int uses_interp)

@@ -730,7 +730,7 @@ error:
 void usb_hcd_poll_rh_status(struct usb_hcd *hcd)
 {
 	struct urb	*urb;
-	int		length;
+	int		length = 0;
 	unsigned long	flags;
 	char		buffer[6];	/* Any root hubs with > 31 ports? */
 
@@ -738,6 +738,11 @@ void usb_hcd_poll_rh_status(struct usb_hcd *hcd)
 		return;
 	if (!hcd->uses_new_polling && !hcd->status_urb)
 		return;
+	if (unlikely(!HCD_HW_ACCESSIBLE(hcd))) {
+		dev_err(hcd->self.controller, "%s(%d) HW isn't accessible, mod_timer directly.. \n",
+				__func__, __LINE__);
+		goto modtimer;
+	}
 
 	length = hcd->driver->hub_status_data(hcd, buffer);
 	if (length > 0) {
@@ -760,6 +765,7 @@ void usb_hcd_poll_rh_status(struct usb_hcd *hcd)
 		spin_unlock_irqrestore(&hcd_root_hub_lock, flags);
 	}
 
+modtimer:
 	/* The USB 2.0 spec says 256 ms.  This is close enough and won't
 	 * exceed that limit if HZ is 100. The math is more clunky than
 	 * maybe expected, this is to make sure that all timers for USB devices

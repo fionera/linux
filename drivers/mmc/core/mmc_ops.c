@@ -489,6 +489,7 @@ int __mmc_switch(struct mmc_card *card, u8 set, u8 index, u8 value,
 	unsigned long timeout;
 	u32 status = 0;
 	bool use_r1b_resp = use_busy_signal;
+	bool expired = false;
 
 	mmc_retune_hold(host);
 
@@ -542,9 +543,15 @@ int __mmc_switch(struct mmc_card *card, u8 set, u8 index, u8 value,
 		timeout_ms = MMC_OPS_TIMEOUT_MS;
 
 	/* Must check status to be sure of no errors. */
-	timeout = jiffies + msecs_to_jiffies(timeout_ms);
+	timeout = jiffies + msecs_to_jiffies(timeout_ms) + 1;
 	do {
 		if (send_status) {
+			/*
+			 * Due to the possibility of being preempted after
+			 * sending the status command, check the expiration
+			 * time first.
+			 */
+			expired = time_after(jiffies, timeout);
 			err = __mmc_send_status(card, &status, ignore_crc);
 			if (err)
 				goto out;
@@ -565,7 +572,7 @@ int __mmc_switch(struct mmc_card *card, u8 set, u8 index, u8 value,
 		}
 
 		/* Timeout if the device never leaves the program state. */
-		if (time_after(jiffies, timeout)) {
+		if (expired && R1_CURRENT_STATE(status) == R1_STATE_PRG) {
 			pr_err("%s: Card stuck in programming state! %s\n",
 				mmc_hostname(host), __func__);
 			err = -ETIMEDOUT;
@@ -598,6 +605,9 @@ int mmc_send_tuning(struct mmc_host *host, u32 opcode, int *cmd_error)
 	const u8 *tuning_block_pattern;
 	int size, err = 0;
 	u8 *data_buf;
+#ifdef CONFIG_MMC_RTKEMMC_PLUS
+	bool pattern_cmp = true;
+#endif
 
 	if (ios->bus_width == MMC_BUS_WIDTH_8) {
 		tuning_block_pattern = tuning_blk_pattern_8bit;
@@ -608,6 +618,16 @@ int mmc_send_tuning(struct mmc_host *host, u32 opcode, int *cmd_error)
 	} else
 		return -EINVAL;
 
+#ifdef CONFIG_MMC_RTKEMMC_PLUS
+	if(opcode != MMC_SEND_TUNING_BLOCK_HS200){
+		if( (opcode == MMC_WRITE_MULTIPLE_BLOCK)
+		 || (opcode == MMC_READ_MULTIPLE_BLOCK) ){
+			opcode -= 1;
+		}
+		pattern_cmp = false;
+		size = 512;
+	}
+#endif
 	data_buf = kzalloc(size, GFP_KERNEL);
 	if (!data_buf)
 		return -ENOMEM;
@@ -617,11 +637,13 @@ int mmc_send_tuning(struct mmc_host *host, u32 opcode, int *cmd_error)
 
 	cmd.opcode = opcode;
 	cmd.flags = MMC_RSP_R1 | MMC_CMD_ADTC;
-
 	data.blksz = size;
 	data.blocks = 1;
+#ifdef CONFIG_MMC_RTKEMMC_PLUS
+	data.flags = (opcode == MMC_WRITE_BLOCK)? MMC_DATA_WRITE:MMC_DATA_READ;
+#else
 	data.flags = MMC_DATA_READ;
-
+#endif
 	/*
 	 * According to the tuning specs, Tuning process
 	 * is normally shorter 40 executions of CMD19,
@@ -648,8 +670,19 @@ int mmc_send_tuning(struct mmc_host *host, u32 opcode, int *cmd_error)
 		goto out;
 	}
 
+#ifdef CONFIG_MMC_RTKEMMC_PLUS
+	if(pattern_cmp)
+	{
+		if (memcmp(data_buf, tuning_block_pattern, size))
+			err = -EIO;
+	}else{
+		/* not cmd21, skip partten compare  */
+		//pr_alert("%s(%d)non cmd21, skip partten compare\n",__func__,__LINE__);
+	}
+#else
 	if (memcmp(data_buf, tuning_block_pattern, size))
 		err = -EIO;
+#endif
 
 out:
 	kfree(data_buf);

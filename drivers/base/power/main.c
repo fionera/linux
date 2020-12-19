@@ -33,11 +33,13 @@
 #include <linux/cpufreq.h>
 #include <linux/cpuidle.h>
 #include <linux/timer.h>
+#include <linux/moduleparam.h>
 
 #include "../base.h"
 #include "power.h"
 
 typedef int (*pm_callback_t)(struct device *);
+int (*dpm_watchdog_timeout_notify)(struct device *dev);
 
 /*
  * The entries in the dpm_list list are in a depth first order, simply
@@ -54,6 +56,7 @@ static LIST_HEAD(dpm_prepared_list);
 static LIST_HEAD(dpm_suspended_list);
 static LIST_HEAD(dpm_late_early_list);
 static LIST_HEAD(dpm_noirq_list);
+static LIST_HEAD(dpm_userresume_list);
 
 struct suspend_stats suspend_stats;
 static DEFINE_MUTEX(dpm_list_mtx);
@@ -188,11 +191,13 @@ void device_pm_move_last(struct device *dev)
 	list_move_tail(&dev->power.entry, &dpm_list);
 }
 
+extern bool profiling_suspend_disabled;
+
 static ktime_t initcall_debug_start(struct device *dev)
 {
 	ktime_t calltime = ktime_set(0, 0);
 
-	if (pm_print_times_enabled) {
+	if (pm_print_times_enabled || !profiling_suspend_disabled ) {
 		pr_info("calling  %s+ @ %i, parent: %s\n",
 			dev_name(dev), task_pid_nr(current),
 			dev->parent ? dev_name(dev->parent) : "none");
@@ -211,7 +216,7 @@ static void initcall_debug_report(struct device *dev, ktime_t calltime,
 	rettime = ktime_get();
 	nsecs = (s64) ktime_to_ns(ktime_sub(rettime, calltime));
 
-	if (pm_print_times_enabled) {
+	if (pm_print_times_enabled || !profiling_suspend_disabled ) {
 		pr_info("call %s+ returned %d after %Ld usecs\n", dev_name(dev),
 			error, (unsigned long long)nsecs >> 10);
 	}
@@ -423,6 +428,29 @@ static void dpm_watchdog_handler(unsigned long data)
 		dev_driver_string(wd->dev), dev_name(wd->dev));
 }
 
+static void dpm_watchdog_handler_userresume(unsigned long data)
+{
+	struct dpm_watchdog *wd = (void *)data;
+
+	dev_emerg(wd->dev, "**** DPM device timeout during userresume ****\n");
+
+	if (dpm_watchdog_timeout_notify &&
+		!dpm_watchdog_timeout_notify(wd->dev))
+		return;
+
+	show_stack(wd->tsk, NULL);
+	panic("%s %s: unrecoverable failure\n",
+		dev_driver_string(wd->dev), dev_name(wd->dev));
+}
+
+static unsigned int dpm_watchdog_timeout = CONFIG_DPM_WATCHDOG_TIMEOUT;
+core_param(dpm_watchdog_timeout, dpm_watchdog_timeout, uint, 0644);
+
+static unsigned int dpm_watchdog_timeout_userresume = 20;
+core_param(dpm_watchdog_timeout_userresume,
+		dpm_watchdog_timeout_userresume, uint, 0644);
+
+
 /**
  * dpm_watchdog_set - Enable pm watchdog for given device.
  * @wd: Watchdog. Must be allocated on the stack.
@@ -435,10 +463,38 @@ static void dpm_watchdog_set(struct dpm_watchdog *wd, struct device *dev)
 	wd->dev = dev;
 	wd->tsk = current;
 
+	pr_info_once("dpm_watchdog timeout : %u\n", dpm_watchdog_timeout);
+
 	init_timer_on_stack(timer);
 	/* use same timeout value for both suspend and resume */
-	timer->expires = jiffies + HZ * CONFIG_DPM_WATCHDOG_TIMEOUT;
+	if (is_userresume(dev))
+		timer->expires = jiffies + HZ * 8;
+	else
+		timer->expires = jiffies + HZ * dpm_watchdog_timeout;
 	timer->function = dpm_watchdog_handler;
+	timer->data = (unsigned long)wd;
+	add_timer(timer);
+}
+
+/**
+ * dpm_watchdog_set_userresume - Enable pm watchdog for given device.
+ * @wd: Watchdog. Must be allocated on the stack.
+ * @dev: Device to handle.
+ */
+static void dpm_watchdog_set_userresume(struct dpm_watchdog *wd, struct device *dev)
+{
+	struct timer_list *timer = &wd->timer;
+
+	wd->dev = dev;
+	wd->tsk = current;
+
+	pr_info_once("dpm_watchdog timeout userresume : %u\n",
+			dpm_watchdog_timeout_userresume);
+
+	init_timer_on_stack(timer);
+	/* use a longer timeout value for userresume than that for resume */
+	timer->expires = jiffies + HZ * dpm_watchdog_timeout_userresume;
+	timer->function = dpm_watchdog_handler_userresume;
 	timer->data = (unsigned long)wd;
 	add_timer(timer);
 }
@@ -457,10 +513,21 @@ static void dpm_watchdog_clear(struct dpm_watchdog *wd)
 #else
 #define DECLARE_DPM_WATCHDOG_ON_STACK(wd)
 #define dpm_watchdog_set(x, y)
+#define dpm_watchdog_set_userresume(x, y)
 #define dpm_watchdog_clear(x)
 #endif
 
 /*------------------------- Resume routines -------------------------*/
+
+static bool is_userresume(struct device *dev)
+{
+	extern int pm_userresume_enabled;
+
+	if(dev && dev->power.is_userresume && pm_userresume_enabled)
+		return true;
+	else
+		return false;
+}
 
 /**
  * device_resume_noirq - Execute an "early resume" callback for given device.
@@ -749,7 +816,10 @@ static int device_resume(struct device *dev, pm_message_t state, bool async)
 	}
 
 	dpm_wait(dev->parent, async);
-	dpm_watchdog_set(&wd, dev);
+	if (is_userresume(dev))
+		dpm_watchdog_set_userresume(&wd, dev);
+	else
+		dpm_watchdog_set(&wd, dev);
 	device_lock(dev);
 
 	/*
@@ -838,7 +908,10 @@ static void async_resume(void *data, async_cookie_t cookie)
  */
 void dpm_resume(pm_message_t state)
 {
-	struct device *dev;
+	struct device *dev, *tmpdev;
+#ifdef CONFIG_RTK_RESUME_SEQ_FOR_USB_DONGLE
+	struct device *dev_3_1 = NULL;
+#endif
 	ktime_t starttime = ktime_get();
 
 	trace_suspend_resume(TPS("dpm_resume"), state.event, true);
@@ -848,6 +921,22 @@ void dpm_resume(pm_message_t state)
 	pm_transition = state;
 	async_error = 0;
 
+	list_for_each_entry_safe(dev, tmpdev, &dpm_suspended_list, power.entry) {
+		if (is_userresume(dev) && (state.event == PM_EVENT_RESUME)) {
+#ifdef CONFIG_RTK_RESUME_SEQ_FOR_USB_DONGLE
+			if(strcmp(kobject_name(&dev->kobj),"3-1") == 0){
+				dev_3_1 = dev;
+				continue;
+			}
+#endif
+			list_move_tail(&dev->power.entry, &dpm_userresume_list);
+		}
+	}
+#ifdef CONFIG_RTK_RESUME_SEQ_FOR_USB_DONGLE
+	if(dev_3_1){
+		list_move_tail(&dev_3_1->power.entry, &dpm_userresume_list);
+	}
+#endif
 	list_for_each_entry(dev, &dpm_suspended_list, power.entry) {
 		reinit_completion(&dev->power.completion);
 		if (is_async(dev)) {
@@ -885,6 +974,91 @@ void dpm_resume(pm_message_t state)
 	cpufreq_resume();
 	trace_suspend_resume(TPS("dpm_resume"), state.event, false);
 }
+
+
+/**
+ * dpm_resume_user - Execute "resume" callbacks for non-sysdev devices.
+ * @state: PM transition of the system being carried out.
+ *
+ * Execute the appropriate "resume" callback for all devices whose status
+ * indicates that they are suspended.
+ */
+static void _dpm_resume_user(pm_message_t state)
+{
+	struct device *dev;
+	ktime_t starttime = ktime_get();
+
+	trace_suspend_resume(TPS("_dpm_resume_user"), state.event, true);
+	might_sleep();
+
+	mutex_lock(&dpm_list_mtx);
+	// TODO: pm_transition is required for _dmp_resume_user ?
+	//pm_transition = state;
+	async_error = 0;
+
+	list_for_each_entry(dev, &dpm_userresume_list, power.entry) {
+		reinit_completion(&dev->power.completion);
+		if (is_async(dev)) {
+			get_device(dev);
+			async_schedule(async_resume, dev);
+		}
+	}
+
+	while (!list_empty(&dpm_userresume_list)) {
+		dev = to_device(dpm_userresume_list.next);
+		get_device(dev);
+
+		if (!is_async(dev)) {
+			int error;
+
+			mutex_unlock(&dpm_list_mtx);
+
+			error = device_resume(dev, state, false);
+			if (error) {
+				suspend_stats.failed_resume++;
+				dpm_save_failed_step(SUSPEND_RESUME);
+				dpm_save_failed_dev(dev_name(dev));
+				pm_dev_err(dev, state, "", error);
+			}
+
+			mutex_lock(&dpm_list_mtx);
+		}
+		if (!list_empty(&dev->power.entry))
+			list_move_tail(&dev->power.entry, &dpm_prepared_list);
+		put_device(dev);
+	}
+	mutex_unlock(&dpm_list_mtx);
+	async_synchronize_full();
+	dpm_show_time(starttime, state, NULL);
+
+	trace_suspend_resume(TPS("_dpm_resume_user"), state.event, false);
+}
+
+static void get_userresume_device_name(struct device *dev, void *buf)
+{
+	char *s = *((char **)buf);
+
+	if (is_userresume(dev))
+		s += sprintf(s, "%s\n", dev_name(dev));
+
+	*((char **)buf) = s;
+}
+
+int dpm_show_userresume_list(char *buf)
+{
+	char *s = buf;
+
+	dpm_for_each_dev(&s, get_userresume_device_name);
+
+	return (s - buf);
+}
+
+void dpm_resume_user(pm_message_t state)
+{
+	_dpm_resume_user(state);
+	dpm_complete(state);
+}
+EXPORT_SYMBOL_GPL(dpm_resume_user);
 
 /**
  * device_complete - Complete a PM transition for given device.

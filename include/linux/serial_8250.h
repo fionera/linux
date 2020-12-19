@@ -14,6 +14,12 @@
 #include <linux/serial_core.h>
 #include <linux/serial_reg.h>
 #include <linux/platform_device.h>
+#ifdef CONFIG_REALTEK_UART_DMA
+#include <linux/8250_rtk_uart_dma.h>
+#endif
+#ifdef CONFIG_RTK_KDRV_SERIAL_8250_UART_DMA
+#include <rtk_kdriver/8250_rtk_uart_dma.h>
+#endif
 
 /*
  * This is the platform device platform_data structure
@@ -116,9 +122,20 @@ struct uart_8250_port {
 #define MSR_SAVE_FLAGS UART_MSR_ANY_DELTA
 	unsigned char		msr_saved_flags;
 
+
+#if defined(CONFIG_REALTEK_RTICE) || defined(CONFIG_RTK_KDRV_RTICE)
+    unsigned char       disable_printk;
+    struct          delayed_work dwork;
+#endif
+
+
 	struct uart_8250_dma	*dma;
 	const struct uart_8250_ops *ops;
-
+#if defined(CONFIG_REALTEK_UART_DMA) || defined(CONFIG_RTK_KDRV_SERIAL_8250_UART_DMA)
+	struct uart_8250_rtk_dma *rtk_dma;
+	/*RTK DMA FUNCTION SETTING*/
+	struct uart_8250_rtk_dma_config rtk_dma_config;	
+#endif
 	/* 8250 specific callbacks */
 	int			(*dl_read)(struct uart_8250_port *);
 	void			(*dl_write)(struct uart_8250_port *, int);

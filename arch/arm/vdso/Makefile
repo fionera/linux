@@ -1,3 +1,6 @@
+KASAN_SANITIZE := n
+UBSAN_SANITIZE := n
+
 hostprogs-y := vdsomunge
 
 obj-vdso := vgettimeofday.o datapage.o

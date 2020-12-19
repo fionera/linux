@@ -109,6 +109,7 @@ static void sd_shutdown(struct device *);
 static int sd_suspend_system(struct device *);
 static int sd_suspend_runtime(struct device *);
 static int sd_resume(struct device *);
+static int sd_resume_system(struct device *);
 static void sd_rescan(struct device *);
 static int sd_init_command(struct scsi_cmnd *SCpnt);
 static void sd_uninit_command(struct scsi_cmnd *SCpnt);
@@ -504,9 +505,9 @@ static struct class sd_disk_class = {
 
 static const struct dev_pm_ops sd_pm_ops = {
 	.suspend		= sd_suspend_system,
-	.resume			= sd_resume,
+	.resume			= sd_resume_system,
 	.poweroff		= sd_suspend_system,
-	.restore		= sd_resume,
+	.restore		= sd_resume_system,
 	.runtime_suspend	= sd_suspend_runtime,
 	.runtime_resume		= sd_resume,
 };
@@ -1467,16 +1468,20 @@ out:
 	return retval;
 }
 
-static int sd_sync_cache(struct scsi_disk *sdkp)
+static int sd_sync_cache(struct scsi_disk *sdkp, struct scsi_sense_hdr *sshdr)
 {
 	int retries, res;
 	struct scsi_device *sdp = sdkp->device;
 	const int timeout = sdp->request_queue->rq_timeout
 		* SD_FLUSH_TIMEOUT_MULTIPLIER;
-	struct scsi_sense_hdr sshdr;
+	struct scsi_sense_hdr my_sshdr;
 
 	if (!scsi_device_online(sdp))
 		return -ENODEV;
+
+	/* caller might not be interested in sense, but we need it */
+	if (!sshdr)
+		sshdr = &my_sshdr;
 
 	for (retries = 3; retries > 0; --retries) {
 		unsigned char cmd[10] = { 0 };
@@ -1487,7 +1492,7 @@ static int sd_sync_cache(struct scsi_disk *sdkp)
 		 * flush everything.
 		 */
 		res = scsi_execute_req_flags(sdp, cmd, DMA_NONE, NULL, 0,
-					     &sshdr, timeout, SD_MAX_RETRIES,
+					     sshdr, timeout, SD_MAX_RETRIES,
 					     NULL, REQ_PM);
 		if (res == 0)
 			break;
@@ -1497,11 +1502,11 @@ static int sd_sync_cache(struct scsi_disk *sdkp)
 		sd_print_result(sdkp, "Synchronize Cache(10) failed", res);
 
 		if (driver_byte(res) & DRIVER_SENSE)
-			sd_print_sense_hdr(sdkp, &sshdr);
+			sd_print_sense_hdr(sdkp, sshdr);
 		/* we need to evaluate the error return  */
-		if (scsi_sense_valid(&sshdr) &&
-			(sshdr.asc == 0x3a ||	/* medium not present */
-			 sshdr.asc == 0x20))	/* invalid command */
+		if (scsi_sense_valid(sshdr) &&
+			(sshdr->asc == 0x3a ||	/* medium not present */
+			 sshdr->asc == 0x20))	/* invalid command */
 				/* this is no error here */
 				return 0;
 
@@ -3265,7 +3270,7 @@ static void sd_shutdown(struct device *dev)
 
 	if (sdkp->WCE && sdkp->media_present) {
 		sd_printk(KERN_NOTICE, sdkp, "Synchronizing SCSI cache\n");
-		sd_sync_cache(sdkp);
+		sd_sync_cache(sdkp, NULL);
 	}
 
 	if (system_state != SYSTEM_RESTART && sdkp->device->manage_start_stop) {
@@ -3277,19 +3282,36 @@ static void sd_shutdown(struct device *dev)
 static int sd_suspend_common(struct device *dev, bool ignore_stop_errors)
 {
 	struct scsi_disk *sdkp = dev_get_drvdata(dev);
+	struct scsi_sense_hdr sshdr;
 	int ret = 0;
 
 	if (!sdkp)	/* E.g.: runtime suspend following sd_remove() */
 		return 0;
 
+	if (ignore_stop_errors)
+		dev_info(dev, "suspend start\n");
+
 	if (sdkp->WCE && sdkp->media_present) {
 		sd_printk(KERN_NOTICE, sdkp, "Synchronizing SCSI cache\n");
-		ret = sd_sync_cache(sdkp);
+		ret = sd_sync_cache(sdkp, &sshdr);
+
 		if (ret) {
 			/* ignore OFFLINE device */
-			if (ret == -ENODEV)
+			if (ret == -ENODEV) {
 				ret = 0;
-			goto done;
+				goto done;
+			}
+
+			if (!scsi_sense_valid(&sshdr) ||
+			    sshdr.sense_key != ILLEGAL_REQUEST)
+				goto done;
+
+			/*
+			 * sshdr.sense_key == ILLEGAL_REQUEST means this drive
+			 * doesn't support sync. There's not much to do and
+			 * suspend shouldn't fail.
+			 */
+			ret = 0;
 		}
 	}
 
@@ -3302,11 +3324,22 @@ static int sd_suspend_common(struct device *dev, bool ignore_stop_errors)
 	}
 
 done:
+	if (ignore_stop_errors)
+		dev_info(dev, "suspend done: err=%d\n", ret);
+
 	return ret;
 }
 
 static int sd_suspend_system(struct device *dev)
 {
+	struct scsi_disk *sdkp = dev_get_drvdata(dev);
+
+	if (sdkp && dev->power.is_userresume == true) {
+		/* stop in-kernel disk event polling */
+		dev_dbg(dev, "block disk events\n");
+		disk_block_events(sdkp->disk);
+	}
+
 	return sd_suspend_common(dev, true);
 }
 
@@ -3327,6 +3360,19 @@ static int sd_resume(struct device *dev)
 
 	sd_printk(KERN_NOTICE, sdkp, "Starting disk\n");
 	return sd_start_stop_device(sdkp, 1);
+}
+
+static int sd_resume_system(struct device *dev)
+{
+	struct scsi_disk *sdkp = dev_get_drvdata(dev);
+
+	if (sdkp && dev->power.is_userresume == true) {
+		/* begin in-kernel disk event polling */
+		dev_dbg(dev, "unblock disk events\n");
+		disk_unblock_events(sdkp->disk);
+	}
+
+	return sd_resume(dev);
 }
 
 /**
@@ -3441,3 +3487,27 @@ static void sd_print_result(const struct scsi_disk *sdkp, const char *msg,
 			  msg, host_byte(result), driver_byte(result));
 }
 
+extern int get_mount_path_one(struct super_block *sb, char *buf, size_t size); /* fs/namespace.c */
+int get_disk_mount_path_one(struct scsi_device *sdev, char *buf, size_t size) {
+	/* from sd_probe: dev_set_drvdata(dev, sdkp), link device and scsi_disk */
+	struct scsi_disk *sdkp = (struct scsi_disk *)dev_get_drvdata(&sdev->sdev_gendev);
+	/* from scsi_sysfs.c::scsi_sysfs_add_sdev, we know the device* for sd_probe is &sdev->sdev_gendev */
+	struct gendisk *disk = sdkp->disk;
+	struct hd_struct *part;
+	struct disk_part_iter piter;
+	struct block_device *blkdev;
+	int ret = 0;
+
+	/* announce possible partitions */
+	disk_part_iter_init(&piter, disk, 0);
+	while ((part = disk_part_iter_next(&piter))) {
+		blkdev = bdget_disk(disk, part->partno); // get block device from correspond partition number of gendisk.
+		ret = get_mount_path_one(blkdev->bd_super, buf, size);
+		if (!ret)
+			break;
+	}
+	disk_part_iter_exit(&piter);
+
+	return ret;
+}
+EXPORT_SYMBOL(get_disk_mount_path_one);

@@ -487,7 +487,7 @@ static int sta_info_insert_finish(struct sta_info *sta) __acquires(RCU)
 {
 	struct ieee80211_local *local = sta->local;
 	struct ieee80211_sub_if_data *sdata = sta->sdata;
-	struct station_info *sinfo;
+	struct station_info *sinfo = NULL;
 	int err = 0;
 
 	lockdep_assert_held(&local->sta_mtx);
@@ -555,6 +555,8 @@ static int sta_info_insert_finish(struct sta_info *sta) __acquires(RCU)
  out_err:
 	mutex_unlock(&local->sta_mtx);
 	rcu_read_lock();
+	if(sinfo)
+	    kfree(sinfo);
 	return err;
 }
 

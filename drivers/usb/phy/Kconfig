@@ -213,4 +213,33 @@ config USB_ULPI_VIEWPORT
 	  Provides read/write operations to the ULPI phy register set for
 	  controllers with a viewport register (e.g. Chipidea/ARC controllers).
 
+config LG1K_USBPHY
+	tristate
+	help
+	  Enable this to support LG USB phy helper driver for LG DTV SoCs.
+
+config LG1K_USB1PHY
+	tristate "LG DTV USB 1.1 PHY controller Driver"
+	select LG1K_USBPHY
+	select USB_PHY
+	help
+	 Enable this to support LG USB 1.1 (Full Speed) phy controller
+	 for LG DTV SoCs.
+
+config LG1K_USB2PHY
+	tristate "LG DTV USB 2.0 PHY controller Driver"
+	select LG1K_USBPHY
+	select USB_PHY
+	help
+	  Enable this to support LG USB 2.0 (High Speed) PHY controller
+	  driver for LG DTV SoCs.
+
+config LG1K_USB3PHY
+	tristate "LG DTV USB 3.0 PHY controller Driver"
+	select LG1K_USBPHY
+	select USB_PHY
+	help
+	  Enable this to support LG USB 3.0 (Super Speed) phy controller
+	  for LG DTV SoCs.
+
 endmenu

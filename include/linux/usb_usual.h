@@ -81,6 +81,8 @@
 		/* Sets max_sectors to 240 */			\
 	US_FLAG(NO_REPORT_LUNS,	0x10000000)			\
 		/* Cannot handle REPORT_LUNS */			\
+	US_FLAG(GO_INITIAL_SLOW,	0x40000000)		\
+		/* Need delay after Command phase */		\
 
 #define US_FLAG(name, value)	US_FL_##name = value ,
 enum { US_DO_ALL_FLAGS };

@@ -129,6 +129,12 @@ _c_flags += $(if $(patsubst n%,, \
 		$(CFLAGS_KASAN))
 endif
 
+ifeq ($(CONFIG_UBSAN),y)
+_c_flags += $(if $(patsubst n%,, \
+		$(UBSAN_SANITIZE_$(basetarget).o)$(UBSAN_SANITIZE)$(CONFIG_UBSAN_SANITIZE_ALL)), \
+		$(CFLAGS_UBSAN))
+endif
+
 # If building the kernel in a separate objtree expand all occurrences
 # of -Idir to -I$(srctree)/dir except for absolute paths (starting with '/').
 
@@ -163,6 +169,7 @@ dtc_cpp_flags  = -Wp,-MD,$(depfile).pre.tmp -nostdinc                    \
 		 -I$(srctree)/arch/$(SRCARCH)/boot/dts                   \
 		 -I$(srctree)/arch/$(SRCARCH)/boot/dts/include           \
 		 -I$(srctree)/drivers/of/testcase-data                   \
+		 -I$(srctree)/include                   \
 		 -undef -D__DTS__
 
 # Finds the multi-part object the current object will be linked into
@@ -334,7 +341,8 @@ cmd_lzo = (cat $(filter-out FORCE,$^) | \
 
 quiet_cmd_lz4 = LZ4     $@
 cmd_lz4 = (cat $(filter-out FORCE,$^) | \
-	lz4c -l -c1 stdin stdout && $(call size_append, $(filter-out FORCE,$^))) > $@ || \
+	lz4p -c1 && $(call size_append, $(filter-out FORCE,$^))) > $@ || \
+	#lz4c -l -c1 stdin stdout && $(call size_append, $(filter-out FORCE,$^))) > $@ || \
 	(rm -f $@ ; false)
 
 # U-Boot mkimage
@@ -348,8 +356,18 @@ UIMAGE_ARCH ?= $(SRCARCH)
 UIMAGE_COMPRESSION ?= $(if $(2),$(2),none)
 UIMAGE_OPTS-y ?=
 UIMAGE_TYPE ?= kernel
+ifeq ($(CONFIG_KERNEL_LG_LZO),y)
+UIMAGE_LOADADDR = 0
+UIMAGE_ENTRYADDR=$(ZRELADDR)
+UIMAGE_COMPRESSION = 'lzo'
+else ifeq ($(CONFIG_KERNEL_LG_LZ4),y)
+UIMAGE_LOADADDR = 0
+UIMAGE_ENTRYADDR=$(ZRELADDR)
+else
 UIMAGE_LOADADDR ?= arch_must_set_this
-UIMAGE_ENTRYADDR ?= $(UIMAGE_LOADADDR)
+#UIMAGE_ENTRYADDR ?= $(UIMAGE_LOADADDR)
+UIMAGE_ENTRYADDR ?= $(shell echo $(UIMAGE_LOADADDR) | sed -e "s/..$$/40/")
+endif
 UIMAGE_NAME ?= 'Linux-$(KERNELRELEASE)'
 UIMAGE_IN ?= $<
 UIMAGE_OUT ?= $@
@@ -360,6 +378,28 @@ quiet_cmd_uimage = UIMAGE  $(UIMAGE_OUT)
 			-T $(UIMAGE_TYPE) \
 			-a $(UIMAGE_LOADADDR) -e $(UIMAGE_ENTRYADDR) \
 			-n $(UIMAGE_NAME) -d $(UIMAGE_IN) $(UIMAGE_OUT)
+
+ifeq ($(CONFIG_KERNEL_LG_LZO),y)
+LZO_COMMAND=$(srctree)/scripts/lzopack
+quiet_cmd_lzopack = LZO $@
+      cmd_lzopack = ($(LZO_COMMAND) -9 $(filter-out FORCE,$^) $@) || \
+			(rm -f $@ ; false)
+
+$(obj)/zImage: $(obj)/Image FORCE
+	$(call if_changed,lzopack)
+	@echo '  Kernel: $@ is ready'
+endif
+
+ifeq ($(CONFIG_KERNEL_LG_LZ4),y)
+LZ4_COMMAND=$(srctree)/scripts/lz4pack
+quiet_cmd_lz4pack = LZ4 $@
+      cmd_lz4pack = ($(LZ4_COMMAND) -c1 $(filter-out FORCE,$^) $@) || \
+			(rm -f $@ ; false)
+
+$(obj)/zImage: $(obj)/Image FORCE
+	$(call if_changed,lz4pack)
+	@echo '  Kernel: $@ is ready'
+endif
 
 # XZ
 # ---------------------------------------------------------------------------

@@ -1,0 +1,13 @@
+config RTK_KDRV_AUDIO
+	bool "Driver for Audio HAL Manager"
+	depends on RTK_KDRV_RPC
+	default n
+	help
+	  Driver for Audio HAL Manager
+
+config ALSA_LGSE_VERSION
+        int "LGE lgse version for Audio alsa-ext header"
+        depends on RTK_KDRV_RPC
+        default 63
+        help
+          LGE lgse version for Audio alsa-ext header

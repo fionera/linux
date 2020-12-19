@@ -10,4 +10,6 @@ extern void cpu_resume(void);
 extern void cpu_resume_arm(void);
 extern int cpu_suspend(unsigned long, int (*)(unsigned long));
 
+static inline int arch_prepare_suspend(void) { return 0; }
+
 #endif

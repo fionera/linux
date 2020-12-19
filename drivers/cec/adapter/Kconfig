@@ -1,0 +1,14 @@
+#Copyright (C) 2007-2013 Realtek Semiconductor Corporation.
+# drivers/Kconfig
+
+menu "CEC Adapters"	
+	depends on CEC
+
+config RTD299x_CEC
+	tristate "CEC Controller for Realtek RTD29xx platform"
+	depends on CEC 
+	default n
+	help
+	  Say Y, if you want to enable CEC feature on Realtek RTD299x/298x/294x platform.
+
+endmenu

@@ -232,6 +232,13 @@ SUBARCH := $(shell uname -m | sed -e s/i.86/x86/ -e s/x86_64/x86/ \
 				  -e s/ppc.*/powerpc/ -e s/mips.*/mips/ \
 				  -e s/sh[234].*/sh/ -e s/aarch64.*/arm64/ )
 
+# RTK_patch: default use arch/arm
+ifeq ($(ARCH),)
+SUBARCH	:= arm
+else
+SUBARCH	:= $(ARCH)
+endif
+
 # Cross compiling and selecting different set of gcc/bin-utils
 # ---------------------------------------------------------------------------
 #
@@ -253,7 +260,16 @@ SUBARCH := $(shell uname -m | sed -e s/i.86/x86/ -e s/x86_64/x86/ \
 # Default value for CROSS_COMPILE is not to prefix executables
 # Note: Some architectures assign CROSS_COMPILE in their arch/*/Makefile
 ARCH		?= $(SUBARCH)
-CROSS_COMPILE	?= $(CONFIG_CROSS_COMPILE:"%"=%)
+# RTK_patch: change toolchain path
+#CROSS_COMPILE	?= $(CONFIG_CROSS_COMPILE:"%"=%)
+#CROSS_COMPILE	?= ../../system/tmp/toolchain/asdk-4.9.2-a53-EL-3.10-g2.19-a32n-141121/bin/asdk-linux-
+#CROSS_COMPILE	?= ../../system/tmp/toolchain/arm-lg115x-linux-gnueabi-4.8-2014.08-1-i686/bin/arm-linux-
+#CROSS_COMPILE	?= /usr/local/arm-lg115x-linux-gnueabi-4.8-2014.08-1-i686/bin/arm-linux-
+
+ifeq ($(ARCH),arm64)
+#CROSS_COMPILE	:= ../../system/tmp/toolchain/asdk64-4.9.2-a53-EL-3.10-g2.19-a32n-141121/bin/asdk64-linux-
+#CROSS_COMPILE   := ../../system/tmp/toolchain/starfish-sdk-x86_64_4.5.0-20180321/sysroots/x86_64-starfishsdk-linux/usr/bin/aarch64-starfish-linux/aarch64-starfish-linux-
+endif
 
 # Architecture as present in compile.h
 UTS_MACHINE 	:= $(ARCH)
@@ -387,7 +403,8 @@ LINUXINCLUDE    := \
 		-Iarch/$(hdr-arch)/include/generated \
 		$(if $(KBUILD_SRC), -I$(srctree)/include) \
 		-Iinclude \
-		$(USERINCLUDE)
+		$(USERINCLUDE)\
+		-I$(srctree)/drivers/rtk_kdriver/include/rtk_kdriver
 
 KBUILD_CPPFLAGS := -D__KERNEL__
 
@@ -416,7 +433,7 @@ export MAKE AWK GENKSYMS INSTALLKERNEL PERL PYTHON UTS_MACHINE
 export HOSTCXX HOSTCXXFLAGS LDFLAGS_MODULE CHECK CHECKFLAGS
 
 export KBUILD_CPPFLAGS NOSTDINC_FLAGS LINUXINCLUDE OBJCOPYFLAGS LDFLAGS
-export KBUILD_CFLAGS CFLAGS_KERNEL CFLAGS_MODULE CFLAGS_GCOV CFLAGS_KASAN
+export KBUILD_CFLAGS CFLAGS_KERNEL CFLAGS_MODULE CFLAGS_GCOV CFLAGS_KASAN CFLAGS_UBSAN
 export KBUILD_AFLAGS AFLAGS_KERNEL AFLAGS_MODULE
 export KBUILD_AFLAGS_MODULE KBUILD_CFLAGS_MODULE KBUILD_LDFLAGS_MODULE
 export KBUILD_AFLAGS_KERNEL KBUILD_CFLAGS_KERNEL
@@ -607,7 +624,10 @@ endif # $(dot-config)
 # command line.
 # This allow a user to issue only 'make' to build a kernel including modules
 # Defaults to vmlinux, but the arch makefile usually adds further targets
+
+# RTK_patch: build dtbs first and generate vmlinux.bin
 all: vmlinux
+	$(OBJCOPY) -O binary vmlinux vmlinux.bin
 
 # The arch Makefile can set ARCH_{CPP,A,C}FLAGS to override the default
 # values of the respective KBUILD_* variables
@@ -799,12 +819,30 @@ KBUILD_ARFLAGS := $(call ar-option,D)
 
 include scripts/Makefile.kasan
 include scripts/Makefile.extrawarn
+include scripts/Makefile.ubsan
 
 # Add any arch overrides and user supplied CPPFLAGS, AFLAGS and CFLAGS as the
 # last assignments
 KBUILD_CPPFLAGS += $(ARCH_CPPFLAGS) $(KCPPFLAGS)
 KBUILD_AFLAGS   += $(ARCH_AFLAGS)   $(KAFLAGS)
 KBUILD_CFLAGS   += $(ARCH_CFLAGS)   $(KCFLAGS)
+
+
+
+REVISION_KDRIVER  = $(shell cd drivers/rtk_kdriver; git rev-list HEAD -1 | cut -c1-7)
+REVISION_KDRIVER2 = $(shell printf "%d\n" 0x$(REVISION_KDRIVER))
+KBUILD_CPPFLAGS += -D_KDRIVER_REVISION=$(REVISION_KDRIVER2)
+
+REVISION_LINUX  = $(shell git rev-list HEAD -1 | cut -c1-7)
+REVISION_LINUX2 = $(shell printf "%d\n" 0x$(REVISION_LINUX))
+KBUILD_CPPFLAGS += -D_LINUX_REVISION=$(REVISION_LINUX2)
+
+REVISION_COMMON  = $(shell cd drivers/rtk_kdriver/common; git rev-list HEAD -1 | cut -c1-7)
+REVISION_COMMON2 = $(shell printf "%d\n" 0x$(REVISION_COMMON))
+KBUILD_CPPFLAGS += -D_COMMON_REVISION=$(REVISION_COMMON2)
+
+
+
 
 # Use --build-id when available.
 LDFLAGS_BUILD_ID = $(patsubst -Wl$(comma)%,%,\
@@ -934,7 +972,9 @@ quiet_cmd_link-vmlinux = LINK    $@
 
 # Include targets which we want to
 # execute if the rest of the kernel build went well.
-vmlinux: scripts/link-vmlinux.sh $(vmlinux-deps) FORCE
+vmlinux: scripts/link-vmlinux.sh dtbs $(vmlinux-deps) FORCE
+	@echo "rtk_logging gcc version" > ./kernel_gcc_version.txt
+	@echo "$(CC)">> ./kernel_gcc_version.txt
 ifdef CONFIG_HEADERS_CHECK
 	$(Q)$(MAKE) -f $(srctree)/Makefile headers_check
 endif

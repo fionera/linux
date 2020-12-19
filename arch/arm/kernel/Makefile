@@ -13,16 +13,25 @@ endif
 
 CFLAGS_REMOVE_return_address.o = -pg
 
+KASAN_SANITIZE_stacktrace.o := n
+
 # Object file lists.
 
 obj-y		:= elf.o entry-common.o irq.o opcodes.o \
 		   process.o ptrace.o reboot.o return_address.o \
-		   setup.o signal.o sigreturn_codes.o \
+		   setup.o signal.o sigreturn_codes.o cacheinfo.o\
 		   stacktrace.o sys_arm.o time.o traps.o
 
 obj-$(CONFIG_ATAGS)		+= atags_parse.o
 obj-$(CONFIG_ATAGS_PROC)	+= atags_proc.o
 obj-$(CONFIG_DEPRECATED_PARAM_STRUCT) += atags_compat.o
+
+# RTK_patch: add atags_to_fdt file to compile
+ifdef CONFIG_ARM_ATAG_DTB_COMPAT_EXT
+KBUILD_CPPFLAGS += -Iscripts/dtc/libfdt
+
+obj-$(CONFIG_ARM_ATAG_DTB_COMPAT_EXT) += atags_to_fdt.o
+endif
 
 ifeq ($(CONFIG_CPU_V7M),y)
 obj-y		+= entry-v7m.o v7m.o
@@ -90,5 +99,15 @@ ifeq ($(CONFIG_ARM_PSCI),y)
 obj-y				+= psci-call.o
 obj-$(CONFIG_SMP)		+= psci_smp.o
 endif
+obj-$(CONFIG_HAVE_ARM_SMCCC)    += smccc-call.o
+
+obj-$(CONFIG_HAVE_ARM_SMCCC)	+= smccc-call.o
 
 extra-y := $(head-y) vmlinux.lds
+
+# RTK_patch: build dtb.S that included our dtb
+obj-$(CONFIG_BUILD_ARM_APPENDED_DTB_IMAGE_EXT) += dtb.o
+
+$(obj)/dtb.o: embedded_dtb
+
+KBUILD_CPPFLAGS += -Idrivers/rtk_kdriver/common/include/

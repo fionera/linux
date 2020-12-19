@@ -194,6 +194,8 @@ extern void __iomem *ioremap_cache(phys_addr_t phys_addr, size_t size);
 #define xlate_dev_kmem_ptr(p)	p
 
 #include <asm-generic/io.h>
+#include <mach/io.h>
+
 
 /*
  * More restrictive address range checking than the default implementation

@@ -29,6 +29,8 @@
 #include "xhci.h"
 #include "xhci-trace.h"
 
+
+extern _Bool is_xhci_in_resume_state;
 /*
  * Allocates a generic ring segment from the ring pool, sets the dma address,
  * initializes the segment to zero, and sets the private next pointer to NULL.
@@ -1865,23 +1867,26 @@ void xhci_mem_cleanup(struct xhci_hcd *xhci)
 	for (i = HCS_MAX_SLOTS(xhci->hcs_params1); i > 0; i--)
 		xhci_free_virt_devices_depth_first(xhci, i);
 
-	dma_pool_destroy(xhci->segment_pool);
-	xhci->segment_pool = NULL;
-	xhci_dbg_trace(xhci, trace_xhci_dbg_init, "Freed segment pool");
+	if (!is_xhci_in_resume_state) {
+		dma_pool_destroy(xhci->segment_pool);
+		xhci->segment_pool = NULL;
+		xhci_dbg_trace(xhci, trace_xhci_dbg_init, "Freed segment pool");
 
-	dma_pool_destroy(xhci->device_pool);
-	xhci->device_pool = NULL;
-	xhci_dbg_trace(xhci, trace_xhci_dbg_init, "Freed device context pool");
+		dma_pool_destroy(xhci->device_pool);
+		xhci->device_pool = NULL;
+		xhci_dbg_trace(xhci, trace_xhci_dbg_init, "Freed device context pool");
 
-	dma_pool_destroy(xhci->small_streams_pool);
-	xhci->small_streams_pool = NULL;
-	xhci_dbg_trace(xhci, trace_xhci_dbg_init,
-			"Freed small stream array pool");
+		dma_pool_destroy(xhci->small_streams_pool);
+		xhci->small_streams_pool = NULL;
+		xhci_dbg_trace(xhci, trace_xhci_dbg_init,
+				"Freed small stream array pool");
 
-	dma_pool_destroy(xhci->medium_streams_pool);
-	xhci->medium_streams_pool = NULL;
-	xhci_dbg_trace(xhci, trace_xhci_dbg_init,
-			"Freed medium stream array pool");
+		dma_pool_destroy(xhci->medium_streams_pool);
+		xhci->medium_streams_pool = NULL;
+		xhci_dbg_trace(xhci, trace_xhci_dbg_init,
+				"Freed medium stream array pool");
+	}
+
 
 	if (xhci->dcbaa)
 		dma_free_coherent(dev, sizeof(*xhci->dcbaa),
@@ -2453,24 +2458,28 @@ int xhci_mem_init(struct xhci_hcd *xhci, gfp_t flags)
 	 * and our use of dma addresses in the trb_address_map radix tree needs
 	 * TRB_SEGMENT_SIZE alignment, so we pick the greater alignment need.
 	 */
-	xhci->segment_pool = dma_pool_create("xHCI ring segments", dev,
-			TRB_SEGMENT_SIZE, TRB_SEGMENT_SIZE, xhci->page_size);
+	if (!xhci->segment_pool)
+		xhci->segment_pool = dma_pool_create("xHCI ring segments", dev,
+				TRB_SEGMENT_SIZE, TRB_SEGMENT_SIZE, xhci->page_size);
 
 	/* See Table 46 and Note on Figure 55 */
-	xhci->device_pool = dma_pool_create("xHCI input/output contexts", dev,
-			2112, 64, xhci->page_size);
+	if (!xhci->device_pool)
+		xhci->device_pool = dma_pool_create("xHCI input/output contexts", dev,
+				2112, 64, xhci->page_size);
 	if (!xhci->segment_pool || !xhci->device_pool)
 		goto fail;
 
 	/* Linear stream context arrays don't have any boundary restrictions,
 	 * and only need to be 16-byte aligned.
 	 */
-	xhci->small_streams_pool =
-		dma_pool_create("xHCI 256 byte stream ctx arrays",
-			dev, SMALL_STREAM_ARRAY_SIZE, 16, 0);
-	xhci->medium_streams_pool =
-		dma_pool_create("xHCI 1KB stream ctx arrays",
-			dev, MEDIUM_STREAM_ARRAY_SIZE, 16, 0);
+	if (!xhci->small_streams_pool)
+		xhci->small_streams_pool =
+			dma_pool_create("xHCI 256 byte stream ctx arrays",
+				dev, SMALL_STREAM_ARRAY_SIZE, 16, 0);
+	if (!xhci->medium_streams_pool)
+		xhci->medium_streams_pool =
+			dma_pool_create("xHCI 1KB stream ctx arrays",
+				dev, MEDIUM_STREAM_ARRAY_SIZE, 16, 0);
 	/* Any stream context array bigger than MEDIUM_STREAM_ARRAY_SIZE
 	 * will be allocated with dma_alloc_coherent()
 	 */

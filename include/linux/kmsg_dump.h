@@ -68,6 +68,8 @@ void kmsg_dump_rewind_nolock(struct kmsg_dumper *dumper);
 
 void kmsg_dump_rewind(struct kmsg_dumper *dumper);
 
+void kmsg_dump_forward_to_console_idx(struct kmsg_dumper *dumper);
+
 int kmsg_dump_register(struct kmsg_dumper *dumper);
 
 int kmsg_dump_unregister(struct kmsg_dumper *dumper);

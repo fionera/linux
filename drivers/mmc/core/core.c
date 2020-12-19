@@ -133,6 +133,8 @@ void mmc_request_done(struct mmc_host *host, struct mmc_request *mrq)
 	struct mmc_command *cmd = mrq->cmd;
 	int err = cmd->error;
 
+#ifndef CONFIG_MMC_RTKEMMC_PLUS
+	/* trigger hw reset to instead retune */
 	/* Flag re-tuning needed on CRC errors */
 	if ((cmd->opcode != MMC_SEND_TUNING_BLOCK &&
 	    cmd->opcode != MMC_SEND_TUNING_BLOCK_HS200) &&
@@ -140,6 +142,7 @@ void mmc_request_done(struct mmc_host *host, struct mmc_request *mrq)
 	    (mrq->data && mrq->data->error == -EILSEQ) ||
 	    (mrq->stop && mrq->stop->error == -EILSEQ)))
 		mmc_retune_needed(host);
+#endif
 
 	if (err && cmd->retries && mmc_host_is_spi(host)) {
 		if (cmd->resp[0] & R1_SPI_ILLEGAL_COMMAND)
@@ -1092,6 +1095,35 @@ int mmc_execute_tuning(struct mmc_card *card)
 	return err;
 }
 
+#ifdef CONFIG_MMC_RTKEMMC_PLUS
+int mmc_execute_tuning_400(struct mmc_card *card)
+{
+	struct mmc_host *host = card->host;
+	u32 opcode;
+	int err;
+
+	/*
+	 * HS400 mode requires 8-bit bus width
+	 */
+	if (!(card->mmc_avail_type & EXT_CSD_CARD_TYPE_HS400 &&
+		host->ios.bus_width == MMC_BUS_WIDTH_8))
+		return 0;
+
+	if (!host->ops->execute_tuning)
+		return 0;
+
+	opcode = MMC_READ_MULTIPLE_BLOCK;
+
+	err = host->ops->execute_tuning(host, opcode);
+
+	if (err)
+		pr_err("%s: tuning execution 400 failed\n", mmc_hostname(host));
+	else
+		pr_err("%s: ds tuning susccess\n", mmc_hostname(host));
+	return 0;
+}
+#endif
+
 /*
  * Change the bus mode (open drain/push-pull) of a host.
  */
@@ -1125,6 +1157,15 @@ void mmc_set_initial_state(struct mmc_host *host)
 	host->ios.bus_width = MMC_BUS_WIDTH_1;
 	host->ios.timing = MMC_TIMING_LEGACY;
 	host->ios.drv_type = 0;
+	host->ios.enhanced_strobe = false;
+
+	/*
+	 * Make sure we are in non-enhanced strobe mode before we
+	 * actually enable it in ext_csd.
+	 */
+	if ((host->caps2 & MMC_CAP2_HS400_ES) &&
+	     host->ops->hs400_enhanced_strobe)
+		host->ops->hs400_enhanced_strobe(host, &host->ios);
 
 	mmc_set_ios(host);
 }
@@ -2476,17 +2517,37 @@ static int mmc_rescan_try_freq(struct mmc_host *host, unsigned freq)
 	 * sdio_reset sends CMD52 to reset card.  Since we do not know
 	 * if the card is being re-initialized, just send it.  CMD52
 	 * should be ignored by SD/eMMC cards.
+	 * Skip it if we already know that we do not support SDIO commands
 	 */
-	sdio_reset(host);
+#ifdef CONFIG_MMC_RTKEMMC_PLUS
+	mmc_go_idle(host);
+
+    if(host->card_type_pre == CR_EM)
+        goto emmc_init;
+
+	mmc_send_if_cond(host, host->ocr_avail);
+
+	if (!mmc_attach_sd(host))
+		return 0;
+emmc_init:
+
+#else
+
+	if (!(host->caps2 & MMC_CAP2_NO_SDIO))
+		sdio_reset(host);
+
 	mmc_go_idle(host);
 
 	mmc_send_if_cond(host, host->ocr_avail);
 
 	/* Order's important: probe SDIO, then SD, then MMC */
-	if (!mmc_attach_sdio(host))
-		return 0;
+	if (!(host->caps2 & MMC_CAP2_NO_SDIO))
+		if (!mmc_attach_sdio(host))
+			return 0;
+
 	if (!mmc_attach_sd(host))
 		return 0;
+#endif
 	if (!mmc_attach_mmc(host))
 		return 0;
 

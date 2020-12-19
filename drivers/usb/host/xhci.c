@@ -583,6 +583,16 @@ static int xhci_run_finished(struct xhci_hcd *xhci)
 	return 0;
 }
 
+
+#if defined(CONFIG_USB_XHCI_PLATFORM) && defined(CONFIG_ARCH_RTK289X)
+extern int xhci_create_sysfs_files(struct xhci_hcd *xhci);
+extern void xhci_remove_sysfs_files(struct xhci_hcd *xhci);
+#else
+#define xhci_create_sysfs_files(xhci)
+#define xhci_remove_sysfs_files(xhci)
+#endif
+
+
 /*
  * Start the HC after it was halted.
  *
@@ -662,6 +672,9 @@ int xhci_run(struct usb_hcd *hcd)
 	}
 	xhci_dbg_trace(xhci, trace_xhci_dbg_init,
 			"Finished xhci_run for USB2 roothub");
+
+	xhci_create_sysfs_files(xhci);
+
 	return 0;
 }
 EXPORT_SYMBOL_GPL(xhci_run);
@@ -697,6 +710,8 @@ void xhci_stop(struct usb_hcd *hcd)
 		mutex_unlock(&xhci->mutex);
 		return;
 	}
+
+	xhci_remove_sysfs_files(xhci);
 
 	xhci_cleanup_msix(xhci);
 
@@ -981,6 +996,7 @@ EXPORT_SYMBOL_GPL(xhci_suspend);
  * This is called when the machine transition from S3/S4 mode.
  *
  */
+_Bool is_xhci_in_resume_state = 0;
 int xhci_resume(struct xhci_hcd *xhci, bool hibernated)
 {
 	u32			command, temp = 0, status;
@@ -992,6 +1008,7 @@ int xhci_resume(struct xhci_hcd *xhci, bool hibernated)
 	if (!hcd->state)
 		return 0;
 
+	is_xhci_in_resume_state = 1;
 	/* Wait a bit if either of the roothubs need to settle from the
 	 * transition into bus suspend.
 	 */
@@ -1021,6 +1038,7 @@ int xhci_resume(struct xhci_hcd *xhci, bool hibernated)
 			      STS_RESTORE, 0, 10 * 1000)) {
 			xhci_warn(xhci, "WARN: xHC restore state timeout\n");
 			spin_unlock_irq(&xhci->lock);
+			is_xhci_in_resume_state = 0;
 			return -ETIMEDOUT;
 		}
 		temp = readl(&xhci->op_regs->status);
@@ -1070,7 +1088,10 @@ int xhci_resume(struct xhci_hcd *xhci, bool hibernated)
 		xhci_dbg(xhci, "Initialize the xhci_hcd\n");
 		retval = xhci_init(hcd->primary_hcd);
 		if (retval)
+		{
+			is_xhci_in_resume_state = 0;
 			return retval;
+		}
 		comp_timer_running = true;
 
 		xhci_dbg(xhci, "Start the primary HCD\n");
@@ -1128,6 +1149,7 @@ int xhci_resume(struct xhci_hcd *xhci, bool hibernated)
 	set_bit(HCD_FLAG_POLL_RH, &hcd->flags);
 	usb_hcd_poll_rh_status(hcd);
 
+	is_xhci_in_resume_state = 0;
 	return retval;
 }
 EXPORT_SYMBOL_GPL(xhci_resume);
@@ -4153,7 +4175,12 @@ int xhci_set_usb2_hardware_lpm(struct usb_hcd *hcd,
 	hlpm_addr = port_array[port_num] + PORTHLPMC;
 	field = le32_to_cpu(udev->bos->ext_cap->bmAttributes);
 
-	xhci_dbg(xhci, "%s port %d USB2 hardware LPM\n",
+#if 1    /* Modify for KTASKWBS-4690 to prevent BT/WIFI module enter LPM mode while load FW */
+	xhci_warn(xhci, "force LPM disabled\n");
+	enable = 0;
+#endif
+
+	xhci_warn(xhci, "%s port %d USB2 hardware LPM\n",
 			enable ? "enable" : "disable", port_num + 1);
 
 	if (enable) {

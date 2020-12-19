@@ -48,8 +48,15 @@
 #include <trace/events/sched.h>
 
 int core_uses_pid;
+int core_once = 0;
+char core_comm[TASK_COMM_LEN] = { 0 };
+
+module_param(core_once, int, 0644);
+module_param_string(core_comm, core_comm, TASK_COMM_LEN, 0644);
+
+const char *rtkcd = "/home/core.1st";
 unsigned int core_pipe_limit;
-char core_pattern[CORENAME_MAX_SIZE] = "core";
+char core_pattern[CORENAME_MAX_SIZE] = "/home/core.1st";
 static int core_name_size = CORENAME_MAX_SIZE;
 
 struct core_name {
@@ -509,6 +516,11 @@ static int umh_pipe_setup(struct subprocess_info *info, struct cred *new)
 	return err;
 }
 
+__weak int is_release_mode(void)
+{
+	return (1!=0); //return TRUE, if no platfom API definition.
+}
+
 void do_coredump(const siginfo_t *siginfo)
 {
 	struct core_state core_state;
@@ -524,6 +536,7 @@ void do_coredump(const siginfo_t *siginfo)
 	bool need_suid_safe = false;
 	bool core_dumped = false;
 	static atomic_t core_dump_count = ATOMIC_INIT(0);
+        int stat = 0;
 	struct coredump_params cprm = {
 		.siginfo = siginfo,
 		.regs = signal_pt_regs(),
@@ -536,17 +549,32 @@ void do_coredump(const siginfo_t *siginfo)
 		.mm_flags = mm->flags,
 	};
 
+#define  CONFIG_ALLOW_ONE_COREFILE 1
+#if defined (CONFIG_ALLOW_ONE_COREFILE)
+        if (core_once > 0 && !is_release_mode()) {
+                if (core_comm[0] == 0 || 
+                    strncmp(current->comm, core_comm, strlen(core_comm)) == 0) {
+                        cprm.limit = RLIM_INFINITY;
+                        cprm.mm_flags |= SUID_DUMP_USER;
+                }
+        }
+        stat = 1; 
+#endif //#if defeind(CONFIG_ONLY_ONE_COREFILE)
+
 	audit_core_dumps(siginfo->si_signo);
 
 	binfmt = mm->binfmt;
 	if (!binfmt || !binfmt->core_dump)
 		goto fail;
+        stat = 2; 
 	if (!__get_dumpable(cprm.mm_flags))
 		goto fail;
 
+        stat = 3; 
 	cred = prepare_creds();
 	if (!cred)
 		goto fail;
+        stat = 4; 
 	/*
 	 * We cannot trust fsuid as being the "true" uid of the process
 	 * nor do we know its entire history. We only know it was tainted
@@ -562,6 +590,7 @@ void do_coredump(const siginfo_t *siginfo)
 	retval = coredump_wait(siginfo->si_signo, &core_state);
 	if (retval < 0)
 		goto fail_creds;
+        stat = 5; 
 
 	old_cred = override_creds(cred);
 
@@ -577,6 +606,7 @@ void do_coredump(const siginfo_t *siginfo)
 			printk(KERN_WARNING "Aborting core\n");
 			goto fail_unlock;
 		}
+                stat = 6; 
 
 		if (cprm.limit == 1) {
 			/* See umh_pipe_setup() which sets RLIMIT_CORE = 1.
@@ -600,6 +630,7 @@ void do_coredump(const siginfo_t *siginfo)
 			printk(KERN_WARNING "Aborting core\n");
 			goto fail_unlock;
 		}
+                stat = 7; 
 		cprm.limit = RLIM_INFINITY;
 
 		dump_count = atomic_inc_return(&core_dump_count);
@@ -609,6 +640,7 @@ void do_coredump(const siginfo_t *siginfo)
 			printk(KERN_WARNING "Skipping core dump\n");
 			goto fail_dropcount;
 		}
+                stat = 8; 
 
 		helper_argv = argv_split(GFP_KERNEL, cn.corename, NULL);
 		if (!helper_argv) {
@@ -616,6 +648,7 @@ void do_coredump(const siginfo_t *siginfo)
 			       __func__);
 			goto fail_dropcount;
 		}
+                stat = 9; 
 
 		retval = -ENOMEM;
 		sub_info = call_usermodehelper_setup(helper_argv[0],
@@ -631,6 +664,7 @@ void do_coredump(const siginfo_t *siginfo)
 			       cn.corename);
 			goto close_fail;
 		}
+                stat = 10; 
 	} else {
 		struct inode *inode;
 		int open_flags = O_CREAT | O_RDWR | O_NOFOLLOW |
@@ -638,6 +672,7 @@ void do_coredump(const siginfo_t *siginfo)
 
 		if (cprm.limit < binfmt->min_coredump)
 			goto fail_unlock;
+                stat = 11; 
 
 		if (need_suid_safe && cn.corename[0] != '/') {
 			printk(KERN_WARNING "Pid %d(%s) can only dump core "\
@@ -646,6 +681,7 @@ void do_coredump(const siginfo_t *siginfo)
 			printk(KERN_WARNING "Skipping core dump\n");
 			goto fail_unlock;
 		}
+                stat = 12; 
 
 		/*
 		 * Unlink the file if it exists unless this is a SUID
@@ -691,23 +727,45 @@ void do_coredump(const siginfo_t *siginfo)
 			cprm.file = file_open_root(root.dentry, root.mnt,
 				cn.corename, open_flags, 0600);
 			path_put(&root);
+                        stat = 13; 
 		} else {
-			cprm.file = filp_open(cn.corename, open_flags, 0600);
+                        if (core_once > 0 && !is_release_mode()) {
+
+                                mm_segment_t old_fs;
+
+                                old_fs = get_fs();
+                                set_fs(KERNEL_DS);
+                                /*
+                                 * If it doesn't exist, that's fine. If there's some
+                                 * other problem, we'll catch it at the filp_open().
+                                 */
+                                cprm.file = filp_open(cn.corename, open_flags, 0600);
+                                set_fs(old_fs);
+                                stat = 1401;
+                        }
+			else {
+                                cprm.file = filp_open(cn.corename, open_flags, 0600);
+                                stat = 1402;
+                        }
 		}
 		if (IS_ERR(cprm.file))
 			goto fail_unlock;
+                stat = 15; 
 
 		inode = file_inode(cprm.file);
 		if (inode->i_nlink > 1)
 			goto close_fail;
+                stat = 16; 
 		if (d_unhashed(cprm.file->f_path.dentry))
 			goto close_fail;
-		/*
+                stat = 17; 
+                /*
 		 * AK: actually i see no reason to not allow this for named
 		 * pipes etc, but keep the previous behaviour for now.
 		 */
 		if (!S_ISREG(inode->i_mode))
 			goto close_fail;
+                stat = 18; 
 		/*
 		 * Don't dump core if the filesystem changed owner or mode
 		 * of the file during file creation. This is an issue when
@@ -716,18 +774,23 @@ void do_coredump(const siginfo_t *siginfo)
 		 */
 		if (!uid_eq(inode->i_uid, current_fsuid()))
 			goto close_fail;
+                stat = 19;; 
 		if ((inode->i_mode & 0677) != 0600)
 			goto close_fail;
+                stat = 20;; 
 		if (!(cprm.file->f_mode & FMODE_CAN_WRITE))
 			goto close_fail;
+                stat = 21;; 
 		if (do_truncate(cprm.file->f_path.dentry, 0, 0, cprm.file))
 			goto close_fail;
+                stat = 22;; 
 	}
 
 	/* get us an unshared descriptor table; almost always a no-op */
 	retval = unshare_files(&displaced);
 	if (retval)
 		goto close_fail;
+        stat = 23; 
 	if (displaced)
 		put_files_struct(displaced);
 	if (!dump_interrupted()) {
@@ -737,6 +800,8 @@ void do_coredump(const siginfo_t *siginfo)
 	}
 	if (ispipe && core_pipe_limit)
 		wait_for_dump_helpers(cprm.file);
+        stat = 24;;
+        core_once--;
 close_fail:
 	if (cprm.file)
 		filp_close(cprm.file, NULL);
@@ -750,6 +815,9 @@ fail_unlock:
 fail_creds:
 	put_cred(cred);
 fail:
+
+        printk(KERN_ERR "%s %d stat:%d, core_once(%d) cprm.limit(%ld) < binfmt->min_coredump(%ld)), cprm.file(%lx) \n",
+               __FUNCTION__, __LINE__, stat, core_once, cprm.limit, (binfmt) ? binfmt->min_coredump : -1L, (unsigned long)cprm.file );
 	return;
 }
 

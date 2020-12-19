@@ -13,6 +13,7 @@
 
 #include <linux/cpufreq.h>
 #include <linux/module.h>
+extern unsigned int rtk_get_boot_freq(void);
 
 /*********************************************************************
  *                     FREQUENCY TABLE HELPERS                       *
@@ -36,6 +37,7 @@ EXPORT_SYMBOL_GPL(policy_has_boost_freq);
 int cpufreq_frequency_table_cpuinfo(struct cpufreq_policy *policy,
 				    struct cpufreq_frequency_table *table)
 {
+        static int init_max=1;
 	struct cpufreq_frequency_table *pos;
 	unsigned int min_freq = ~0;
 	unsigned int max_freq = 0;
@@ -56,7 +58,13 @@ int cpufreq_frequency_table_cpuinfo(struct cpufreq_policy *policy,
 	}
 
 	policy->min = policy->cpuinfo.min_freq = min_freq;
-	policy->max = policy->cpuinfo.max_freq = max_freq;
+//      policy->max = policy->cpuinfo.max_freq = max_freq;
+        policy->cpuinfo.max_freq = max_freq;
+
+        if(init_max){
+                policy->max=rtk_get_boot_freq();
+                init_max=0;
+        }
 
 	if (policy->min == ~0)
 		return -EINVAL;

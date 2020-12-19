@@ -27,6 +27,7 @@
 #include "tick-internal.h"
 #include "ntp_internal.h"
 #include "timekeeping_internal.h"
+#include <asm/cacheflush.h>
 
 #define TK_CLEAR_NTP		(1 << 0)
 #define TK_MIRROR		(1 << 1)
@@ -1959,6 +1960,13 @@ struct timespec64 get_monotonic_coarse64(void)
 	return now;
 }
 
+#ifdef CONFIG_REALTEK_LOGBUF
+__attribute__((weak)) void update_rtdlog_timestamp(void)
+{
+        return;
+}
+#endif
+
 /*
  * Must hold jiffies_lock
  */
@@ -1966,6 +1974,11 @@ void do_timer(unsigned long ticks)
 {
 	jiffies_64 += ticks;
 	calc_global_load(ticks);
+
+#ifdef CONFIG_REALTEK_LOGBUF
+        update_rtdlog_timestamp();
+#endif
+
 }
 
 /**

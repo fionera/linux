@@ -614,6 +614,12 @@ static int scsi_probe_lun(struct scsi_device *sdev, unsigned char *inq_result,
 				    (sshdr.ascq == 0))
 					continue;
 			}
+
+			/* For some scsi devices that may reply "fail (0x01)" in Command Status Wrapper,
+			 * we give them another chance. */
+			if (host_byte(result) != DID_BAD_TARGET)
+				continue;
+
 		} else {
 			/*
 			 * if nothing was transferred, we try

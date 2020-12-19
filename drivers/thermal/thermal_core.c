@@ -49,6 +49,9 @@ MODULE_AUTHOR("Zhang Rui");
 MODULE_DESCRIPTION("Generic thermal management sysfs support");
 MODULE_LICENSE("GPL v2");
 
+#define THERMAL_VALUE(A) \
+	(A < 0 ? 0 : (40+((A-40)*10/8)))
+
 static DEFINE_IDR(thermal_tz_idr);
 static DEFINE_IDR(thermal_cdev_idr);
 static DEFINE_MUTEX(thermal_idr_lock);
@@ -445,7 +448,7 @@ static void handle_critical_trips(struct thermal_zone_device *tz,
 	if (trip_type == THERMAL_TRIP_CRITICAL) {
 		dev_emerg(&tz->device,
 			  "critical temperature reached(%d C),shutting down\n",
-			  tz->temperature / 1000);
+			  THERMAL_VALUE(tz->temperature / 1000));
 		orderly_poweroff(true);
 	}
 }
@@ -520,6 +523,7 @@ exit:
 }
 EXPORT_SYMBOL_GPL(thermal_zone_get_temp);
 
+
 static void update_temperature(struct thermal_zone_device *tz)
 {
 	int temp, ret;
@@ -541,10 +545,10 @@ static void update_temperature(struct thermal_zone_device *tz)
 	trace_thermal_temperature(tz);
 	if (tz->last_temperature == THERMAL_TEMP_INVALID)
 		dev_dbg(&tz->device, "last_temperature N/A, current_temperature=%d\n",
-			tz->temperature);
+			THERMAL_VALUE(tz->temperature/1000));
 	else
 		dev_dbg(&tz->device, "last_temperature=%d, current_temperature=%d\n",
-			tz->last_temperature, tz->temperature);
+			THERMAL_VALUE(tz->last_temperature/1000), THERMAL_VALUE(tz->temperature/1000));
 }
 
 static void thermal_zone_device_reset(struct thermal_zone_device *tz)
@@ -2156,6 +2160,10 @@ static int __init thermal_register_governors(void)
 {
 	int result;
 
+	result=thermal_gov_rtk_thermal_register();
+	if (result)
+		return result;
+	
 	result = thermal_gov_step_wise_register();
 	if (result)
 		return result;
@@ -2177,6 +2185,7 @@ static int __init thermal_register_governors(void)
 
 static void thermal_unregister_governors(void)
 {
+	thermal_gov_rtk_thermal_unregister();
 	thermal_gov_step_wise_unregister();
 	thermal_gov_fair_share_unregister();
 	thermal_gov_bang_bang_unregister();

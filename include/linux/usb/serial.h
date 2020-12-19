@@ -110,6 +110,7 @@ struct usb_serial_port {
 
 	struct async_icount	icount;
 	int			tx_bytes;
+	int			disable_printk;
 
 	unsigned long		flags;
 	wait_queue_head_t	write_wait;

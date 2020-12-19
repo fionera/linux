@@ -549,6 +549,22 @@ static void stmmac_get_strings(struct net_device *dev, u32 stringset, u8 *data)
 	}
 }
 
+#ifdef CONFIG_ARCH_LG1K
+
+static void stmmac_get_wol(struct net_device *dev, struct ethtool_wolinfo *wol)
+{
+	struct stmmac_priv *priv = netdev_priv(dev);
+	phy_ethtool_get_wol(priv->phydev, wol);
+}
+
+static int stmmac_set_wol(struct net_device *dev, struct ethtool_wolinfo *wol)
+{
+	struct stmmac_priv *priv = netdev_priv(dev);
+	return phy_ethtool_set_wol(priv->phydev, wol);
+}
+
+#else
+
 /* Currently only support WOL through Magic packet. */
 static void stmmac_get_wol(struct net_device *dev, struct ethtool_wolinfo *wol)
 {
@@ -594,6 +610,8 @@ static int stmmac_set_wol(struct net_device *dev, struct ethtool_wolinfo *wol)
 
 	return 0;
 }
+
+#endif	/* CONFIG_ARCH_LG1K */
 
 static int stmmac_ethtool_op_get_eee(struct net_device *dev,
 				     struct ethtool_eee *edata)

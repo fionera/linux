@@ -30,5 +30,12 @@ obj-$(CONFIG_RTLBTCOEXIST)	+= btcoexist/
 obj-$(CONFIG_RTL8723_COMMON)	+= rtl8723com/
 obj-$(CONFIG_RTL8821AE)		+= rtl8821ae/
 obj-$(CONFIG_RTL8192EE)		+= rtl8192ee/
+obj-$(CONFIG_RTL8192DU)		+= rtl8192du/
+#obj-$(CONFIG_RTL8192EU)		+= rtl8192eu/
+obj-$(CONFIG_RTL8188EU)		+= rtl8188eu/
+#obj-$(CONFIG_RTL8188FU)		+= rtl8188fu/
+#obj-$(CONFIG_RTL8812AU)		+= rtl8812au/
+#obj-$(CONFIG_RTL8814AU)		+= rtl8814au/
+#obj-$(CONFIG_RTL8723BU)     += rtl8723bu/
 
 ccflags-y += -D__CHECK_ENDIAN__

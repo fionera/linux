@@ -27,11 +27,13 @@
 #include <asm/cputype.h>
 #include <asm/io.h>
 #include <asm/smp_plat.h>
+#include <mach/common.h>
 
 extern void secondary_holding_pen(void);
+void arch_send_wakeup_ipi_mask(const struct cpumask *mask);
 volatile unsigned long secondary_holding_pen_release = INVALID_HWID;
 
-static phys_addr_t cpu_release_addr[NR_CPUS];
+static phys_addr_t cpu_release_addr[NR_CPUS] = {0x500UL, 0x508UL, 0x510UL, 0x518UL};
 
 /*
  * Write secondary_holding_pen_release in a way that is guaranteed to be
@@ -45,6 +47,7 @@ static void write_pen_release(u64 val)
 	unsigned long size = sizeof(secondary_holding_pen_release);
 
 	secondary_holding_pen_release = val;
+	pr_info("addr:%lx %lx %llx\n",(unsigned long)start,secondary_holding_pen_release,val);
 	__flush_dcache_area(start, size);
 }
 
@@ -75,6 +78,8 @@ static int smp_spin_table_cpu_prepare(unsigned int cpu)
 {
 	__le64 __iomem *release_addr;
 
+	smp_spin_table_cpu_init(cpu);
+
 	if (!cpu_release_addr[cpu])
 		return -ENODEV;
 
@@ -84,8 +89,14 @@ static int smp_spin_table_cpu_prepare(unsigned int cpu)
 	 * existing linear mapping, we can use it to cover both cases. In
 	 * either case the memory will be MT_NORMAL.
 	 */
-	release_addr = ioremap_cache(cpu_release_addr[cpu],
-				     sizeof(*release_addr));
+#if 0
+	release_addr = ioremap(cpu_release_addr[cpu],
+			       sizeof(*release_addr));
+#else
+	release_addr = phys_to_virt(cpu_release_addr[cpu]);
+	BUG_ON(!release_addr);
+#endif	
+	
 	if (!release_addr)
 		return -ENOMEM;
 
@@ -96,6 +107,7 @@ static int smp_spin_table_cpu_prepare(unsigned int cpu)
 	 * boot-loader's endianess before jumping. This is mandated by
 	 * the boot protocol.
 	 */
+	pr_info("pen: %llx %lx\n",__pa(secondary_holding_pen),(unsigned long)release_addr);
 	writeq_relaxed(__pa(secondary_holding_pen), release_addr);
 	__flush_dcache_area((__force void *)release_addr,
 			    sizeof(*release_addr));
@@ -104,25 +116,76 @@ static int smp_spin_table_cpu_prepare(unsigned int cpu)
 	 * Send an event to wake up the secondary CPU.
 	 */
 	sev();
-
-	iounmap(release_addr);
+//	iounmap(release_addr);
 
 	return 0;
 }
 
+
 static int smp_spin_table_cpu_boot(unsigned int cpu)
 {
+	extern bool reserve_boot_memory;
 	/*
 	 * Update the pen release flag.
 	 */
+	write_pen_release(-1);
+ 	
+	printk("cpu_boot: secondary_holding_pen_release(0x%x) logic_cpu(0x%x)\n",
+	       secondary_holding_pen_release, cpu_logical_map(cpu));
+	smp_spin_table_cpu_prepare(cpu);
 	write_pen_release(cpu_logical_map(cpu));
 
 	/*
 	 * Send an event, causing the secondaries to read pen_release.
 	 */
 	sev();
+	arch_send_wakeup_ipi_mask(cpumask_of(cpu));
 
 	return 0;
+}
+
+static void smp_spin_table_cpu_die(unsigned int cpu)
+{
+	__le64 __iomem *release_addr;
+
+	smp_spin_table_cpu_init(cpu);
+
+	if (!cpu_release_addr[cpu])
+		return -ENODEV;
+
+	/*
+	 * The cpu-release-addr may or may not be inside the linear mapping.
+	 * As ioremap_cache will either give us a new mapping or reuse the
+	 * existing linear mapping, we can use it to cover both cases. In
+	 * either case the memory will be MT_NORMAL.
+	 */
+#if 0
+	release_addr = ioremap(cpu_release_addr[cpu],
+			       sizeof(*release_addr));
+#else
+	release_addr = phys_to_virt(cpu_release_addr[cpu]);
+	BUG_ON(!release_addr);
+#endif	
+	
+	if (!release_addr)
+		return -ENOMEM;
+
+	/*
+	 * We write the release address as LE regardless of the native
+	 * endianess of the kernel. Therefore, any boot-loaders that
+	 * read this address need to convert this address to the
+	 * boot-loader's endianess before jumping. This is mandated by
+	 * the boot protocol.
+	 */
+	writeq_relaxed(-1UL, release_addr);
+	__flush_dcache_area((__force void *)release_addr,
+			    sizeof(*release_addr));
+
+//	arch_send_wakeup_ipi_mask(cpumask_of(cpu));
+	
+//	iounmap(release_addr);
+
+	platform_cpu_die(cpu);
 }
 
 const struct cpu_operations smp_spin_table_ops = {
@@ -130,4 +193,9 @@ const struct cpu_operations smp_spin_table_ops = {
 	.cpu_init	= smp_spin_table_cpu_init,
 	.cpu_prepare	= smp_spin_table_cpu_prepare,
 	.cpu_boot	= smp_spin_table_cpu_boot,
+#ifdef CONFIG_HOTPLUG_CPU
+        .cpu_die            = smp_spin_table_cpu_die,
+        .cpu_disable        = platform_cpu_disable,
+        .cpu_kill           = platform_cpu_kill,
+#endif
 };

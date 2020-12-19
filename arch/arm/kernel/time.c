@@ -31,6 +31,7 @@
 #include <asm/mach/time.h>
 #include <asm/stacktrace.h>
 #include <asm/thread_info.h>
+#include <mach/platform.h>
 
 #if defined(CONFIG_RTC_DRV_CMOS) || defined(CONFIG_RTC_DRV_CMOS_MODULE) || \
     defined(CONFIG_NVRAM) || defined(CONFIG_NVRAM_MODULE)
@@ -114,12 +115,18 @@ int __init register_persistent_clock(clock_access_fn read_boot,
 
 void __init time_init(void)
 {
-	if (machine_desc->init_time) {
+	unsigned int ver = get_ic_version();
+
+	if (machine_desc->init_time && (ver < VERSION_C)) {
 		machine_desc->init_time();
 	} else {
 #ifdef CONFIG_COMMON_CLK
 		of_clk_init(NULL);
 #endif
 		clocksource_probe();
+#ifdef CONFIG_ARCH_RTK288O
+		if(machine_desc->init_time)
+			machine_desc->init_time();
+#endif
 	}
 }

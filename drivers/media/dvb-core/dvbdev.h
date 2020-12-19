@@ -48,6 +48,7 @@
 #define DVB_DEVICE_CA         6
 #define DVB_DEVICE_NET        7
 #define DVB_DEVICE_OSD        8
+#define DVB_DEVICE_ACAS       9
 
 #define DVB_DEFINE_MOD_OPT_ADAPTER_NR(adapter_nr) \
 	static short adapter_nr[] = \
@@ -142,6 +143,10 @@ struct dvb_device {
 	wait_queue_head_t	  wait_queue;
 	/* don't really need those !? -- FIXME: use video_usercopy  */
 	int (*kernel_ioctl)(struct file *file, unsigned int cmd, void *arg);
+#ifdef CONFIG_COMPAT
+	int (*kernel_compat_ioctl)(struct file *file, unsigned int cmd,
+				   void *arg);
+#endif
 
 	/* Needed for media controller register/unregister */
 #if defined(CONFIG_MEDIA_CONTROLLER_DVB)
@@ -201,6 +206,13 @@ int dvb_register_device(struct dvb_adapter *adap,
  */
 void dvb_unregister_device(struct dvb_device *dvbdev);
 
+/**
+ * dvb_find_adapter - Finds a DVB adapter
+ *
+ * @num:    dvb_adapter number
+ */
+struct dvb_adapter *dvb_find_adapter(int num);
+
 #ifdef CONFIG_MEDIA_CONTROLLER_DVB
 void dvb_create_media_graph(struct dvb_adapter *adap);
 static inline void dvb_register_media_controller(struct dvb_adapter *adap,
@@ -218,6 +230,10 @@ int dvb_generic_open (struct inode *inode, struct file *file);
 int dvb_generic_release (struct inode *inode, struct file *file);
 long dvb_generic_ioctl (struct file *file,
 			      unsigned int cmd, unsigned long arg);
+#ifdef CONFIG_COMPAT
+long dvb_generic_compat_ioctl(struct file *file,
+			      unsigned int cmd, unsigned long arg);
+#endif
 
 /* we don't mess with video_usercopy() any more,
 we simply define out own dvb_usercopy(), which will hopefully become

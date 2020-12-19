@@ -12,6 +12,9 @@
 #define KASAN_KMALLOC_FREE      0xFB  /* object was freed (kmem_cache_free/kfree) */
 #define KASAN_GLOBAL_REDZONE    0xFA  /* redzone for global variable */
 
+#define KASAN_PER_PAGE_BYPASS	0xFF  /* page should be checked by per-byte shadow */
+#define KASAN_PER_PAGE_FREE	0xFE  /* page was freed */
+
 /*
  * Stack redzone shadow values
  * (Those are compiler's ABI, don't change them)
@@ -57,17 +60,30 @@ struct kasan_global {
 #endif
 };
 
-static inline const void *kasan_shadow_to_mem(const void *shadow_addr)
-{
-	return (void *)(((unsigned long)shadow_addr - KASAN_SHADOW_OFFSET)
-		<< KASAN_SHADOW_SCALE_SHIFT);
-}
+extern unsigned long kasan_zero_page_pfn;
+extern unsigned long kasan_black_page_pfn;
+
+#ifdef HAVE_KASAN_PER_PAGE_SHADOW
+void arch_kasan_map_shadow(unsigned long s, unsigned long e);
+bool arch_kasan_recheck_prepare(unsigned long addr, size_t size);
+
+static inline bool kasan_pshadow_inited(void) { return true; }
+
+#else
+static inline void arch_kasan_map_shadow(unsigned long s, unsigned long e) { }
+static inline bool arch_kasan_recheck_prepare(unsigned long addr,
+		size_t size) { return false; }
+
+static inline bool kasan_pshadow_inited(void) { return false; }
+#endif
 
 static inline bool kasan_report_enabled(void)
 {
 	return !current->kasan_depth;
 }
 
+void __kasan_report(unsigned long addr, size_t size,
+		bool is_write, unsigned long ip);
 void kasan_report(unsigned long addr, size_t size,
 		bool is_write, unsigned long ip);
 

@@ -1,0 +1,210 @@
+menu "EKP (enhanced kernel protection) for ARM architecture"
+
+config EKP
+	bool "Enable EKP security feature"
+	depends on (ARM || ARM64) && HAVE_ARM_SMCCC && MMU
+	help
+	  This option enables EKP feature for ARM architecture. This is
+	  to protect MMU page tables for mitigating malicious attacks
+	  to detour the kernel memory access permissions such as read-only
+	  for kernel .text/.rodata or PXN (privilege execute-never) for
+	  user address spaces.
+
+config EKP_FORCE_ENABLE
+	bool "Enable EKP forcedly"
+	depends on EKP
+	default y
+	help
+	  Say Y if you want to enable EKP forcedly no matter what value
+	  is set to kernel parameter "ekp_enabled".
+
+config EKP_HISE_FIRMWARE
+	string "Specify the location of HISE firmware binary"
+	depends on EKP
+	default "drivers/staging/ekp/hise.bin"
+	help
+	  This option allows EKP-HISE firmware 'blobs' to be built into
+	  the kernel. If you don't specify the location of HISE firmware
+	  binary, EKP won't be enabled.
+
+choice
+	prompt "Memory protection model"
+	depends on EKP
+	default EKP_EL1_S2_PROT
+	help
+	  Select memory protection model for protecting resources
+
+	config EKP_EL1_S2_PROT
+		bool "Use EL1 stage 2 translation"
+	config EKP_ROMEMPOOL
+		bool "Use read-only memory pool"
+endchoice
+
+if EKP_ROMEMPOOL
+menu "Read-only Memory Pool"
+
+config EKP_ROMEMPOOL_SIZE
+	hex "Size of read-only memory pool"
+	depends on EKP_ROMEMPOOL
+	default 0x1000000
+	help
+	  This option defines how much memory is reserved for read-only
+	  memory pool.
+
+config EKP_ROMEMPOOL_USE_HIGH_ORDER_ALLOCATION
+	bool "Use high-order allocation to expand the pool"
+	depends on EKP_ROMEMPOOL
+
+config EKP_ROMEMPOOL_USE_CMA_ALLOCATION
+	bool "Use CMA to expand the pool"
+	depends on EKP_ROMEMPOOL && CMA
+
+config EKP_ROMEMPOOL_CMA_SIZE
+	hex "Size of read-only memory pool from CMA reserved area"
+	depends on EKP_ROMEMPOOL_USE_CMA_ALLOCATION
+	default 0x1000000
+
+config EKP_ROMEMPOOL_ALLOW_WRITABLE_MEMORY
+	bool "Allow to allocate writable memory when the pool is out-of-memory"
+	depends on EKP_ROMEMPOOL
+	default n
+
+config EKP_ROMEMPOOL_DEBUGFS
+	bool "Enable debugfs entry for romempool"
+	depends on EKP_ROMEMPOOL
+	default n
+
+endmenu
+endif
+
+config EKP_ARM_V7
+	bool "Support ARMv7 (or ARMv8 AArch32) architecture"
+	depends on EKP && CPU_V7 && !ARM_LPAE && ARM_KERNMEM_PERMS
+	help
+	  If you want to use EKP feature on ARMv7 (or ARMv8 AArch32)
+	  architecture, then say Y. Note that EKP doesn't support ARMv7
+	  LPAE for now.
+
+config EKP_ARM_V8
+	bool "Support ARMv8 AArch64 architecture"
+	depends on EKP && ARM64 && !ARM64_HW_AFDBM && ARM64_4K_PAGES && ARM64_VA_BITS_39 && DEBUG_RODATA
+	help
+	  If you want to use EKP feature on ARMv8 AArch64 architecture,
+	  then say Y. Note that EKP now only supports 4K paging and
+	  39-bits virtual address space.
+
+config EKP_VIOLATION_FAULT_NOTIFIER
+	bool "Use Fault Notifier to pass the reason of EKP violation"
+	depends on EKP && FAULT_NOTIFIER
+	default y
+	help
+	  If you want to pass the reason of EKP violation to the Fault Manager
+	  using Fault Notifier, then say Y.
+
+config EKP_CRED_PROTECTION
+	bool "Make task credentials read-only"
+	depends on EKP
+	default n
+	help
+	  Credential is a key structure which has lots of security informations
+	  such as uid/gid and security capabilities. When this option is enabled,
+	  EKP makes credentials read-only to prevent any modifications from
+	  malicious attacks.
+
+config EKP_MODULE_PROTECTION
+	bool "LKM (linux kernel module) protection"
+	depends on EKP && MODULES && DEBUG_SET_MODULE_RONX
+	depends on !KPROBES && !BPF_JIT
+	default n
+	help
+	  This option applies W^X mappings on LKM memory spaces forcedly.
+
+config SECURITY_EKP
+	bool "Enable EKP security module"
+	depends on EKP && SECURITY
+	default n
+	help
+	  This option enables EKP security module for hooking required
+	  security functions to apply EKP policies.
+
+config SECURITY_EKP_MODULE_VALIDATION
+	bool "Allow to load validated kernel module only"
+	depends on SECURITY_EKP
+	default n
+	help
+	  This option allows to load validated kernel module only.
+
+config SECURITY_EKP_ROOT_RESTRICTION
+	bool "Restrict root privilege on particular users"
+	depends on SECURITY_EKP
+	default n
+	help
+	  This option restricts root privilege on particular users, so they
+	  cannot get root privilege even though they have an authority to
+	  do that.
+
+config SECURITY_EKP_ROOT_RESTRICTION_LOG
+	bool "Show useful logs when a prisoner tries to break out of the jail"
+	depends on SECURITY_EKP_ROOT_RESTRICTION
+	default n
+
+config EKP_CMD_COUNT
+	bool "Monitoring the count of EKP commands"
+	depends on EKP
+	default n
+
+config EKP_DEBUGFS
+	bool "Create debugfs entries for debugging/testing EKP features"
+	depends on EKP
+	default y
+
+config EKP_DEBUGFS_HISE_INFO
+	bool "Allow to show debug information of HISE F/W"
+	depends on EKP_DEBUGFS
+	default n
+
+config EKP_DEBUGFS_KERNEL_INFO
+	bool "Allow to show debug information of kernel"
+	depends on EKP_DEBUGFS
+	select ARM_PTDUMP if EKP_ARM_V7
+	select ARM64_PTDUMP if EKP_ARM_V8
+	default n
+
+config EKP_DEBUGFS_TEST_HELPERS
+	bool "Allow to test EKP features"
+	depends on EKP_DEBUGFS
+	default n
+	help
+	  This option creates debugfs entries for testing EKP features.
+
+config EKP_DEBUGFS_TEST_HELPERS_FOR_HACKING
+	bool "Allow to hack EKP (!! SECURITY ALERT !!)"
+	depends on EKP_DEBUGFS_TEST_HELPERS
+	default n
+	help
+	  This option make some entries which are some kind of helpers for
+	  hacking EKP and target system.
+
+	  You SHOULD __NOT__ enable this on the production kernel.
+
+config EKP_DEBUGFS_TEST_HELPERS_FOR_PERFORMANCE
+	bool "Allow to measure EKP performance impacts (DEVELOPMENT)"
+	depends on EKP_DEBUGFS_TEST_HELPERS
+	default n
+	help
+	  This option make some entries which are for measuring performance
+	  impacts when EKP is running. This option invokes some unnecessary
+	  functions to measure performance numbers, so you would better to
+	  disable this on the production kernel.
+
+	  If unsure, juse set N.
+
+config EKP_ALLOC_DEBUG
+	bool "Debug ekp memory allocation"
+	depends on EKP_EL1_S2_PROT
+	default n
+	help
+	  This option helps us to find out whether EKP read-only memory
+	  framework works correctly.
+
+endmenu

@@ -68,6 +68,8 @@ extern void early_init_fdt_reserve_self(void);
 extern void early_init_dt_add_memory_arch(u64 base, u64 size);
 extern int early_init_dt_reserve_memory_arch(phys_addr_t base, phys_addr_t size,
 					     bool no_map);
+extern int early_init_dt_reserve_memory_arch_ext(phys_addr_t base, phys_addr_t size,
+					     bool no_map, bool cma_ban, int ban_type, int is_sub_region);
 extern void * early_init_dt_alloc_memory_arch(u64 size, u64 align);
 extern u64 dt_mem_next_cell(int s, const __be32 **cellp);
 

@@ -36,9 +36,23 @@
 void *module_alloc(unsigned long size)
 {
 	void *p;
+	pgprot_t prot;
+
+	/*
+	 * EKP applies W^X mappings on module area, so default access permission
+	 * is RW/XN. After loading all module sections to the pages allocated,
+	 * following access permission will be configured on those pages.
+	 * - .text: RO/X
+	 * - .rodata: RO/XN
+	 * - .data: RW/XN
+	 */
+	if (IS_ENABLED(CONFIG_EKP_MODULE_PROTECTION) && ekp_initialized())
+		prot = PAGE_KERNEL;
+	else
+		prot = PAGE_KERNEL_EXEC;
 
 	p = __vmalloc_node_range(size, MODULE_ALIGN, MODULES_VADDR, MODULES_END,
-				GFP_KERNEL, PAGE_KERNEL_EXEC, 0,
+				GFP_KERNEL, prot, 0,
 				NUMA_NO_NODE, __builtin_return_address(0));
 
 	if (p && (kasan_module_alloc(p, size) < 0)) {

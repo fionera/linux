@@ -427,6 +427,11 @@
 #define __ARM_NR_usr26			(__ARM_NR_BASE+3)
 #define __ARM_NR_usr32			(__ARM_NR_BASE+4)
 #define __ARM_NR_set_tls		(__ARM_NR_BASE+5)
+#if defined(CONFIG_RTK_NON_TEMPORAL)
+#define __ARM_NR_nontemp_begin		(__ARM_NR_BASE+6)
+#define __ARM_NR_nontemp_end		(__ARM_NR_BASE+7)
+#endif //#if defined(CONFIG_RTK_NON_TEMPORAL)
+
 
 /*
  * The following syscalls are obsolete and no longer available for EABI.

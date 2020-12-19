@@ -4,6 +4,7 @@ config ARM
 	select ARCH_HAS_ATOMIC64_DEC_IF_POSITIVE
 	select ARCH_HAS_ELF_RANDOMIZE
 	select ARCH_HAS_TICK_BROADCAST if GENERIC_CLOCKEVENTS_BROADCAST
+	select ARCH_HAS_UBSAN_SANITIZE_ALL
 	select ARCH_HAVE_CUSTOM_GPIO_H
 	select ARCH_HAS_GCOV_PROFILE_ALL
 	select ARCH_MIGHT_HAVE_PC_PARPORT
@@ -37,6 +38,7 @@ config ARM
 	select HAVE_ARCH_KGDB if !CPU_ENDIAN_BE32
 	select HAVE_ARCH_SECCOMP_FILTER if (AEABI && !OABI_COMPAT)
 	select HAVE_ARCH_TRACEHOOK
+	select HAVE_ARM_SMCCC if CPU_V7
 	select HAVE_BPF_JIT
 	select HAVE_CC_STACKPROTECTOR
 	select HAVE_CONTEXT_TRACKING
@@ -46,7 +48,7 @@ config ARM
 	select HAVE_DMA_ATTRS
 	select HAVE_DMA_CONTIGUOUS if MMU
 	select HAVE_DYNAMIC_FTRACE if (!XIP_KERNEL) && !CPU_ENDIAN_BE32
-	select HAVE_EFFICIENT_UNALIGNED_ACCESS if (CPU_V6 || CPU_V6K || CPU_V7) && MMU
+	select HAVE_EFFICIENT_UNALIGNED_ACCESS if (CPU_V6 || CPU_V6K || CPU_V7) && MMU && !KASAN
 	select HAVE_FTRACE_MCOUNT_RECORD if (!XIP_KERNEL)
 	select HAVE_FUNCTION_GRAPH_TRACER if (!THUMB2_KERNEL)
 	select HAVE_FUNCTION_TRACER if (!XIP_KERNEL)
@@ -73,16 +75,17 @@ config ARM
 	select HAVE_SYSCALL_TRACEPOINTS
 	select HAVE_UID16
 	select HAVE_VIRT_CPU_ACCOUNTING_GEN
+	select HAVE_ARCH_KASAN
 	select IRQ_FORCED_THREADING
 	select MODULES_USE_ELF_REL
 	select NO_BOOTMEM
 	select OF_EARLY_FLATTREE if OF
-	select OF_RESERVED_MEM if OF
 	select OLD_SIGACTION
 	select OLD_SIGSUSPEND3
 	select PERF_USE_VMALLOC
 	select RTC_LIB
 	select SYS_SUPPORTS_APM_EMULATION
+	select ARM_HAS_SG_CHAIN
 	# Above selects are sorted alphabetically; please add new ones
 	# according to that.  Thanks.
 	help
@@ -506,6 +509,47 @@ config ARCH_IXP4XX
 	help
 	  Support for Intel's IXP4XX (XScale) family of processors.
 
+config ARCH_LG1K
+	bool "LGE Ltd LG1xxx-based boards"
+	depends on MMU
+	select ARCH_HAS_CPUFREQ
+	select ARCH_HAS_OPP
+	select ARCH_HAS_HOLES_MEMORYMODEL
+	select ARCH_REQUIRE_GPIOLIB
+	select ARCH_SPARSEMEM_ENABLE
+	select ARM_AMBA
+	select ARM_ARCH_TIMER
+	select ARM_GIC
+	select ARM_GIC_IRQ_IDMAP
+	select ARM_HAS_SG_CHAIN
+	select ARM_TIMER_SP804
+	select CLKDEV_LOOKUP
+	select COMMON_CLK
+	select COMMON_CLK_LG1K
+	select COMMON_CLK_LG1313
+	select CPU_V7
+	select GENERIC_CLOCKEVENTS
+	select HAVE_ARM_SCU if SMP
+	select HAVE_ARM_TWD if SMP
+	select HAVE_CLK
+	select HAVE_SMP
+	select HOTPLUG_CPU if SMP
+	select LG1K_PMS if SMP
+	select MIGHT_HAVE_CACHE_L2X0
+	select NEED_MACH_MEMORY_H
+	select PINCTRL
+	select PINMUX
+	select REGULATOR if CPU_FREQ
+	select REGULATOR_GPIO if CPU_FREQ
+	select REGULATOR_LG1K if CPU_FREQ
+	select SPARSE_IRQ
+	select USB_ARCH_HAS_EHCI
+	select USB_ARCH_HAS_OHCI
+	select USB_ARCH_HAS_XHCI
+	select USE_OF
+	help
+	  This enables support for the LG Electronics Ltd LG1xxx-based boards.
+
 config ARCH_DOVE
 	bool "Marvell Dove"
 	select ARCH_REQUIRE_GPIOLIB
@@ -741,6 +785,29 @@ config ARCH_OMAP1
 	help
 	  Support for older TI OMAP1 (omap7xx, omap15xx or omap16xx)
 
+# RTK_patch: add our machine configs
+config ARCH_RTK288O
+        bool "Realtek 288o boards"
+        select SYS_HAS_EARLY_PRINTK
+        select CPU_SUPPORTS_32BIT_KERNEL
+        select SYS_SUPPORTS_32BIT_KERNEL
+        select CPU_V7
+	select ARM_GIC_V3
+        select GENERIC_CLOCKEVENTS
+        select NEED_MACH_IO_H
+        select HAVE_SMP
+        select HAVE_ARM_SCU
+        select COMMON_CLK if SMP
+        select IO_36
+        select ARCH_HAS_OPP if REALTEK_OF
+        select PM_OPP if REALTEK_OF
+        select HAVE_CLK if REALTEK_OF
+        select COMMON_CLK if REALTEK_OF
+        select RTK_KDRIVER_SUPPORT
+        select RTK_NON_TEMPORAL
+        help
+                This enables support for the Realtek 288o based boards.
+
 endchoice
 
 menu "Multiple platform selection"
@@ -938,6 +1005,27 @@ source "arch/arm/mach-w90x900/Kconfig"
 source "arch/arm/mach-zx/Kconfig"
 
 source "arch/arm/mach-zynq/Kconfig"
+
+# RTK_patch: add our machine's Kconfig
+source "arch/arm/mach-rtd288o/Kconfig"
+
+menu "Customer"
+choice
+	prompt "Customer Build"
+	default CUSTOMER_TV001
+
+config CUSTOMER_TV001
+	bool "tv001"
+	help
+	  build for tv001.
+
+config CUSTOMER_TV006
+	bool "tv006"
+	help
+	  build for tv006.
+
+endchoice
+endmenu
 
 # ARMv7-M architecture
 config ARCH_EFM32
@@ -1463,8 +1551,15 @@ config PAGE_OFFSET
 	default PHYS_OFFSET if !MMU
 	default 0x40000000 if VMSPLIT_1G
 	default 0x80000000 if VMSPLIT_2G
-	default 0xB0000000 if VMSPLIT_3G_OPT
+	default 0xA0000000 if VMSPLIT_3G_OPT
 	default 0xC0000000
+
+config KASAN_SHADOW_OFFSET
+	hex
+	default 0x1f000000 if VMSPLIT_1G
+	default 0x5f000000 if VMSPLIT_2G
+	default 0x8f000000 if VMSPLIT_3G_OPT
+	default 0x9f000000
 
 config NR_CPUS
 	int "Maximum number of CPUs (2-32)"
@@ -1504,6 +1599,7 @@ config ARCH_NR_GPIO
 	default 352 if ARCH_VT8500
 	default 288 if ARCH_ROCKCHIP
 	default 264 if MACH_H4700
+	default 144 if ARCH_LG1K
 	default 0
 	help
 	  Maximum number of GPIOs in the system.
@@ -1655,6 +1751,15 @@ config ARCH_SELECT_MEMORY_MODEL
 config HAVE_ARCH_PFN_VALID
 	def_bool ARCH_HAS_HOLES_MEMORYMODEL || !SPARSEMEM
 
+config ARCH_MEMORY_PROBE
+        def_bool ARCH_SPARSEMEM_ENABLE
+
+config ARCH_ENABLE_MEMORY_HOTPLUG
+        def_bool ARCH_SPARSEMEM_ENABLE
+
+config ARCH_ENABLE_MEMORY_HOTREMOVE
+        def_bool ARCH_SPARSEMEM_ENABLE
+
 config HAVE_GENERIC_RCU_GUP
 	def_bool y
 	depends on ARM_LPAE
@@ -1686,6 +1791,35 @@ config HIGHPTE
 	  precious low memory, eventually leading to low memory being
 	  consumed by page tables.  Setting this option will allow
 	  user-space 2nd level page tables to reside in high memory.
+
+config ZONE_ZRAM
+        bool "Reserve a specific memory zone for ZRAM usage"
+        depends on HIGHMEM
+        default y
+        help
+          If there is poor bandwidth memory region, we would like to
+          allocate ZRAM pages in that memory region and avoid other
+          pages to be allocated in that memory region.
+          So we create a new memory zone to achieve this.
+
+config ZONE_ZRAM_HAS_SIZE
+        bool "Get zone zram size"
+        depends on ZONE_ZRAM
+        default y
+        help
+          zone_zram only apply for non-swap case, and calculate
+          real zone_zram size.
+          Say y if zone_zram size is calculated.
+          Say n if you want to force zone_zram size as 0
+
+config ZONE_ZRAM_DISABLE_FALLBACK
+        bool "Only allow zRAM to use zone ZRAM"
+        depends on ZONE_ZRAM
+        default n
+        help
+          Only zRAM usage is allowed to use zone ZRAM.
+          Say y if only zRAM can be allocated into zone ZRAM.
+          Say n if others can be allocated into zone ZRAM to avoid OOM.
 
 config CPU_SW_DOMAIN_PAN
 	bool "Enable use of CPU domains to implement privileged no-access"
@@ -1843,6 +1977,41 @@ config DEPRECATED_PARAM_STRUCT
 	help
 	  This was deprecated in 2001 and announced to live on for 5 years.
 	  Some old boot loaders still use this way.
+
+# RTK_patch: add configs for our dtb patch
+config BUILD_ARM_APPENDED_DTB_IMAGE_EXT
+	bool "Build a concatenated vmlinux.bin/dtb by default"
+	depends on OF
+	help
+	  Enabling this option will cause a concatenated vmlinux.bin and list of
+	  DTBs to be built by default (instead of a standalone vmlinux.bin.)
+
+# RTK_patch: non_temporal syscall
+config RTK_NON_TEMPORAL
+	bool "setup for non-temporal operation"
+        default n
+	help
+	  rtk setup a memory profile for non-temporal application.
+
+config BUILD_ARM_APPENDED_DTB_IMAGE_NAMES_EXT
+	string "Default dtb names"
+	depends on BUILD_ARM_APPENDED_DTB_IMAGE_EXT
+	help
+	  Space separated list of names of dtbs to append when
+	  building a concatenated vmlinux.bin-dtb.
+
+config ARM_ATAG_DTB_COMPAT_EXT
+	bool "Supplement the appended DTB with traditional ATAG information"
+	depends on BUILD_ARM_APPENDED_DTB_IMAGE_EXT
+	select LIBFDT
+	help
+	  Some old bootloaders can't be updated to a DTB capable one, yet
+	  they provide ATAGs with memory configuration, the ramdisk address,
+	  the kernel cmdline string, etc.  Such information is dynamically
+	  provided by the bootloader and can't always be stored in a static
+	  DTB.  To allow a device tree enabled kernel to be used with such
+	  bootloaders, this option allows zImage to extract the information
+	  from the ATAG list and store it at run time into the appended DTB.
 
 # Compressed boot loader in ROM.  Yes, we really want to ask about
 # TEXT and BSS so we preserve their values in the config files.

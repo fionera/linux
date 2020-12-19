@@ -116,6 +116,7 @@ static int part_read_oob(struct mtd_info *mtd, loff_t from,
 	if (ops->datbuf && from + ops->len > mtd->size)
 		return -EINVAL;
 
+#if 0		//rtk_mtd_patch
 	/*
 	 * If OOB is also requested, make sure that we do not read past the end
 	 * of this partition.
@@ -132,6 +133,7 @@ static int part_read_oob(struct mtd_info *mtd, loff_t from,
 		if (ops->ooboffs + ops->ooblen > pages * len)
 			return -EINVAL;
 	}
+#endif
 
 	res = part->master->_read_oob(part->master, from + part->offset, ops);
 	if (unlikely(res)) {
@@ -189,6 +191,54 @@ static int part_panic_write(struct mtd_info *mtd, loff_t to, size_t len,
 	struct mtd_part *part = PART(mtd);
 	return part->master->_panic_write(part->master, to + part->offset, len,
 					  retlen, buf);
+}
+
+//for access bootcode area
+static int part_write_bootcode_area(struct mtd_info *mtd, loff_t to, size_t len, size_t *retlen, 
+			const u_char * buf, const u_char *oob_buf, unsigned char block_tag)
+{
+	struct mtd_part *part = PART(mtd);
+
+	if (to >= mtd->size)
+		return -EINVAL;
+	if (buf && ((to + len) > mtd->size))
+		return -EINVAL;
+	if (block_tag == 0x0)
+		return -EINVAL;
+	return part->master->_write_bootcode_area(part->master, to + part->offset, len, retlen, buf, oob_buf, block_tag);
+}
+
+static int part_erase_bootcode_area(struct mtd_info *mtd, struct erase_info *instr)
+{
+	struct mtd_part *part = PART(mtd);
+	int ret;
+
+	instr->addr += part->offset;
+	ret = part->master->_erase_bootcode_area(part->master, instr);
+	if (ret) {
+		if (instr->fail_addr != MTD_FAIL_ADDR_UNKNOWN)
+			instr->fail_addr -= part->offset;
+		instr->addr -= part->offset;
+	}
+	return ret;
+}
+static int part_read_bootcode_area(struct mtd_info *mtd, loff_t from, size_t len, size_t *retlen, u_char *buf, u_char *oob_buf)
+{
+	struct mtd_part *part = PART(mtd);
+
+	if (from >= mtd->size)
+		return -EINVAL;
+	if (buf && ((from +len) > mtd->size))
+		return -EINVAL;
+	
+	return part->master->_read_bootcode_area(part->master, from + part->offset, len, retlen, buf, oob_buf);
+}
+
+static int part_write_profile(struct mtd_info *mtd)
+{
+	struct mtd_part *part = PART(mtd);
+
+	return part->master->_write_profile(part->master);
 }
 
 static int part_write_oob(struct mtd_info *mtd, loff_t to,
@@ -376,9 +426,12 @@ static struct mtd_part *allocate_partition(struct mtd_info *master,
 	slave->mtd.oobsize = master->oobsize;
 	slave->mtd.oobavail = master->oobavail;
 	slave->mtd.subpage_sft = master->subpage_sft;
+	slave->mtd.oobblock = master->oobblock;//Add by alexchang 1029-2010
+	slave->mtd.part_type = part->part_type;//add by andyteng 0921-2012
 
 	slave->mtd.name = name;
 	slave->mtd.owner = master->owner;
+	slave->mtd.backing_dev_info = master->backing_dev_info;
 
 	/* NOTE: Historically, we didn't arrange MTDs as a tree out of
 	 * concern for showing the same data in multiple partitions.
@@ -398,6 +451,18 @@ static struct mtd_part *allocate_partition(struct mtd_info *master,
 	if (master->_panic_write)
 		slave->mtd._panic_write = part_panic_write;
 
+	//for access bootcode-area
+	if (master->_write_bootcode_area)
+		slave->mtd._write_bootcode_area = part_write_bootcode_area;
+	if (master->_erase_bootcode_area)
+		slave->mtd._erase_bootcode_area = part_erase_bootcode_area;
+	if (master->_read_bootcode_area)
+		slave->mtd._read_bootcode_area = part_read_bootcode_area;
+	if (master->_write_profile)
+		slave->mtd._write_profile = part_write_profile;
+
+	//for RBA percent
+	slave->mtd.u32RBApercentage = master->u32RBApercentage;
 	if (master->_point && master->_unpoint) {
 		slave->mtd._point = part_point;
 		slave->mtd._unpoint = part_unpoint;
@@ -651,6 +716,9 @@ EXPORT_SYMBOL_GPL(mtd_del_partition);
  * For historical reasons, this function's caller only registers the master
  * if the MTD_PARTITIONED_MASTER config option is set.
  */
+//Add by alexchang2131 0408-2011
+// The name that represents the whole MTD Flash device
+char *mtd_disc="disc";
 
 int add_mtd_partitions(struct mtd_info *master,
 		       const struct mtd_partition *parts,
@@ -659,6 +727,8 @@ int add_mtd_partitions(struct mtd_info *master,
 	struct mtd_part *slave;
 	uint64_t cur_offset = 0;
 	int i;
+
+	struct mtd_partition partDISC = {0};
 
 	printk(KERN_NOTICE "Creating %d MTD partitions on \"%s\":\n", nbparts, master->name);
 
@@ -678,6 +748,28 @@ int add_mtd_partitions(struct mtd_info *master,
 
 		cur_offset = slave->offset + slave->mtd.size;
 	}
+#if 1//Add "disc" partition. add by alexchang2131 0408-2011
+	printk("Creating disc partitions!\n");
+	partDISC.name = mtd_disc;
+	partDISC.size = master->size;
+	partDISC.offset = 0;
+
+	slave = allocate_partition(master, &partDISC, nbparts, 0);
+#if 0
+	if (!slave)
+			return -ENOMEM;
+#else
+	if (IS_ERR(slave))
+		return PTR_ERR(slave);
+
+	mutex_lock(&mtd_partitions_mutex);
+	list_add(&slave->list, &mtd_partitions);
+	mutex_unlock(&mtd_partitions_mutex);
+
+	add_mtd_device(&slave->mtd);
+	mtd_add_partition_attrs(slave);
+#endif
+#endif
 
 	return 0;
 }

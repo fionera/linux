@@ -92,6 +92,7 @@
 #define GICR_TYPER			0x0008
 #define GICR_STATUSR			GICD_STATUSR
 #define GICR_WAKER			0x0014
+#define GICR_PWRR                       0x0024
 #define GICR_SETLPIR			0x0040
 #define GICR_CLRLPIR			0x0048
 #define GICR_SEIR			GICD_SEIR

@@ -27,6 +27,7 @@
 
 #include <linux/etherdevice.h>
 #include <linux/netdevice.h>
+#include <linux/stmmac.h>
 #include <linux/phy.h>
 #include <linux/module.h>
 #if defined(CONFIG_VLAN_8021Q) || defined(CONFIG_VLAN_8021Q_MODULE)
@@ -351,8 +352,11 @@ extern const struct stmmac_desc_ops ndesc_ops;
 /* Specific DMA helpers */
 struct stmmac_dma_ops {
 	/* DMA core initialization */
-	int (*init) (void __iomem *ioaddr, int pbl, int fb, int mb,
-		     int burst_len, u32 dma_tx, u32 dma_rx, int atds);
+	int (*reset)(void __iomem *ioaddr);
+	void (*init)(void __iomem *ioaddr, int pbl, int fb, int mb,
+		     int aal, u32 dma_tx, u32 dma_rx, int atds);
+	/* Configure the AXI Bus Mode Register */
+	void (*axi)(void __iomem *ioaddr, struct stmmac_axi *axi);
 	/* Dump DMA registers */
 	void (*dump_regs) (void __iomem *ioaddr);
 	/* Set tx/rx threshold in the csr6 register

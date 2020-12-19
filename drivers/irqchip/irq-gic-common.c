@@ -65,7 +65,7 @@ int gic_configure_irq(unsigned int irq, unsigned int type,
 	return ret;
 }
 
-void __init gic_dist_config(void __iomem *base, int gic_irqs,
+void gic_dist_config(void __iomem *base, int gic_irqs,
 			    void (*sync_access)(void))
 {
 	unsigned int i;

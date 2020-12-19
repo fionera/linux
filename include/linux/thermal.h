@@ -58,7 +58,10 @@
 #define MILLICELSIUS_TO_DECI_KELVIN(t) MILLICELSIUS_TO_DECI_KELVIN_WITH_OFFSET(t, 2732)
 
 /* Default Thermal Governor */
-#if defined(CONFIG_THERMAL_DEFAULT_GOV_STEP_WISE)
+/* Default Thermal Governor */
+#if defined(CONFIG_RTK_KDRV_THERMAL_DEFAULT_GOV_RTK_THERMAL)
+#define DEFAULT_THERMAL_GOVERNOR       "rtk_thermal"
+#elif defined(CONFIG_THERMAL_DEFAULT_GOV_STEP_WISE)
 #define DEFAULT_THERMAL_GOVERNOR       "step_wise"
 #elif defined(CONFIG_THERMAL_DEFAULT_GOV_FAIR_SHARE)
 #define DEFAULT_THERMAL_GOVERNOR       "fair_share"
@@ -67,6 +70,7 @@
 #elif defined(CONFIG_THERMAL_DEFAULT_GOV_POWER_ALLOCATOR)
 #define DEFAULT_THERMAL_GOVERNOR       "power_allocator"
 #endif
+
 
 struct thermal_zone_device;
 struct thermal_cooling_device;

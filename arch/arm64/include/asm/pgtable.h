@@ -16,9 +16,12 @@
 #ifndef __ASM_PGTABLE_H
 #define __ASM_PGTABLE_H
 
+#include <linux/ekp.h>
+
 #include <asm/bug.h>
 #include <asm/proc-fns.h>
 
+#include <asm/ekp.h>
 #include <asm/memory.h>
 #include <asm/pgtable-hwdef.h>
 
@@ -78,6 +81,8 @@ extern void __pgd_error(const char *file, int line, unsigned long val);
 #define PROT_SECT_DEVICE_nGnRE	(PROT_SECT_DEFAULT | PMD_SECT_PXN | PMD_SECT_UXN | PMD_ATTRINDX(MT_DEVICE_nGnRE))
 #define PROT_SECT_NORMAL	(PROT_SECT_DEFAULT | PMD_SECT_PXN | PMD_SECT_UXN | PMD_ATTRINDX(MT_NORMAL))
 #define PROT_SECT_NORMAL_EXEC	(PROT_SECT_DEFAULT | PMD_SECT_UXN | PMD_ATTRINDX(MT_NORMAL))
+
+#define pgprot_kernel		PROT_DEFAULT
 
 #define _PAGE_DEFAULT		(PROT_DEFAULT | PTE_ATTRINDX(MT_NORMAL))
 
@@ -228,7 +233,14 @@ static inline pte_t pte_mknoncont(pte_t pte)
 
 static inline void set_pte(pte_t *ptep, pte_t pte)
 {
-	*ptep = pte;
+	long ret;
+
+	ekp_perf_begin(EKP_SET_PTE);
+	ret = ekp_tunnel(EKP_SET_PTE, (u64)__pa(ptep), (u64)pte_val(pte), 0,
+			 0, 0, 0);
+	if (ret != 0)
+		*ptep = pte;
+	ekp_perf_end(EKP_SET_PTE);
 
 	/*
 	 * Only if the new pte is valid and kernel, otherwise TLB maintenance
@@ -390,6 +402,9 @@ static inline int has_transparent_hugepage(void)
 #define pgprot_device(prot) \
 	__pgprot_modify(prot, PTE_ATTRINDX_MASK, PTE_ATTRINDX(MT_DEVICE_nGnRE) | PTE_PXN | PTE_UXN)
 #define __HAVE_PHYS_MEM_ACCESS_PROT
+
+#define pgprot_rtk_device pgprot_device 
+
 struct file;
 extern pgprot_t phys_mem_access_prot(struct file *file, unsigned long pfn,
 				     unsigned long size, pgprot_t vma_prot);
@@ -415,7 +430,15 @@ extern pgprot_t phys_mem_access_prot(struct file *file, unsigned long pfn,
 
 static inline void set_pmd(pmd_t *pmdp, pmd_t pmd)
 {
-	*pmdp = pmd;
+	long ret;
+
+	ekp_perf_begin(EKP_SET_PMD);
+	ret = ekp_tunnel(EKP_SET_PMD, __pa(pmdp),
+			 (unsigned long)pmd_val(pmd), 0, 0, 0, 0);
+	if (ret != 0)
+		*pmdp = pmd;
+	ekp_perf_end(EKP_SET_PMD);
+
 	dsb(ishst);
 	isb();
 }
@@ -448,7 +471,15 @@ static inline pte_t *pmd_page_vaddr(pmd_t pmd)
 
 static inline void set_pud(pud_t *pudp, pud_t pud)
 {
-	*pudp = pud;
+	long ret;
+
+	ekp_perf_begin(EKP_SET_PUD);
+	ret = ekp_tunnel(EKP_SET_PUD, __pa(pudp),
+			 (unsigned long)pud_val(pud), 0, 0, 0, 0);
+	if (ret != 0)
+		*pudp = pud;
+	ekp_perf_end(EKP_SET_PUD);
+
 	dsb(ishst);
 	isb();
 }
@@ -515,6 +546,8 @@ static inline pud_t *pud_offset(pgd_t *pgd, unsigned long addr)
 
 /* to find an entry in a page-table-directory */
 #define pgd_index(addr)		(((addr) >> PGDIR_SHIFT) & (PTRS_PER_PGD - 1))
+
+#define pgd_offset_raw(pgd, addr)  ((pgd) + pgd_index(addr))
 
 #define pgd_offset(mm, addr)	((mm)->pgd+pgd_index(addr))
 

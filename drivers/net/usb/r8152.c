@@ -503,9 +503,12 @@ enum rtl8152_flags {
 
 /* Define these values to match your device */
 #define VENDOR_ID_REALTEK		0x0bda
+#define VENDOR_ID_MICROSOFT		0x045e
 #define VENDOR_ID_SAMSUNG		0x04e8
 #define VENDOR_ID_LENOVO		0x17ef
+#define VENDOR_ID_LINKSYS		0x13b1
 #define VENDOR_ID_NVIDIA		0x0955
+#define VENDOR_ID_TPLINK		0x2357
 
 #define MCU_TYPE_PLA			0x0100
 #define MCU_TYPE_USB			0x0000
@@ -635,6 +638,9 @@ enum rtl_version {
 	RTL_VER_04,
 	RTL_VER_05,
 	RTL_VER_06,
+	RTL_VER_07,
+	RTL_VER_08,
+	RTL_VER_09,
 	RTL_VER_MAX
 };
 
@@ -1026,6 +1032,38 @@ out1:
 	return ret;
 }
 
+static int is_m16pb0;
+static int __init chip_setup(char *str)
+{
+	if (!str)
+		return -EINVAL;
+
+	if(!strncmp(str, "M16PB0", 6))
+		is_m16pb0 = 1;
+
+	return 0;
+}
+__setup("chip=", chip_setup);
+
+static char usb_ethaddr[14];
+static int change_ethaddr;
+static int __init ethaddr_setup(char *str)
+{
+	int ret;
+
+	if (!str)
+		return -EINVAL;
+
+	ret = sscanf(str, "%hhx:%hhx:%hhx:%hhx:%hhx:%hhx", &usb_ethaddr[0], &usb_ethaddr[1],
+		 &usb_ethaddr[2], &usb_ethaddr[3], &usb_ethaddr[4], &usb_ethaddr[5]);
+
+	if(ret == 6)
+		change_ethaddr = 1;
+
+	return 0;
+}
+__setup("ethaddr=", ethaddr_setup);
+
 static int set_ethernet_addr(struct r8152 *tp)
 {
 	struct net_device *dev = tp->netdev;
@@ -1036,6 +1074,9 @@ static int set_ethernet_addr(struct r8152 *tp)
 		ret = pla_ocp_read(tp, PLA_IDR, 8, sa.sa_data);
 	else
 		ret = pla_ocp_read(tp, PLA_BACKUP, 8, sa.sa_data);
+
+	if(is_m16pb0 && change_ethaddr)
+		memcpy(sa.sa_data, usb_ethaddr, sizeof(usb_ethaddr));
 
 	if (ret < 0) {
 		netif_err(tp, probe, dev, "Get ether addr fail\n");
@@ -3925,6 +3966,7 @@ static int rtl8152_get_coalesce(struct net_device *netdev,
 	switch (tp->version) {
 	case RTL_VER_01:
 	case RTL_VER_02:
+	case RTL_VER_07:
 		return -EOPNOTSUPP;
 	default:
 		break;
@@ -3944,6 +3986,7 @@ static int rtl8152_set_coalesce(struct net_device *netdev,
 	switch (tp->version) {
 	case RTL_VER_01:
 	case RTL_VER_02:
+	case RTL_VER_07:
 		return -EOPNOTSUPP;
 	default:
 		break;
@@ -4043,6 +4086,7 @@ static int rtl8152_change_mtu(struct net_device *dev, int new_mtu)
 	switch (tp->version) {
 	case RTL_VER_01:
 	case RTL_VER_02:
+	case RTL_VER_07:
 		return eth_change_mtu(dev, new_mtu);
 	default:
 		break;
@@ -4114,6 +4158,17 @@ static void r8152b_get_version(struct r8152 *tp)
 		tp->version = RTL_VER_06;
 		tp->mii.supports_gmii = 1;
 		break;
+	case 0x4800:
+		tp->version = RTL_VER_07;
+		break;
+	case 0x6000:
+		tp->version = RTL_VER_08;
+		tp->mii.supports_gmii = 1;
+		break;
+	case 0x6010:
+		tp->version = RTL_VER_09;
+		tp->mii.supports_gmii = 1;
+		break;
 	default:
 		netif_info(tp, probe, tp->netdev,
 			   "Unknown version 0x%04x\n", version);
@@ -4146,6 +4201,7 @@ static int rtl_ops_init(struct r8152 *tp)
 	switch (tp->version) {
 	case RTL_VER_01:
 	case RTL_VER_02:
+	case RTL_VER_07:
 		ops->init		= r8152b_init;
 		ops->enable		= rtl8152_enable;
 		ops->disable		= rtl8152_disable;
@@ -4161,6 +4217,8 @@ static int rtl_ops_init(struct r8152 *tp)
 	case RTL_VER_04:
 	case RTL_VER_05:
 	case RTL_VER_06:
+	case RTL_VER_08:
+	case RTL_VER_09:
 		ops->init		= r8153_init;
 		ops->enable		= rtl8153_enable;
 		ops->disable		= rtl8153_disable;
@@ -4330,12 +4388,21 @@ static void rtl8152_disconnect(struct usb_interface *intf)
 
 /* table of devices that work with this driver */
 static struct usb_device_id rtl8152_table[] = {
+	{REALTEK_USB_DEVICE(VENDOR_ID_REALTEK, 0x8050)},
 	{REALTEK_USB_DEVICE(VENDOR_ID_REALTEK, 0x8152)},
 	{REALTEK_USB_DEVICE(VENDOR_ID_REALTEK, 0x8153)},
+	{REALTEK_USB_DEVICE(VENDOR_ID_MICROSOFT, 0x07ab)},
+	{REALTEK_USB_DEVICE(VENDOR_ID_MICROSOFT, 0x07c6)},
 	{REALTEK_USB_DEVICE(VENDOR_ID_SAMSUNG, 0xa101)},
-	{REALTEK_USB_DEVICE(VENDOR_ID_LENOVO,  0x7205)},
 	{REALTEK_USB_DEVICE(VENDOR_ID_LENOVO,  0x304f)},
+	{REALTEK_USB_DEVICE(VENDOR_ID_LENOVO,  0x3062)},
+	{REALTEK_USB_DEVICE(VENDOR_ID_LENOVO,  0x3069)},
+	{REALTEK_USB_DEVICE(VENDOR_ID_LENOVO,  0x7205)},
+	{REALTEK_USB_DEVICE(VENDOR_ID_LENOVO,  0x720c)},
+	{REALTEK_USB_DEVICE(VENDOR_ID_LENOVO,  0x7214)},
+	{REALTEK_USB_DEVICE(VENDOR_ID_LINKSYS, 0x0041)},
 	{REALTEK_USB_DEVICE(VENDOR_ID_NVIDIA,  0x09ff)},
+	{REALTEK_USB_DEVICE(VENDOR_ID_TPLINK,  0x0601)},
 	{}
 };
 

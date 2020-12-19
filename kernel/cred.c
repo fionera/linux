@@ -18,6 +18,9 @@
 #include <linux/security.h>
 #include <linux/binfmts.h>
 #include <linux/cn_proc.h>
+#ifdef CONFIG_EKP_CRED_PROTECTION
+#include <linux/ekp.h>
+#endif
 
 #if 0
 #define kdebug(FMT, ...)						\
@@ -34,14 +37,28 @@ do {									\
 
 static struct kmem_cache *cred_jar;
 
+#ifdef CONFIG_EKP_CRED_PROTECTION
+/* These slab caches are used for EKP credential protection */
+static struct kmem_cache *cred_ro_jar;
+static struct kmem_cache *cred_usage_jar;
+static struct kmem_cache *cred_rcu_jar;
+
+static atomic_t init_cred_usage = ATOMIC_INIT(4);
+#endif
+
 /* init to 2 - one for init_task, one to ensure it is never freed */
 struct group_info init_groups = { .usage = ATOMIC_INIT(2) };
 
 /*
  * The initial credentials for the initial task
  */
+#ifdef CONFIG_EKP_CRED_PROTECTION
+struct cred init_cred __ro_after_init = {
+	.usage			= &init_cred_usage,
+#else
 struct cred init_cred = {
 	.usage			= ATOMIC_INIT(4),
+#endif
 #ifdef CONFIG_DEBUG_CREDENTIALS
 	.subscribers		= ATOMIC_INIT(2),
 	.magic			= CRED_MAGIC,
@@ -89,12 +106,49 @@ static inline void alter_cred_subscribers(const struct cred *_cred, int n)
 #endif
 }
 
+#ifdef CONFIG_EKP_CRED_PROTECTION
+static inline bool is_ro_cred(const struct cred *cred)
+{
+	/*
+	 * ekp_is_romem() actually raises an exception to enter into ARM EL2
+	 * hypervisor to check whether 'cred' is set as RO on ARM stage2
+	 * translation table. This might have some performance impact.
+	 *
+	 * TODO: Can we have an another way to check this ?
+	 */
+	return ekp_is_romem(__pa(cred)) || (cred == &init_cred);
+}
+
+static inline void free_cred(struct cred *cred)
+{
+	kmem_cache_free(cred_usage_jar, cred->usage);
+	kmem_cache_free(cred_rcu_jar, cred->rcu);
+	if (is_ro_cred(cred))
+		kmem_cache_free(cred_ro_jar, cred);
+	else
+		kmem_cache_free(cred_jar, cred);
+}
+#endif
+
+static inline void validate_ro_creds(const struct cred *cred)
+{
+#ifdef CONFIG_EKP_CRED_PROTECTION
+	if (ekp_initialized() && !is_ro_cred(cred))
+		panic("CRED: validate_ro_creds() sees writable %p\n",
+		      cred);
+#endif
+}
+
 /*
  * The RCU callback to actually dispose of a set of credentials
  */
 static void put_cred_rcu(struct rcu_head *rcu)
 {
+#ifdef CONFIG_EKP_CRED_PROTECTION
+	struct cred *cred = container_of(rcu, struct cred_rcu, rcu)->cred;
+#else
 	struct cred *cred = container_of(rcu, struct cred, rcu);
+#endif
 
 	kdebug("put_cred_rcu(%p)", cred);
 
@@ -108,11 +162,27 @@ static void put_cred_rcu(struct rcu_head *rcu)
 		      atomic_read(&cred->usage),
 		      read_cred_subscribers(cred));
 #else
+#ifdef CONFIG_EKP_CRED_PROTECTION
+	if (atomic_read(cred->usage) != 0)
+		panic("CRED: put_cred_rcu() sees %p with usage %d\n",
+		      cred, atomic_read(cred->usage));
+#else
 	if (atomic_read(&cred->usage) != 0)
 		panic("CRED: put_cred_rcu() sees %p with usage %d\n",
 		      cred, atomic_read(&cred->usage));
 #endif
+#endif
 
+	/*
+	 * TODO
+	 *
+	 * When RO cred is used, cred->security is also on a read-only
+	 * memory and security_cred_free() cannot modify it to other value
+	 * such as selinux's 0x7UL. (See security/selinux/hooks.c)
+	 *
+	 * We need to take care of this later and it might require some
+	 * changes on LSM like selinux.
+	 */
 	security_cred_free(cred);
 	key_put(cred->session_keyring);
 	key_put(cred->process_keyring);
@@ -122,7 +192,11 @@ static void put_cred_rcu(struct rcu_head *rcu)
 		put_group_info(cred->group_info);
 	free_uid(cred->user);
 	put_user_ns(cred->user_ns);
+#ifdef CONFIG_EKP_CRED_PROTECTION
+	free_cred(cred);
+#else
 	kmem_cache_free(cred_jar, cred);
+#endif
 }
 
 /**
@@ -134,10 +208,18 @@ static void put_cred_rcu(struct rcu_head *rcu)
 void __put_cred(struct cred *cred)
 {
 	kdebug("__put_cred(%p{%d,%d})", cred,
+#ifdef CONFIG_EKP_CRED_PROTECTION
+	       atomic_read(cred->usage),
+#else
 	       atomic_read(&cred->usage),
+#endif
 	       read_cred_subscribers(cred));
 
+#ifdef CONFIG_EKP_CRED_PROTECTION
+	BUG_ON(atomic_read(cred->usage) != 0);
+#else
 	BUG_ON(atomic_read(&cred->usage) != 0);
+#endif
 #ifdef CONFIG_DEBUG_CREDENTIALS
 	BUG_ON(read_cred_subscribers(cred) != 0);
 	cred->magic = CRED_MAGIC_DEAD;
@@ -146,7 +228,11 @@ void __put_cred(struct cred *cred)
 	BUG_ON(cred == current->cred);
 	BUG_ON(cred == current->real_cred);
 
+#ifdef CONFIG_EKP_CRED_PROTECTION
+	call_rcu(&cred->rcu->rcu, put_cred_rcu);
+#else
 	call_rcu(&cred->rcu, put_cred_rcu);
+#endif
 }
 EXPORT_SYMBOL(__put_cred);
 
@@ -158,18 +244,24 @@ void exit_creds(struct task_struct *tsk)
 	struct cred *cred;
 
 	kdebug("exit_creds(%u,%p,%p,{%d,%d})", tsk->pid, tsk->real_cred, tsk->cred,
+#ifdef CONFIG_EKP_CRED_PROTECTION
+	       atomic_read(tsk->cred->usage),
+#else
 	       atomic_read(&tsk->cred->usage),
+#endif
 	       read_cred_subscribers(tsk->cred));
 
 	cred = (struct cred *) tsk->real_cred;
 	tsk->real_cred = NULL;
 	validate_creds(cred);
+	validate_ro_creds(cred);
 	alter_cred_subscribers(cred, -1);
 	put_cred(cred);
 
 	cred = (struct cred *) tsk->cred;
 	tsk->cred = NULL;
 	validate_creds(cred);
+	validate_ro_creds(cred);
 	alter_cred_subscribers(cred, -1);
 	put_cred(cred);
 }
@@ -193,11 +285,72 @@ const struct cred *get_task_cred(struct task_struct *task)
 	do {
 		cred = __task_cred((task));
 		BUG_ON(!cred);
+#ifdef CONFIG_EKP_CRED_PROTECTION
+	} while (!atomic_inc_not_zero(((struct cred *)cred)->usage));
+#else
 	} while (!atomic_inc_not_zero(&((struct cred *)cred)->usage));
+#endif
 
 	rcu_read_unlock();
 	return cred;
 }
+
+#ifdef CONFIG_EKP_CRED_PROTECTION
+static int alloc_and_set_cred_ext(struct cred *cred)
+{
+	cred->usage = kmem_cache_alloc(cred_usage_jar, GFP_KERNEL);
+	if (!cred->usage)
+		return -ENOMEM;
+
+	cred->rcu = kmem_cache_alloc(cred_rcu_jar, GFP_KERNEL);
+	if (!cred->rcu) {
+		kmem_cache_free(cred_usage_jar, cred->usage);
+		return -ENOMEM;
+	}
+	cred->rcu->cred = cred;
+
+	return 0;
+}
+
+static struct cred *alloc_ro_cred(const struct cred *cred,
+				  struct task_struct *task,
+				  bool override)
+{
+	struct cred *ro_cred;
+	atomic_t *usage = NULL;
+	struct cred_rcu *rcu;
+
+	if (!ekp_initialized())
+		return NULL;
+
+	ro_cred = kmem_cache_alloc(cred_ro_jar, GFP_KERNEL);
+	if (!ro_cred)
+		return NULL;
+
+	usage = kmem_cache_alloc(cred_usage_jar, GFP_KERNEL);
+	if (!usage)
+		goto error;
+
+	rcu = kmem_cache_alloc(cred_rcu_jar, GFP_KERNEL);
+	if (!rcu)
+		goto error;
+
+	ekp_tunnel(EKP_CRED_INIT, __pa(ro_cred), __pa(cred),
+		   (unsigned long)usage, (unsigned long)rcu, override,
+		   (unsigned long)task);
+
+	return ro_cred;
+
+error:
+	WARN(1, "CRED: not enough memory for protecting credentials via EKP\n");
+
+	if (usage)
+		kmem_cache_free(cred_usage_jar, usage);
+	kmem_cache_free(cred_ro_jar, ro_cred);
+
+	return NULL;
+}
+#endif
 
 /*
  * Allocate blank credentials, such that the credentials can be filled in at a
@@ -211,7 +364,22 @@ struct cred *cred_alloc_blank(void)
 	if (!new)
 		return NULL;
 
+#ifdef CONFIG_EKP_CRED_PROTECTION
+	/*
+	 * When alloc_and_set_cred_ext() returns -ENOMEM, new->usage may
+	 * have an invalid pointer and we cannot call abort_cred(new) to release
+	 * memory for 'new'. So that kmem_cache_free() is used here for freeing
+	 * 'new' explicitly.
+	 */
+	if (alloc_and_set_cred_ext(new) < 0) {
+		kmem_cache_free(cred_jar, new);
+		return NULL;
+	}
+
+	atomic_set(new->usage, 1);
+#else
 	atomic_set(&new->usage, 1);
+#endif
 #ifdef CONFIG_DEBUG_CREDENTIALS
 	new->magic = CRED_MAGIC;
 #endif
@@ -257,7 +425,22 @@ struct cred *prepare_creds(void)
 	old = task->cred;
 	memcpy(new, old, sizeof(struct cred));
 
+#ifdef CONFIG_EKP_CRED_PROTECTION
+	/*
+	 * When alloc_and_set_cred_ext() returns -ENOMEM, new->usage may
+	 * have an invalid pointer and we cannot call abort_cred(new) to release
+	 * memory for 'new'. So that kmem_cache_free() is used here for freeing
+	 * 'new' explicitly.
+	 */
+	if (alloc_and_set_cred_ext(new) < 0) {
+		kmem_cache_free(cred_jar, new);
+		return NULL;
+	}
+
+	atomic_set(new->usage, 1);
+#else
 	atomic_set(&new->usage, 1);
+#endif
 	set_cred_subscribers(new, 0);
 	get_group_info(new->group_info);
 	get_uid(new->user);
@@ -322,19 +505,30 @@ struct cred *prepare_exec_creds(void)
 int copy_creds(struct task_struct *p, unsigned long clone_flags)
 {
 	struct cred *new;
+#ifdef CONFIG_EKP_CRED_PROTECTION
+	struct cred *ro_cred;
+#endif
 	int ret;
 
 	if (
 #ifdef CONFIG_KEYS
 		!p->cred->thread_keyring &&
 #endif
+#ifdef CONFIG_SECURITY_EKP
+		!ekp_initialized() &&
+#endif
 		clone_flags & CLONE_THREAD
 	    ) {
+		validate_ro_creds(p->cred);
 		p->real_cred = get_cred(p->cred);
 		get_cred(p->cred);
 		alter_cred_subscribers(p->cred, 2);
 		kdebug("share_creds(%p{%d,%d})",
+#ifdef CONFIG_EKP_CRED_PROTECTION
+		       p->cred, atomic_read(p->cred->usage),
+#else
 		       p->cred, atomic_read(&p->cred->usage),
+#endif
 		       read_cred_subscribers(p->cred));
 		atomic_inc(&p->cred->user->processes);
 		return 0;
@@ -370,9 +564,23 @@ int copy_creds(struct task_struct *p, unsigned long clone_flags)
 #endif
 
 	atomic_inc(&new->user->processes);
+#ifdef CONFIG_EKP_CRED_PROTECTION
+	ro_cred = alloc_ro_cred(new, p, false);
+	if (ro_cred) {
+		kdebug("copy_creds() %p{%d} ==> ro %p{%d}",
+		       new, atomic_read(new->usage),
+		       ro_cred, atomic_read(ro_cred->usage));
+
+		BUG_ON(atomic_read(new->usage) != 1);
+		free_cred(new);
+
+		new = ro_cred;
+	}
+#endif
 	p->cred = p->real_cred = get_cred(new);
 	alter_cred_subscribers(new, 2);
 	validate_creds(new);
+	validate_ro_creds(new);
 	return 0;
 
 error_put:
@@ -423,9 +631,16 @@ int commit_creds(struct cred *new)
 {
 	struct task_struct *task = current;
 	const struct cred *old = task->real_cred;
+#ifdef CONFIG_EKP_CRED_PROTECTION
+	struct cred *ro_cred;
+#endif
 
 	kdebug("commit_creds(%p{%d,%d})", new,
+#ifdef CONFIG_EKP_CRED_PROTECTION
+	       atomic_read(new->usage),
+#else
 	       atomic_read(&new->usage),
+#endif
 	       read_cred_subscribers(new));
 
 	BUG_ON(task->cred != old);
@@ -434,7 +649,12 @@ int commit_creds(struct cred *new)
 	validate_creds(old);
 	validate_creds(new);
 #endif
+	validate_ro_creds(old);
+#ifdef CONFIG_EKP_CRED_PROTECTION
+	BUG_ON(atomic_read(new->usage) < 1);
+#else
 	BUG_ON(atomic_read(&new->usage) < 1);
+#endif
 
 	get_cred(new); /* we will require a ref for the subj creds too */
 
@@ -463,8 +683,22 @@ int commit_creds(struct cred *new)
 	alter_cred_subscribers(new, 2);
 	if (new->user != old->user)
 		atomic_inc(&new->user->processes);
+#ifdef CONFIG_EKP_CRED_PROTECTION
+	ro_cred = alloc_ro_cred(new, NULL, false);
+	if (ro_cred) {
+		kdebug("commit_creds() %p{%d} ==> ro %p{%d}",
+		       new, atomic_read(new->usage),
+		       ro_cred, atomic_read(ro_cred->usage));
+
+		BUG_ON(atomic_read(new->usage) != 2);
+		free_cred(new);
+
+		new = ro_cred;
+	}
+#endif
 	rcu_assign_pointer(task->real_cred, new);
 	rcu_assign_pointer(task->cred, new);
+	validate_ro_creds(new);
 	if (new->user != old->user)
 		atomic_dec(&old->user->processes);
 	alter_cred_subscribers(old, -2);
@@ -499,13 +733,21 @@ EXPORT_SYMBOL(commit_creds);
 void abort_creds(struct cred *new)
 {
 	kdebug("abort_creds(%p{%d,%d})", new,
+#ifdef CONFIG_EKP_CRED_PROTECTION
+	       atomic_read(new->usage),
+#else
 	       atomic_read(&new->usage),
+#endif
 	       read_cred_subscribers(new));
 
 #ifdef CONFIG_DEBUG_CREDENTIALS
 	BUG_ON(read_cred_subscribers(new) != 0);
 #endif
+#ifdef CONFIG_EKP_CRED_PROTECTION
+	BUG_ON(atomic_read(new->usage) < 1);
+#else
 	BUG_ON(atomic_read(&new->usage) < 1);
+#endif
 	put_cred(new);
 }
 EXPORT_SYMBOL(abort_creds);
@@ -520,24 +762,67 @@ EXPORT_SYMBOL(abort_creds);
 const struct cred *override_creds(const struct cred *new)
 {
 	const struct cred *old = current->cred;
+#ifdef CONFIG_EKP_CRED_PROTECTION
+	struct cred *ro_cred;
+#endif
 
 	kdebug("override_creds(%p{%d,%d})", new,
+#ifdef CONFIG_EKP_CRED_PROTECTION
+	       atomic_read(new->usage),
+#else
 	       atomic_read(&new->usage),
+#endif
 	       read_cred_subscribers(new));
 
 	validate_creds(old);
 	validate_creds(new);
+	validate_ro_creds(old);
 	get_cred(new);
+#ifdef CONFIG_EKP_CRED_PROTECTION
+	ro_cred = alloc_ro_cred(new, NULL, true);
+	if (ro_cred) {
+		atomic_set(ro_cred->usage, 1);
+
+		kdebug("override_creds() %p{%d} ==> ro %p{%d}",
+		       new, atomic_read(new->usage),
+		       ro_cred, atomic_read(ro_cred->usage));
+
+		new = ro_cred;
+		validate_ro_creds(new);
+	}
+#endif
 	alter_cred_subscribers(new, 1);
 	rcu_assign_pointer(current->cred, new);
 	alter_cred_subscribers(old, -1);
 
 	kdebug("override_creds() = %p{%d,%d}", old,
+#ifdef CONFIG_EKP_CRED_PROTECTION
+	       atomic_read(old->usage),
+#else
 	       atomic_read(&old->usage),
+#endif
 	       read_cred_subscribers(old));
 	return old;
 }
 EXPORT_SYMBOL(override_creds);
+
+#ifdef CONFIG_EKP_CRED_PROTECTION
+static inline void put_override_cred(const struct cred *cred)
+{
+	if (ekp_initialized()) {
+		kdebug("put_override_cred(%p,%p)", cred, cred->override);
+
+		BUG_ON(!cred->override);
+		put_cred(cred->override);
+
+		BUG_ON(atomic_read(cred->usage) != 1);
+		BUG_ON(!is_ro_cred(cred));
+		free_cred((struct cred *)cred);
+	}
+	else
+		put_cred(cred);
+}
+#endif
 
 /**
  * revert_creds - Revert a temporary subjective credentials override
@@ -551,15 +836,25 @@ void revert_creds(const struct cred *old)
 	const struct cred *override = current->cred;
 
 	kdebug("revert_creds(%p{%d,%d})", old,
+#ifdef CONFIG_EKP_CRED_PROTECTION
+	       atomic_read(old->usage),
+#else
 	       atomic_read(&old->usage),
+#endif
 	       read_cred_subscribers(old));
 
 	validate_creds(old);
 	validate_creds(override);
+	validate_ro_creds(old);
+	validate_ro_creds(override);
 	alter_cred_subscribers(old, 1);
 	rcu_assign_pointer(current->cred, old);
 	alter_cred_subscribers(override, -1);
+#ifdef CONFIG_EKP_CRED_PROTECTION
+	put_override_cred(override);
+#else
 	put_cred(override);
+#endif
 }
 EXPORT_SYMBOL(revert_creds);
 
@@ -571,6 +866,18 @@ void __init cred_init(void)
 	/* allocate a slab in which we can store credentials */
 	cred_jar = kmem_cache_create("cred_jar", sizeof(struct cred),
 				     0, SLAB_HWCACHE_ALIGN|SLAB_PANIC, NULL);
+
+#ifdef CONFIG_EKP_CRED_PROTECTION
+	cred_ro_jar = kmem_cache_create("cred_ro_jar", sizeof(struct cred), 0,
+					SLAB_HWCACHE_ALIGN|SLAB_PANIC|SLAB_READONLY,
+					NULL);
+
+	cred_usage_jar = kmem_cache_create("cred_usage_jar", sizeof(atomic_t),
+					   0, SLAB_PANIC, NULL);
+
+	cred_rcu_jar = kmem_cache_create("cred_rcu_jar", sizeof(struct cred_rcu),
+					 0, SLAB_PANIC, NULL);
+#endif
 }
 
 /**
@@ -608,9 +915,27 @@ struct cred *prepare_kernel_cred(struct task_struct *daemon)
 		old = get_cred(&init_cred);
 
 	validate_creds(old);
+	validate_ro_creds(old);
 
 	*new = *old;
+
+#ifdef CONFIG_EKP_CRED_PROTECTION
+	/*
+	 * When alloc_and_set_cred_ext() returns -ENOMEM, new->usage may
+	 * have an invalid pointer and we cannot call put_cred(new) to release
+	 * memory for 'new'. So that kmem_cache_free() is used here for freeing
+	 * 'new' explicitly.
+	 */
+	if (alloc_and_set_cred_ext(new) < 0) {
+		kmem_cache_free(cred_jar, new);
+		put_cred(old);
+		return NULL;
+	}
+
+	atomic_set(new->usage, 1);
+#else
 	atomic_set(&new->usage, 1);
+#endif
 	set_cred_subscribers(new, 0);
 	get_uid(new->user);
 	get_user_ns(new->user_ns);

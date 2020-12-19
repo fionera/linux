@@ -92,6 +92,21 @@ extern bool may_setgroups(void);
 #define GROUP_AT(gi, i) \
 	((gi)->blocks[(i) / NGROUPS_PER_BLOCK][(i) % NGROUPS_PER_BLOCK])
 
+#ifdef CONFIG_EKP_CRED_PROTECTION
+/*
+ * When EKP is enabled, memory for struct cred is allocated from read-only
+ * slab. That is, cred->rcu is on read-only memory and call_rcu() cannot
+ * manipulate it to call rcu clean-up function asynchronously.
+ * So that EKP introduces struct cred_rcu and struct cred has a pointer to
+ * this structure. The cred_rcu is allocated from normal slab cache which
+ * is writable and call_rcu() can manipulate it correctly.
+ */
+struct cred_rcu {
+	struct cred *cred;	/* link for put_cred_rcu() */
+	struct rcu_head rcu;
+};
+#endif
+
 /*
  * The security context of a task
  *
@@ -116,7 +131,11 @@ extern bool may_setgroups(void);
  * same context as task->real_cred.
  */
 struct cred {
+#ifdef CONFIG_EKP_CRED_PROTECTION
+	atomic_t	*usage;
+#else
 	atomic_t	usage;
+#endif
 #ifdef CONFIG_DEBUG_CREDENTIALS
 	atomic_t	subscribers;	/* number of processes subscribed */
 	void		*put_addr;
@@ -152,7 +171,12 @@ struct cred {
 	struct user_struct *user;	/* real user ID subscription */
 	struct user_namespace *user_ns; /* user_ns the caps and keyrings are relative to. */
 	struct group_info *group_info;	/* supplementary groups for euid/fsgid */
+#ifdef CONFIG_EKP_CRED_PROTECTION
+	struct cred_rcu	*rcu;		/* RCU deletion hook */
+	struct cred	*override;	/* original cred for override_creds() */
+#else
 	struct rcu_head	rcu;		/* RCU deletion hook */
+#endif
 };
 
 extern void __put_cred(struct cred *);
@@ -229,8 +253,20 @@ static inline bool cap_ambient_invariant_ok(const struct cred *cred)
  */
 static inline struct cred *get_new_cred(struct cred *cred)
 {
+#ifdef CONFIG_EKP_CRED_PROTECTION
+	struct cred *ret;
+
+	if (cred->override)
+		ret = cred->override;
+	else
+		ret = cred;
+
+	atomic_inc(ret->usage);
+	return ret;
+#else
 	atomic_inc(&cred->usage);
 	return cred;
+#endif
 }
 
 /**
@@ -269,7 +305,11 @@ static inline void put_cred(const struct cred *_cred)
 	struct cred *cred = (struct cred *) _cred;
 
 	validate_creds(cred);
+#ifdef CONFIG_EKP_CRED_PROTECTION
+	if (atomic_dec_and_test((cred)->usage))
+#else
 	if (atomic_dec_and_test(&(cred)->usage))
+#endif
 		__put_cred(cred);
 }
 

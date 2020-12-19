@@ -24,6 +24,7 @@
 #else
 #include "proc-v7-2level.S"
 #endif
+#define PHYS_RELATIVE(v_data, v_text) ((v_data) - (v_text))
 
 ENTRY(cpu_v7_proc_init)
 	ret	lr
@@ -263,6 +264,25 @@ ENDPROC(cpu_pj4b_do_resume)
  *	It is assumed that:
  *	- cache type register is implemented
  */
+__a53_setup:	
+	adr	r0, __v7_setup_stack_ptr	@ the local stack
+	ldr	r12, [r0]
+        add     r12, r12, r0                    @ the local stack
+	stmia	r12, {r1-r6, lr}		@ v7_invalidate_l1 touches r0-r6
+	bl      v7_invalidate_l1
+	ldmia	r12, {r1-r6, lr}
+#ifdef CONFIG_SMP
+#if !defined(CONFIG_OPTEE)
+	mrrc	p15, 1, r0, r1, c15
+	orr	r0, #(1 << 6)
+	mcrr	p15, 1, r0, r1, c15
+	isb
+	dsb
+#endif
+#endif //#ifdef CONFIG_SMP
+
+	b __v7_setup_cont
+	
 __v7_ca5mp_setup:
 __v7_ca9mp_setup:
 __v7_cr7mp_setup:
@@ -274,10 +294,12 @@ __v7_ca15mp_setup:
 __v7_b15mp_setup:
 __v7_ca17mp_setup:
 	mov	r10, #0
-1:	adr	r12, __v7_setup_stack		@ the local stack
-	stmia	r12, {r0-r5, lr}		@ v7_invalidate_l1 touches r0-r6
+1:	adr	r0, __v7_setup_stack_ptr	@ the local stack
+	ldr	r12, [r0]
+        add     r12, r12, r0                    @ the local stack
+	stmia	r12, {r1-r6, lr}		@ v7_invalidate_l1 touches r0-r6
 	bl      v7_invalidate_l1
-	ldmia	r12, {r0-r5, lr}
+	ldmia	r12, {r1-r6, lr}
 #ifdef CONFIG_SMP
 	ALT_SMP(mrc	p15, 0, r0, c1, c0, 1)
 	ALT_UP(mov	r0, #(1 << 6))		@ fake it for UP
@@ -285,6 +307,11 @@ __v7_ca17mp_setup:
 	orreq	r0, r0, #(1 << 6)		@ Enable SMP/nAMP mode
 	orreq	r0, r0, r10			@ Enable CPU-specific SMP bits
 	mcreq	p15, 0, r0, c1, c0, 1
+#endif
+#ifdef CONFIG_L2CC_ECC
+	mrc	p15, 1, r12, c9, c0, 2		@ read L2 control register
+	orr	r12, r12, #0x00200000		@ ECC and parity enable
+	mcr	p15, 1, r12, c9, c0, 2		@ write L2 control register
 #endif
 	b	__v7_setup_cont
 
@@ -415,10 +442,12 @@ __v7_pj4b_setup:
 #endif /* CONFIG_CPU_PJ4B */
 
 __v7_setup:
-	adr	r12, __v7_setup_stack		@ the local stack
-	stmia	r12, {r0-r5, lr}		@ v7_invalidate_l1 touches r0-r6
+	adr	r0, __v7_setup_stack_ptr	@ the local stack
+	ldr     r12, [r0]
+        add     r12, r12, r0                    @ the local stack
+	stmia	r12, {r1-r6, lr}		@ v7_invalidate_l1 touches r0-r6
 	bl      v7_invalidate_l1
-	ldmia	r12, {r0-r5, lr}
+	ldmia	r12, {r1-r6, lr}
 
 __v7_setup_cont:
 	and	r0, r9, #0xff000000		@ ARM?
@@ -480,9 +509,15 @@ __errata_finish:
 	orr	r0, r0, r6			@ set them
  THUMB(	orr	r0, r0, #1 << 30	)	@ Thumb exceptions
 	ret	lr				@ return to head.S:__ret
+        .align  2
+__v7_setup_stack_ptr:
+        .word   PHYS_RELATIVE(__v7_setup_stack, .)
 ENDPROC(__v7_setup)
 
+	.bss
 	.align	2
+    /* This is for arm_wrapper (export symbol) */
+	.global __v7_setup_stack
 __v7_setup_stack:
 	.space	4 * 7				@ 12 registers
 
@@ -648,6 +683,16 @@ __krait_proc_info:
 	 */
 	__v7_proc __krait_proc_info, __v7_setup, hwcaps = HWCAP_IDIV | HWCAP_VFPv4
 	.size	__krait_proc_info, . - __krait_proc_info
+
+	/*
+	 * Match a53 processor core.
+	 */
+	.type	__a53_proc_info, #object
+__a53_proc_info:
+	.long	0x000fd030		@ Required ID value, [15..4]=0xd03
+	.long	0x000ffff0		@ Mask for ID
+	__v7_proc __a53_proc_info, __a53_setup
+	.size	__a53_proc_info, . - __a53_proc_info
 
 	/*
 	 * Match any ARMv7 processor core.

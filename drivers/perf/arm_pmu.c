@@ -22,9 +22,12 @@
 #include <linux/spinlock.h>
 #include <linux/irq.h>
 #include <linux/irqdesc.h>
+#include <linux/smp.h>
 
 #include <asm/cputype.h>
 #include <asm/irq_regs.h>
+
+static irqreturn_t armpmu_core2_irqret;
 
 static int
 armpmu_map_cache_event(const unsigned (*cache_map)
@@ -559,6 +562,38 @@ int armpmu_register(struct arm_pmu *armpmu, int type)
 	return perf_pmu_register(&armpmu->pmu, armpmu->name, type);
 }
 
+/* Called via IPI on the second core */
+static void armpmu_kick(void *data)
+{
+    void *dev = data;
+    struct arm_pmu *armpmu = (struct arm_pmu *) dev;
+
+    armpmu_core2_irqret = armpmu->handle_irq(0, dev);
+    smp_wmb();
+}
+
+irqreturn_t armpmu_single_interrupt(int irq, void *dev)
+{
+    struct arm_pmu *armpmu = (struct arm_pmu *) dev;
+    irqreturn_t irqret = armpmu->handle_irq(irq, dev);
+    int err;
+    int cpu;
+
+    if (irqret != IRQ_NONE)
+        return irqret;
+
+    local_irq_enable();
+    for (cpu = 1; cpu < nr_cpu_ids; cpu++)
+        err = smp_call_function_single(cpu, armpmu_kick, (void*)dev, true);
+    local_irq_disable();
+
+    if (err)
+        return irqret;
+
+    smp_rmb();
+    return armpmu_core2_irqret;
+}
+
 /* Set at runtime when we know what CPU type we are. */
 static struct arm_pmu *__oprofile_cpu_pmu;
 
@@ -634,6 +669,8 @@ static int cpu_pmu_request_irq(struct arm_pmu *cpu_pmu, irq_handler_t handler)
 	struct platform_device *pmu_device = cpu_pmu->plat_device;
 	struct pmu_hw_events __percpu *hw_events = cpu_pmu->hw_events;
 
+    irq_handler_t handler_irq = handler;
+
 	if (!pmu_device)
 		return -ENODEV;
 
@@ -643,9 +680,18 @@ static int cpu_pmu_request_irq(struct arm_pmu *cpu_pmu, irq_handler_t handler)
 		return 0;
 	}
 
+    if (pmu_device->num_resources < num_possible_cpus()) {
+        if (irqs != 1) {
+            pr_err("irqs=%d, not for singal pmu interrupt work-around\n", irqs);
+            return -ENODEV;
+        }
+        handler_irq = armpmu_single_interrupt;
+    }
+
 	irq = platform_get_irq(pmu_device, 0);
 	if (irq >= 0 && irq_is_percpu(irq)) {
-		err = request_percpu_irq(irq, handler, "arm-pmu",
+        handler_irq = handler;
+		err = request_percpu_irq(irq, handler_irq, "arm-pmu",
 					 &hw_events->percpu_pmu);
 		if (err) {
 			pr_err("unable to request IRQ%d for ARM PMU counters\n",
@@ -676,7 +722,7 @@ static int cpu_pmu_request_irq(struct arm_pmu *cpu_pmu, irq_handler_t handler)
 				continue;
 			}
 
-			err = request_irq(irq, handler,
+			err = request_irq(irq, handler_irq,
 					  IRQF_NOBALANCING | IRQF_NO_THREAD, "arm-pmu",
 					  per_cpu_ptr(&hw_events->percpu_pmu, cpu));
 			if (err) {
@@ -900,8 +946,8 @@ int arm_pmu_device_probe(struct platform_device *pdev,
 		if (!ret)
 			ret = init_fn(pmu);
 	} else {
-		ret = probe_current_pmu(pmu, probe_table);
 		cpumask_setall(&pmu->supported_cpus);
+		ret = probe_current_pmu(pmu, probe_table);
 	}
 
 	if (ret) {

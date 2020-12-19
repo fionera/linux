@@ -29,7 +29,7 @@
 #include <trace/events/power.h>
 #include <linux/compiler.h>
 #include <linux/moduleparam.h>
-
+#include <../../drivers/rtk_kdriver/common/include/rbus/stb_reg.h>
 #include "power.h"
 
 const char *pm_labels[] = { "mem", "standby", "freeze", NULL };
@@ -303,6 +303,8 @@ void __weak arch_suspend_enable_irqs(void)
 	local_irq_enable();
 }
 
+extern bool console_suspend_lately_disabled;
+
 /**
  * suspend_enter - Make the system enter the given sleep state.
  * @state: System sleep state to enter.
@@ -351,6 +353,9 @@ static int suspend_enter(suspend_state_t state, bool *wakeup)
 		trace_suspend_resume(TPS("machine_suspend"), state, false);
 		goto Platform_wake;
 	}
+
+	if (!console_suspend_lately_disabled)
+		suspend_console();
 
 	error = disable_nonboot_cpus();
 	if (error || suspend_test(TEST_CPUS))
@@ -412,7 +417,8 @@ int suspend_devices_and_enter(suspend_state_t state)
 	if (error)
 		goto Close;
 
-	suspend_console();
+	if (console_suspend_lately_disabled)
+		suspend_console();
 	suspend_test_start();
 	error = dpm_suspend_start(PMSG_SUSPEND);
 	if (error) {
@@ -428,11 +434,14 @@ int suspend_devices_and_enter(suspend_state_t state)
 	} while (!error && !wakeup && platform_suspend_again(state));
 
  Resume_devices:
+	if (!console_suspend_lately_disabled)
+		resume_console();
 	suspend_test_start();
 	dpm_resume_end(PMSG_RESUME);
 	suspend_test_finish("resume devices");
 	trace_suspend_resume(TPS("resume_console"), state, true);
-	resume_console();
+	if (console_suspend_lately_disabled)
+		resume_console();
 	trace_suspend_resume(TPS("resume_console"), state, false);
 
  Close:
@@ -531,7 +540,18 @@ int pm_suspend(suspend_state_t state)
 
 	if (state <= PM_SUSPEND_ON || state >= PM_SUSPEND_MAX)
 		return -EINVAL;
-
+	// pass val "0x9021affa" in the dummy register for the emcu flow sync (STR+WOL)
+#if defined(CONFIG_REALTEK_INT_MICOM)
+	//pr_info("[%s]: emcu flow sync mode no = %x\n",__FUNCTION__, rtd_inl(0xb8060110));
+        //if(rtd_inl(0xb8060110) == 0x9021aebe)
+        //    rtd_outl(STB_ST_SRST1_reg, BIT(9));
+	//rtd_outl(0xb8060110, 0);
+#else
+        pr_info("[%s]: emcu flow sync mode no = %x\n",__FUNCTION__, rtd_inl(0xb8060110));
+        if(rtd_inl(0xb8060110) == 0x9021aebe)
+            rtd_outl(STB_ST_SRST1_reg, BIT(9));
+        rtd_outl(0xb8060110, 0);
+#endif
 	error = enter_state(state);
 	if (error) {
 		suspend_stats.fail++;

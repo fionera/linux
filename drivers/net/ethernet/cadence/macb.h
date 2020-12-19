@@ -249,6 +249,8 @@
 #define GEM_RXBS_SIZE		8
 #define GEM_DDRP_OFFSET		24 /* disc_when_no_ahb */
 #define GEM_DDRP_SIZE		1
+#define GEM_BDBRW_OFFSET	27
+#define GEM_BDBRW_SIZE		1
 
 
 /* Bitfields in NSR */
@@ -754,6 +756,7 @@ struct macb_or_gem_ops {
 	void	(*mog_free_rx_buffers)(struct macb *bp);
 	void	(*mog_init_rings)(struct macb *bp);
 	int	(*mog_rx)(struct macb *bp, int budget);
+	u32	(*mog_read_isr)(struct macb *bp);
 };
 
 struct macb_config {

@@ -14,3 +14,19 @@ snd-pxa2xx-lib-$(CONFIG_SND_PXA2XX_LIB_AC97)	+= pxa2xx-ac97-lib.o
 
 obj-$(CONFIG_SND_PXA2XX_AC97)	+= snd-pxa2xx-ac97.o
 snd-pxa2xx-ac97-objs		:= pxa2xx-ac97.o
+
+ifdef CONFIG_RTK_KDRIVER_SUPPORT
+KBUILD_CPPFLAGS += -Idrivers/rtk_kdriver/include
+KBUILD_CPPFLAGS += -Idrivers/rtk_kdriver/include/rtk_kdriver
+KBUILD_CPPFLAGS += -Idrivers/rtk_kdriver/audio_hw
+
+KBUILD_CPPFLAGS += -Idrivers/rtk_kdriver/common/include
+KBUILD_CPPFLAGS += -Idrivers/rtk_kdriver/common
+KBUILD_CPPFLAGS += -Idrivers/rtk_kdriver/common/IPC/generate/include/system
+KBUILD_CPPFLAGS += -Idrivers/rtk_kdriver/common/IPC/include
+
+obj-$(CONFIG_SND_KDRV_REALTEK) += rtk_snd.o
+obj-$(CONFIG_SND_KDRV_REALTEK) += rtk_kcontrol.o rtk_gain_ctl.o
+endif
+
+obj-$(CONFIG_SND_REALTEK) += rtk_snd.o

@@ -128,6 +128,10 @@ extern void clear_ptrace_hw_breakpoint(struct task_struct *tsk);
 
 int arch_install_hw_breakpoint(struct perf_event *bp);
 void arch_uninstall_hw_breakpoint(struct perf_event *bp);
+#if defined(CONFIG_REALTEK_WATCHPOINT) || defined(CONFIG_RTK_KDRV_WATCHPOINT)
+int arch_install_hw_breakpoint1(struct arch_hw_breakpoint *info);
+void arch_uninstall_hw_breakpoint1(struct arch_hw_breakpoint *info);
+#endif
 void hw_breakpoint_pmu_read(struct perf_event *bp);
 int hw_breakpoint_slots(int type);
 

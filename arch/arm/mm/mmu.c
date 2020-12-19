@@ -32,6 +32,7 @@
 #include <asm/traps.h>
 #include <asm/procinfo.h>
 #include <asm/memory.h>
+#include <asm/kasan.h>
 
 #include <asm/mach/arch.h>
 #include <asm/mach/map.h>
@@ -275,7 +276,7 @@ static struct mem_type mem_types[] = {
 	[MT_UNCACHED] = {
 		.prot_pte	= PROT_PTE_DEVICE,
 		.prot_l1	= PMD_TYPE_TABLE,
-		.prot_sect	= PMD_TYPE_SECT | PMD_SECT_XN,
+		.prot_sect	= PMD_TYPE_SECT | PMD_SECT_XN | PMD_SECT_AP_WRITE,
 		.domain		= DOMAIN_IO,
 	},
 	[MT_CACHECLEAN] = {
@@ -572,7 +573,7 @@ static void __init build_mem_type_table(void)
 	 * in the Short-descriptor translation table format descriptors.
 	 */
 	if (cpu_arch == CPU_ARCH_ARMv7 &&
-		(read_cpuid_ext(CPUID_EXT_MMFR0) & 0xF) == 4) {
+		(read_cpuid_ext(CPUID_EXT_MMFR0) & 0xF) >= 4) {
 		user_pmd_table |= PMD_PXNTABLE;
 	}
 #endif
@@ -937,6 +938,39 @@ static void __init create_mapping(struct map_desc *md)
 	} while (pgd++, addr != end);
 }
 
+static void __init create_page_mapping(unsigned long _start, unsigned long _size)
+{
+    unsigned long addr, start, end;
+    struct map_desc map;
+
+    start = round_down(_start, PMD_SIZE);
+    end = start + PMD_SIZE;
+
+    if (end > arm_lowmem_limit) {
+        pr_warn("%s use lowmem_limit(%llx) as original end(%lx)\n", __FUNCTION__, (long long)arm_lowmem_limit, end);
+        end = arm_lowmem_limit;
+    }
+    if (start >= end) {
+        pr_err("%s err_out start(%lx) >= end(%lx)\n", __FUNCTION__, start, end);
+        return;
+    }
+
+    /*
+     * Clear previous low-memory mapping to ensure that the
+     * TLB does not see any conflicting entries.
+     */
+    for (addr = __phys_to_virt(start); addr < __phys_to_virt(end); addr += PMD_SIZE)
+        pmd_clear(pmd_off_k(addr));
+
+    /* Use type MT_MEMORY_DMA_READY for page (PTE) mapping */
+    map.pfn = __phys_to_pfn(start);
+    map.virtual = __phys_to_virt(start);
+    map.length = end - start;
+    map.type = MT_MEMORY_DMA_READY;
+
+    create_mapping(&map);
+}
+
 /*
  * Create the architecture specific mappings
  */
@@ -952,6 +986,10 @@ void __init iotable_init(struct map_desc *io_desc, int nr)
 	svm = early_alloc_aligned(sizeof(*svm) * nr, __alignof__(*svm));
 
 	for (md = io_desc; nr; md++, nr--) {
+
+		if (md->pfn == __phys_to_pfn(RPC_BASE_PHYS))
+            create_page_mapping(__pfn_to_phys(md->pfn), md->length);
+
 		create_mapping(md);
 
 		vm = &svm->vm;
@@ -1078,7 +1116,7 @@ void __init debug_ll_io_init(void)
 #endif
 
 static void * __initdata vmalloc_min =
-	(void *)(VMALLOC_END - (240 << 20) - VMALLOC_OFFSET);
+	(void *)(VMALLOC_END - (496 << 20) - VMALLOC_OFFSET);
 
 /*
  * vmalloc=size forces the vmalloc area to be exactly 'size'
@@ -1181,6 +1219,65 @@ void __init sanity_check_meminfo(void)
 
 	if (should_use_highmem)
 		pr_notice("Consider using a HIGHMEM enabled kernel.\n");
+	else {
+		int i, j, highmem = 0;
+
+		for (i = 0, j = 0; i < meminfo.nr_banks; i++) {
+			struct membank *bank = &meminfo.bank[j];
+			*bank = meminfo.bank[i];
+
+			if (bank->start > ULONG_MAX)
+				highmem = 1;
+
+			if (IS_ENABLED(CONFIG_HIGHMEM)) {
+
+				if (__va(bank->start) >= vmalloc_min ||
+					__va(bank->start) < (void *)PAGE_OFFSET)
+					highmem = 1;
+
+				bank->highmem = highmem;
+
+				/*
+				 * Split those memory banks which are partially overlapping
+				 * the vmalloc area greatly simplifying things later.
+				 */
+				if (!highmem && __va(bank->start) < vmalloc_min &&
+					bank->size > vmalloc_min - __va(bank->start)) {
+					if (meminfo.nr_banks >= NR_BANKS) {
+						printk(KERN_CRIT "NR_BANKS too low, "
+							   "ignoring high memory\n");
+					} else {
+						memmove(bank + 1, bank,
+								(meminfo.nr_banks - i) * sizeof(*bank));
+						meminfo.nr_banks++;
+						i++;
+						bank[1].size -= vmalloc_min - __va(bank->start);
+						bank[1].start = __pa(vmalloc_min - 1) + 1;
+						bank[1].highmem = highmem = 1;
+						j++;
+					}
+					bank->size = vmalloc_min - __va(bank->start);
+				}
+			} else {
+
+				bank->highmem = highmem;
+
+				/*
+				 * Check whether this memory bank would partially overlap
+				 * the vmalloc area.
+				 */
+				if (__va(bank->start + bank->size - 1) >= vmalloc_min ||
+					__va(bank->start + bank->size - 1) <= __va(bank->start)) {
+					unsigned long newsize = vmalloc_min - __va(bank->start);
+					pr_notice("Overlap vmalloc area, meminfo bank newsize=%ld\n", newsize);
+					bank->size = newsize;
+				}
+
+			}
+
+			j++;
+		}
+	}
 
 	high_memory = __va(arm_lowmem_limit - 1) + 1;
 
@@ -1205,12 +1302,16 @@ static inline void prepare_page_table(void)
 	/*
 	 * Clear out all the mappings below the kernel image.
 	 */
-	for (addr = 0; addr < MODULES_VADDR; addr += PMD_SIZE)
+	for (addr = 0; addr < TASK_SIZE; addr += PMD_SIZE)
 		pmd_clear(pmd_off_k(addr));
 
 #ifdef CONFIG_XIP_KERNEL
 	/* The XIP kernel is mapped in the module area -- skip over it */
 	addr = ((unsigned long)_etext + PMD_SIZE - 1) & PMD_MASK;
+#endif
+#ifdef CONFIG_KASAN
+	/* Skip shadow memory address */
+	addr = MODULES_VADDR;
 #endif
 	for ( ; addr < PAGE_OFFSET; addr += PMD_SIZE)
 		pmd_clear(pmd_off_k(addr));
@@ -1258,6 +1359,28 @@ void __init arm_mm_memblock_reserve(void)
 	memblock_reserve(PHYS_OFFSET, __pa(swapper_pg_dir) - PHYS_OFFSET);
 #endif
 }
+
+#ifdef CONFIG_REALTEK_LOGBUF
+__attribute__((weak)) unsigned long rtdlog_get_buffer_size(void)
+{
+        return 0;
+}
+void create_rtdlog_mapping (void)
+{    
+    struct map_desc map;
+    unsigned long addr, size;
+    addr = 0x1ca00000;
+    size = rtdlog_get_buffer_size();
+
+    create_page_mapping(addr, size);
+
+    map.pfn = __phys_to_pfn(addr);
+    map.virtual = __phys_to_virt(addr);
+    map.length = size;
+    map.type = MT_MEMORY_RWX_NONCACHED;
+    create_mapping(&map);
+}
+#endif
 
 /*
  * Set up the device mappings.  Since we clear out the page tables for all
@@ -1344,6 +1467,9 @@ static void __init devicemaps_init(const struct machine_desc *mdesc)
 	map.type = MT_LOW_VECTORS;
 	create_mapping(&map);
 
+#ifdef CONFIG_REALTEK_LOGBUF
+        create_rtdlog_mapping();
+#endif
 	/*
 	 * Ask the machine support to map in the statically mapped devices.
 	 */
@@ -1593,4 +1719,5 @@ void __init paging_init(const struct machine_desc *mdesc)
 
 	empty_zero_page = virt_to_page(zero_page);
 	__flush_dcache_page(NULL, empty_zero_page);
+	kasan_init();
 }

@@ -56,12 +56,17 @@ void mmc_set_initial_state(struct mmc_host *host);
 
 static inline void mmc_delay(unsigned int ms)
 {
+#ifdef CONFIG_BRINGUP_RTD288O_HACK
+	cond_resched();
+	mdelay(ms);
+#else
 	if (ms < 1000 / HZ) {
 		cond_resched();
 		mdelay(ms);
 	} else {
 		msleep(ms);
 	}
+#endif
 }
 
 void mmc_rescan(struct work_struct *work);
@@ -87,6 +92,7 @@ void mmc_remove_card_debugfs(struct mmc_card *card);
 void mmc_init_context_info(struct mmc_host *host);
 
 int mmc_execute_tuning(struct mmc_card *card);
+int mmc_execute_tuning_400(struct mmc_card *card);
 int mmc_hs200_to_hs400(struct mmc_card *card);
 int mmc_hs400_to_hs200(struct mmc_card *card);
 

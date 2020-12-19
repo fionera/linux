@@ -447,6 +447,14 @@ choice
 		  Say Y here if you want kernel low-level debugging support
 		  on KS8695.
 
+	config DEBUG_LG1K_UART0
+		bool "Kernel low-level debugging on LG1K SoCs using UART0"
+		depends on ARCH_LG1K
+		select DEBUG_UART_PL01X
+		help
+		  Say Y here if you want kernel low-level debugging support
+		  on LG1K SoCs using internal UART0 (PL010).
+
 	config DEBUG_LPC18XX_UART0
 		bool "Kernel low-level debugging via LPC18xx/43xx UART0"
 		depends on ARCH_LPC18XX
@@ -1446,6 +1454,7 @@ config DEBUG_UART_PHYS
 	default 0xf991e000 if DEBUG_QCOM_UARTDM
 	default 0xfcb00000 if DEBUG_HI3620_UART
 	default 0xfd883000 if DEBUG_ALPINE_UART0
+	default 0xfe000000 if DEBUG_LG1K_UART0
 	default 0xfe800000 if ARCH_IOP32X
 	default 0xff690000 if DEBUG_RK32_UART2
 	default 0xffc02000 if DEBUG_SOCFPGA_UART0
@@ -1518,6 +1527,7 @@ config DEBUG_UART_VIRT
 	default 0xfde12000 if ARCH_DOVE
 	default 0xfe012000 if ARCH_ORION5X
 	default 0xf31004c0 if DEBUG_MESON_UARTAO
+	default 0xfe000000 if DEBUG_LG1K_UART0
 	default 0xfe017000 if DEBUG_MMP_UART2
 	default 0xfe018000 if DEBUG_MMP_UART3
 	default 0xfe100000 if DEBUG_IMX23_UART || DEBUG_IMX28_UART

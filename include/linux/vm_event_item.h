@@ -19,7 +19,36 @@
 #define HIGHMEM_ZONE(xx)
 #endif
 
-#define FOR_ALL_ZONES(xx) DMA_ZONE(xx) DMA32_ZONE(xx) xx##_NORMAL, HIGHMEM_ZONE(xx) xx##_MOVABLE
+#ifdef CONFIG_CMA
+#define MOVABLE_ZONE(xx) xx##_MOVABLE,
+#ifdef CONFIG_HIGHMEM
+#define CMA_ZONE_LOWMEM(xx) xx##_CMA_LOWMEM,
+#define CMA_ZONE_HIGHMEM(xx) xx##_CMA_HIGHMEM
+#else
+#define CMA_ZONE_LOWMEM(xx) xx##_CMA_LOWMEM
+#define CMA_ZONE_HIGHMEM(xx)
+#endif
+#else
+#define MOVABLE_ZONE(xx) xx##_MOVABLE
+#define CMA_ZONE_LOWMEM(xx)
+#define CMA_ZONE_HIGHMEM(xx)
+#endif
+
+#ifdef CONFIG_ZONE_ZRAM
+#define ZRAM_ZONE(xx) xx##_ZRAM
+#else
+#define ZRAM_ZONE(xx)
+#endif
+
+#ifdef CONFIG_ZONE_ZRAM
+ #ifdef CONFIG_ZONE_ZRAM_DISABLE_FALLBACK
+#define FOR_ALL_ZONES(xx) DMA_ZONE(xx) DMA32_ZONE(xx) xx##_NORMAL, HIGHMEM_ZONE(xx) MOVABLE_ZONE(xx) CMA_ZONE_LOWMEM(xx) CMA_ZONE_HIGHMEM(xx), ZRAM_ZONE(xx)
+ #else
+#define FOR_ALL_ZONES(xx) ZRAM_ZONE(xx), DMA_ZONE(xx) DMA32_ZONE(xx) xx##_NORMAL, HIGHMEM_ZONE(xx) MOVABLE_ZONE(xx) CMA_ZONE_LOWMEM(xx) CMA_ZONE_HIGHMEM(xx)
+ #endif
+#else
+#define FOR_ALL_ZONES(xx) DMA_ZONE(xx) DMA32_ZONE(xx) xx##_NORMAL, HIGHMEM_ZONE(xx) MOVABLE_ZONE(xx) CMA_ZONE_LOWMEM(xx) CMA_ZONE_HIGHMEM(xx)
+#endif
 
 enum vm_event_item { PGPGIN, PGPGOUT, PSWPIN, PSWPOUT,
 		FOR_ALL_ZONES(PGALLOC),

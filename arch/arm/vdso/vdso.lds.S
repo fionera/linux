@@ -32,7 +32,7 @@ SECTIONS
 {
 	PROVIDE(_start = .);
 
-	. = SIZEOF_HEADERS;
+	. = 256;
 
 	.hash		: { *(.hash) }			:text
 	.gnu.hash	: { *(.gnu.hash) }

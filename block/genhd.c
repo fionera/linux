@@ -595,6 +595,8 @@ void add_disk(struct gendisk *disk)
 
 	disk->flags |= GENHD_FL_UP;
 
+	set_filtered_disk(disk);
+
 	retval = blk_alloc_devt(&disk->part0, &devt);
 	if (retval) {
 		WARN_ON(1);

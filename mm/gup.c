@@ -171,6 +171,111 @@ no_page:
 	return no_page_table(vma, flags);
 }
 
+#ifdef CONFIG_CMA_RTK_ALLOCATOR
+struct page *
+pli_follow_page(struct vm_area_struct *vma, unsigned long address, 
+		unsigned int flags, unsigned int *page_mask)
+{
+	pgd_t *pgd;
+	pud_t *pud;
+	pmd_t *pmd;
+	spinlock_t *ptl;
+	struct page *page;
+	struct mm_struct *mm = vma->vm_mm;
+	pte_t *ptep, pte;
+
+	*page_mask = 0;
+
+	page = follow_huge_addr(mm, address, flags & FOLL_WRITE);
+	if (!IS_ERR(page)) {
+		BUG_ON(flags & FOLL_GET);
+		return page;
+	}
+
+	pgd = pgd_offset(mm, address);
+	if (pgd_none(*pgd) || unlikely(pgd_bad(*pgd)))
+		return no_page_table(vma, flags);
+
+	pud = pud_offset(pgd, address);
+	if (pud_none(*pud))
+		return no_page_table(vma, flags);
+	if (pud_huge(*pud) && vma->vm_flags & VM_HUGETLB) {
+		page = follow_huge_pud(mm, address, pud, flags);
+		if (page)
+			return page;
+		return no_page_table(vma, flags);
+	}
+	if (unlikely(pud_bad(*pud)))
+		return no_page_table(vma, flags);
+
+	pmd = pmd_offset(pud, address);
+	if (pmd_none(*pmd))
+		return no_page_table(vma, flags);
+	if (pmd_huge(*pmd) && vma->vm_flags & VM_HUGETLB) {
+		page = follow_huge_pmd(mm, address, pmd, flags);
+		if (page)
+			return page;
+		return no_page_table(vma, flags);
+	}
+	if ((flags & FOLL_NUMA) && pmd_protnone(*pmd))
+		return no_page_table(vma, flags);
+	if (pmd_trans_huge(*pmd)) {
+		if (flags & FOLL_SPLIT) {
+			split_huge_page_pmd(vma, address, pmd);
+			return follow_page_pte(vma, address, pmd, flags);
+		}
+		ptl = pmd_lock(mm, pmd);
+		if (likely(pmd_trans_huge(*pmd))) {
+			if (unlikely(pmd_trans_splitting(*pmd))) {
+				spin_unlock(ptl);
+				wait_split_huge_page(vma->anon_vma, pmd);
+			} else {
+				page = follow_trans_huge_pmd(vma, address,
+							     pmd, flags);
+				spin_unlock(ptl);
+				*page_mask = HPAGE_PMD_NR - 1;
+				return page;
+			}
+		} else
+			spin_unlock(ptl);
+	}
+
+	if (unlikely(pmd_bad(*pmd)))
+		return no_page_table(vma, flags);
+
+	ptep = pte_offset_map_lock(mm, pmd, address, &ptl);
+	pte = *ptep;
+	if (!pte_present(pte)) {
+		goto no_page;
+	}
+	if ((flags & FOLL_NUMA) && pte_protnone(pte))
+		goto no_page;
+	if ((flags & FOLL_WRITE) && !pte_write(pte)) {
+		pte_unmap_unlock(ptep, ptl);
+		return NULL;
+	}
+
+	page = pte_page(pte);
+	if (unlikely(!page)) {
+		BUG();
+	}
+
+	if (flags & FOLL_GET)
+		get_page_foll(page);
+
+out:
+	pte_unmap_unlock(ptep, ptl);
+	return page;
+no_page:
+	pte_unmap_unlock(ptep, ptl);
+	if (!pte_none(pte)) {
+		pr_err("%s: the corresponding page entry (0x%lx) is not presented...\n", __func__, address);
+		return NULL;
+	}
+	return no_page_table(vma, flags);
+}
+#endif
+
 /**
  * follow_page_mask - look up a page descriptor from a user-virtual address
  * @vma: vm_area_struct mapping @address
@@ -496,8 +601,11 @@ long __get_user_pages(struct task_struct *tsk, struct mm_struct *mm,
 				goto next_page;
 			}
 
-			if (!vma || check_vma_flags(vma, gup_flags))
-				return i ? : -EFAULT;
+#ifdef CONFIG_CMA_RTK_ALLOCATOR
+			if (!vma || !(vma->vm_flags & VM_PLI))
+#endif
+				if (!vma || check_vma_flags(vma, gup_flags))
+					return i ? : -EFAULT;
 			if (is_vm_hugetlb_page(vma)) {
 				i = follow_hugetlb_page(mm, vma, pages, vmas,
 						&start, &nr_pages, i,
@@ -513,6 +621,11 @@ retry:
 		if (unlikely(fatal_signal_pending(current)))
 			return i ? i : -ERESTARTSYS;
 		cond_resched();
+#ifdef CONFIG_CMA_RTK_ALLOCATOR
+		if (vma && (vma->vm_flags & VM_PLI))
+			page = pli_follow_page(vma, start, foll_flags, &page_mask);
+		else
+#endif
 		page = follow_page_mask(vma, start, foll_flags, &page_mask);
 		if (!page) {
 			int ret;

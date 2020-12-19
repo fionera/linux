@@ -41,6 +41,9 @@
 #include <linux/jiffies.h>
 #include <linux/kthread.h>
 #include <linux/ktime.h>
+#ifdef CONFIG_COMPAT
+#include <linux/compat.h>
+#endif
 #include <asm/processor.h>
 
 #include "dvb_frontend.h"
@@ -1579,6 +1582,11 @@ static int dtv_property_process_get(struct dvb_frontend *fe,
 		tvp->u.st = c->block_count;
 		break;
 	default:
+		if (fe->ops.get_property) {
+			r = fe->ops.get_property(fe, tvp);
+			if (r != -EINVAL)
+				return r;
+		}
 		dev_dbg(fe->dvb->device,
 			"%s: FE property %d doesn't exist\n",
 			__func__, tvp->cmd);
@@ -1829,8 +1837,10 @@ static int dtv_property_process_set(struct dvb_frontend *fe,
 	/* Allow the frontend to validate incoming properties */
 	if (fe->ops.set_property) {
 		r = fe->ops.set_property(fe, tvp);
-		if (r < 0)
+		if (r != -EINVAL)
 			return r;
+		else
+			r = 0;
 	}
 
 	switch(tvp->cmd) {
@@ -2028,6 +2038,158 @@ static int dvb_frontend_ioctl(struct file *file,
 	up(&fepriv->sem);
 	return err;
 }
+
+#ifdef CONFIG_COMPAT
+#define COMPAT_FE_SET_PROPERTY	   _IOW('o', 82, struct compat_dtv_properties)
+#define COMPAT_FE_GET_PROPERTY	   _IOR('o', 83, struct compat_dtv_properties)
+
+struct compat_dtv_property {
+	__u32 cmd;
+	__u32 reserved[3];
+	union {
+		__u32 data;
+		struct dtv_fe_stats st;
+		struct {
+			__u8 data[32];
+			__u32 len;
+			__u32 reserved1[3];
+			compat_uptr_t reserved2;
+		} buffer;
+	} u;
+	int result;
+} __attribute__ ((packed));
+
+struct compat_dtv_properties {
+	__u32 num;
+	compat_uptr_t props;
+};
+
+static long get_compat_dtv_properties(struct dtv_properties *p64,
+				      struct compat_dtv_properties *p32)
+{
+	int ret = 0, i;
+
+	p64->num = p32->num;
+	p64->props = compat_alloc_user_space(p64->num * sizeof(*p64->props));
+	for (i = 0; i < p64->num; i++) {
+		struct dtv_property __user *props64;
+		struct compat_dtv_property __user *props32;
+		compat_uptr_t buf_reserved2;
+
+		props32 = (struct compat_dtv_property *)(uintptr_t)p32->props;
+		props64 = p64->props;
+		ret |= copy_in_user(&props64[i].cmd, &props32[i].cmd,
+				    sizeof(__u32));
+		ret |= copy_in_user(&props64[i].reserved,
+				    &props32[i].reserved, 3 * sizeof(__u32));
+		ret |= copy_in_user(&props64[i].u.data, &props32[i].u.data,
+				    sizeof(__u32));
+		ret |= copy_in_user(&props64[i].u.st, &props32[i].u.st,
+				    sizeof(struct dtv_fe_stats));
+		ret |= copy_in_user(&props64[i].u.buffer.data,
+				    &props32[i].u.buffer.data,
+				    32 * sizeof(__u8));
+		ret |= copy_in_user(&props64[i].u.buffer.len,
+				    &props32[i].u.buffer.len, sizeof(__u32));
+		ret |= copy_in_user(&props64[i].u.buffer.reserved1,
+				    &props32[i].u.buffer.reserved1,
+				    3 * sizeof(__u32));
+		ret |= get_user(buf_reserved2, &props32[i].u.buffer.reserved2);
+		ret |= put_user((void *)(uintptr_t)buf_reserved2,
+				&props64[i].u.buffer.reserved2);
+		ret |= copy_in_user(&props64[i].result, &props32[i].result,
+				    sizeof(int));
+	}
+
+	if (ret)
+		return -EFAULT;
+
+	return 0;
+}
+
+static long put_compat_dtv_properties(struct dtv_properties *p64,
+				      struct compat_dtv_properties *p32)
+{
+	int ret = 0, i;
+
+	p32->num = p32->num;
+	for (i = 0; i < p64->num; i++) {
+		struct compat_dtv_property __user *props32;
+		struct dtv_property __user *props64;
+		void *buf_reserved2;
+
+		props32 = (struct compat_dtv_property *)(uintptr_t)p32->props;
+		props64 = p64->props;
+		ret |= copy_in_user(&props32[i].cmd, &props64[i].cmd,
+				    sizeof(__u32));
+		ret |= copy_in_user(&props32[i].reserved,
+				    &props64[i].reserved, 3 * sizeof(__u32));
+		ret |= copy_in_user(&props32[i].u.data, &props64[i].u.data,
+				    sizeof(__u32));
+		ret |= copy_in_user(&props32[i].u.st, &props64[i].u.st,
+				    sizeof(struct dtv_fe_stats));
+		ret |= copy_in_user(&props32[i].u.buffer.data,
+				    &props64[i].u.buffer.data,
+				    32 * sizeof(__u8));
+		ret |= copy_in_user(&props32[i].u.buffer.len,
+				    &props64[i].u.buffer.len, sizeof(__u32));
+		ret |= copy_in_user(&props32[i].u.buffer.reserved1,
+				    &props64[i].u.buffer.reserved1,
+				    3 * sizeof(__u32));
+		ret |= get_user(buf_reserved2, &props64[i].u.buffer.reserved2);
+		ret |= put_user((compat_uptr_t)(uintptr_t)buf_reserved2,
+				&props32[i].u.buffer.reserved2);
+		ret |= copy_in_user(&props32[i].result, &props64[i].result,
+				    sizeof(int));
+	}
+
+	if (ret)
+		return -EFAULT;
+
+	return 0;
+}
+
+static int dvb_frontend_compat_ioctl(struct file *file, unsigned int cmd,
+				     void *arg)
+{
+	int err = -EOPNOTSUPP;
+	struct compat_dtv_properties *parg =
+		(struct compat_dtv_properties *)(uintptr_t)arg;
+
+	switch (cmd) {
+	case COMPAT_FE_SET_PROPERTY:
+	{
+		struct dtv_properties tvps;
+
+		if (get_compat_dtv_properties(&tvps, parg))
+			return -EFAULT;
+		err = dvb_frontend_ioctl(file, FE_SET_PROPERTY, &tvps);
+		if (put_compat_dtv_properties(&tvps, parg))
+			return -EFAULT;
+
+		break;
+	}
+	case COMPAT_FE_GET_PROPERTY:
+	{
+		struct dtv_properties tvps;
+
+		if (get_compat_dtv_properties(&tvps, parg))
+			return -EFAULT;
+		err = dvb_frontend_ioctl(file, FE_GET_PROPERTY, &tvps);
+		if (put_compat_dtv_properties(&tvps, parg))
+			return -EFAULT;
+
+		break;
+	}
+	default:
+		err = dvb_frontend_ioctl(file, cmd, (void *)parg);
+
+		break;
+	}
+
+	return err;
+}
+#endif
 
 static int dvb_frontend_ioctl_properties(struct file *file,
 			unsigned int cmd, void *parg)
@@ -2668,6 +2830,9 @@ static int dvb_frontend_release(struct inode *inode, struct file *file)
 static const struct file_operations dvb_frontend_fops = {
 	.owner		= THIS_MODULE,
 	.unlocked_ioctl	= dvb_generic_ioctl,
+#ifdef CONFIG_COMPAT
+	.compat_ioctl	= dvb_generic_compat_ioctl,
+#endif
 	.poll		= dvb_frontend_poll,
 	.open		= dvb_frontend_open,
 	.release	= dvb_frontend_release,
@@ -2730,7 +2895,10 @@ int dvb_register_frontend(struct dvb_adapter* dvb,
 #if defined(CONFIG_MEDIA_CONTROLLER_DVB)
 		.name = fe->ops.info.name,
 #endif
-		.kernel_ioctl = dvb_frontend_ioctl
+		.kernel_ioctl = dvb_frontend_ioctl,
+#ifdef CONFIG_COMPAT
+		.kernel_compat_ioctl = dvb_frontend_compat_ioctl
+#endif
 	};
 
 	dev_dbg(dvb->device, "%s:\n", __func__);

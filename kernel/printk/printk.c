@@ -55,6 +55,10 @@
 #include "console_cmdline.h"
 #include "braille.h"
 
+#ifdef CONFIG_REALTEK_LOGBUF
+#include <rtd_logger.h> //change rtd_logger.h dir
+#endif
+
 int console_printk[4] = {
 	CONSOLE_LOGLEVEL_DEFAULT,	/* console_loglevel */
 	MESSAGE_LOGLEVEL_DEFAULT,	/* default_message_loglevel */
@@ -232,7 +236,11 @@ struct printk_log {
 	u8 facility;		/* syslog facility */
 	u8 flags:5;		/* internal record flags */
 	u8 level:3;		/* syslog level */
-};
+}
+#ifdef CONFIG_HAVE_EFFICIENT_UNALIGNED_ACCESS
+__packed __aligned(4)
+#endif
+;
 
 /*
  * The logbuf_lock protects kmsg buffer, indices, counters.  This can be taken
@@ -273,14 +281,11 @@ static u32 clear_idx;
 #define LOG_FACILITY(v)		((v) >> 3 & 0xff)
 
 /* record buffer */
-#if defined(CONFIG_HAVE_EFFICIENT_UNALIGNED_ACCESS)
-#define LOG_ALIGN 4
-#else
 #define LOG_ALIGN __alignof__(struct printk_log)
-#endif
 #define __LOG_BUF_LEN (1 << CONFIG_LOG_BUF_SHIFT)
 static char __log_buf[__LOG_BUF_LEN] __aligned(LOG_ALIGN);
 static char *log_buf = __log_buf;
+char *native_logbuf_addr = __log_buf;
 static u32 log_buf_len = __LOG_BUF_LEN;
 
 /* Return log buffer address */
@@ -419,6 +424,101 @@ static u32 truncate_msg(u16 *text_len, u16 *trunc_msg_len,
 	return msg_used_size(*text_len + *trunc_msg_len, 0, pad_len);
 }
 
+#ifdef CONFIG_REALTEK_LOGBUF
+
+__attribute__((weak)) int rtdlog_save_msg(EnumLogbufType type, const char * text,rtd_msg_header * header)
+{
+        return -1;
+}
+
+__attribute__((weak)) void rtd_logbuf_save_log( int level, const char *text, u16 text_len)
+{
+        return 0;
+}
+void save_early_log(void)
+{
+    u32 end_idx = log_next_idx;
+    u64 end_seq = log_next_seq;
+    u32 now_idx = 0;
+    char * start_addr = log_buf;
+    char * log_addr = log_buf;
+    u32 bound_addr = start_addr + __LOG_BUF_LEN - sizeof(struct printk_log);
+    int i;
+    int valide_flag = 0;
+    struct printk_log * kernel_log_header;
+    rtd_msg_header tmp_header;
+
+    //get log from kernel raw logbuf
+        //check if start from index:0 can reach log_next_idx
+    for(i = 0; i <= end_seq; ++i)
+    {
+        kernel_log_header = start_addr + now_idx;
+        //check address
+        if((u32)kernel_log_header > bound_addr)
+        {
+            break;
+        }
+        //update index
+        now_idx += kernel_log_header->len;
+        //check index
+        if(now_idx == end_idx)
+        {
+            valide_flag = 1;
+            break;
+        }
+    }
+    //check log valid flag
+    if(!valide_flag)
+    {
+        //pr_err("save early failed,log wrapped!\n");
+        return;
+    }
+    //save log
+    now_idx = 0;
+    for(i = 0;i <= end_seq;++i)
+    {
+        //check log wrap,if wrap drop remain logs
+        if(log_next_idx < end_idx)
+        {
+            return;
+        }
+        kernel_log_header = start_addr + now_idx;
+        //check address
+        if((u32)kernel_log_header > bound_addr)
+        {
+            break;
+        }
+        //packet log
+        tmp_header.cpu_type = (u8)KERNEL_BUF;
+        tmp_header.cpu_core = 0xff;
+        tmp_header.pid = 0xffffffff;
+        tmp_header.tid = 0xffffffff;
+        tmp_header.timestamp = kernel_log_header->ts_nsec;
+        tmp_header.level = (u8)kernel_log_header->level;
+        tmp_header.text_len = (u32)kernel_log_header->text_len;
+        tmp_header.len = sizeof(tmp_header) + (u32)tmp_header.text_len;
+        tmp_header.module = 0;
+
+        memset(tmp_header.name,'#',sizeof(tmp_header.name));
+        snprintf(tmp_header.name,sizeof(tmp_header.name),"Unknown");
+        tmp_header.name[sizeof(tmp_header.name)-1] = '\0';
+
+        //save log to rtd logbuf
+        log_addr = (char *)kernel_log_header;
+        log_addr += sizeof(struct printk_log);
+        rtdlog_save_msg(KERNEL_BUF, log_addr, &tmp_header);
+        //update index
+        now_idx += kernel_log_header->len;
+        //check index
+        if(now_idx == end_idx)
+        {
+            break;
+        }
+    }
+}
+EXPORT_SYMBOL(save_early_log);
+#endif
+
 /* insert record into the buffer, discard old ones, update heads */
 static int log_store(int facility, int level,
 		     enum log_flags flags, u64 ts_nsec,
@@ -426,11 +526,14 @@ static int log_store(int facility, int level,
 		     const char *text, u16 text_len)
 {
 	struct printk_log *msg;
-	u32 size, pad_len;
+	u32 size, pad_len, extra_len;
 	u16 trunc_msg_len = 0;
+	char extra[32];
+
+	extra_len = sprintf(extra, "(%d)-%04d\t", smp_processor_id(), task_pid_nr(current)); // RTK_patch: print cpu id and task pid
 
 	/* number of '\0' padding bytes to next message */
-	size = msg_used_size(text_len, dict_len, &pad_len);
+	size = msg_used_size(text_len + extra_len, dict_len, &pad_len);
 
 	if (log_make_free_space(size)) {
 		/* truncate the message if it is too long for empty buffer */
@@ -453,8 +556,9 @@ static int log_store(int facility, int level,
 
 	/* fill message */
 	msg = (struct printk_log *)(log_buf + log_next_idx);
-	memcpy(log_text(msg), text, text_len);
-	msg->text_len = text_len;
+	memcpy(log_text(msg), extra, extra_len);
+	memcpy(log_text(msg) + extra_len, text, text_len);
+	msg->text_len = text_len + extra_len;
 	if (trunc_msg_len) {
 		memcpy(log_text(msg) + text_len, trunc_msg, trunc_msg_len);
 		msg->text_len += trunc_msg_len;
@@ -474,6 +578,11 @@ static int log_store(int facility, int level,
 	/* insert message */
 	log_next_idx += msg->len;
 	log_next_seq++;
+
+#ifdef CONFIG_REALTEK_LOGBUF
+        rtd_logbuf_save_log(level, text, text_len);
+
+#endif
 
 	return msg->text_len;
 }
@@ -1548,6 +1657,35 @@ static inline void printk_delay(void)
 	}
 }
 
+#if defined(CONFIG_SYSRQ_LOG_PRINT)
+static void sysrq_print_klog(u32 start, u32 end)
+{
+	struct printk_log* msg;
+	size_t len;
+	char text[LOG_LINE_MAX + PREFIX_MAX];
+	u32 index = start;
+
+	while((index < end) && ( index >= start )) {
+		raw_spin_lock(&logbuf_lock);
+		msg = log_from_idx(index);
+		len = msg_print_text(msg, msg->flags, false, text, sizeof(text));
+		index = log_next(index);
+		raw_spin_unlock(&logbuf_lock);
+
+		stop_critical_timings();        /* don't trace print latency */
+		call_console_drivers(msg->level,NULL, 0, text, len);
+		start_critical_timings();
+	}
+}
+
+void do_sysrq_print_klog(void)
+{
+	if(log_first_idx > log_next_idx)
+		sysrq_print_klog(log_first_idx, (uintptr_t)(log_buf + log_buf_len));
+	sysrq_print_klog(0, log_next_idx);
+}
+#endif
+
 /*
  * Continuation lines are buffered, and not committed to the record buffer
  * until the line is complete, or a race forces it. The line fragments
@@ -2087,6 +2225,34 @@ module_param_named(console_suspend, console_suspend_enabled,
 MODULE_PARM_DESC(console_suspend, "suspend console during suspend"
 	" and hibernate operations");
 
+bool console_suspend_lately_disabled = 1;
+
+static int __init console_suspend_lately_enable(char *str)
+{
+	console_suspend_lately_disabled = 0;
+	return 1;
+}
+__setup("console_suspend_lately", console_suspend_lately_enable);
+module_param_named(console_suspend_lately, console_suspend_lately_disabled,
+		bool, S_IRUGO | S_IWUSR);
+MODULE_PARM_DESC(console_suspend_lately, "suspend console lately during suspend"
+	" and hibernate operations");
+
+
+// This is for profiling STR resume time, please insert bootcode command
+bool profiling_suspend_disabled = 1;
+
+static int __init profiling_suspend_enable(char *str)
+{
+        profiling_suspend_disabled = 0;
+        return 1;
+}
+__setup("profiling_suspend", profiling_suspend_enable);
+module_param_named(profiling_suspend, profiling_suspend_disabled,
+                bool, S_IRUGO | S_IWUSR);
+MODULE_PARM_DESC(profiling_suspend, "Profiling Performance during suspend"
+        " and Driver operations");
+
 /**
  * suspend_console - suspend the console subsystem
  *
@@ -2096,7 +2262,10 @@ void suspend_console(void)
 {
 	if (!console_suspend_enabled)
 		return;
-	printk("Suspending console(s) (use no_console_suspend to debug)\n");
+	if (!console_suspend_lately_disabled)
+		printk("Suspending console(s) lately\n");
+	else
+		printk("Suspending console(s) (use no_console_suspend to debug)\n");
 	console_lock();
 	console_suspended = 1;
 	up_console_sem();
@@ -3112,6 +3281,19 @@ void kmsg_dump_rewind(struct kmsg_dumper *dumper)
 	raw_spin_unlock_irqrestore(&logbuf_lock, flags);
 }
 EXPORT_SYMBOL_GPL(kmsg_dump_rewind);
+
+/*
+ * if log_buf is big, kmsg_dump can takes long time.
+ * For case suspending console, change dumper index to suspended console index.
+ */
+void kmsg_dump_forward_to_console_idx(struct kmsg_dumper *dumper)
+{
+	unsigned long flags;
+	raw_spin_lock_irqsave(&logbuf_lock, flags);
+	dumper->cur_seq = console_seq;
+	dumper->cur_idx = console_idx;
+	raw_spin_unlock_irqrestore(&logbuf_lock, flags);
+}
 
 static char dump_stack_arch_desc_str[128];
 
