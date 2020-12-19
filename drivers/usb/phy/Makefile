@@ -27,3 +27,7 @@ obj-$(CONFIG_USB_RCAR_PHY)		+= phy-rcar-usb.o
 obj-$(CONFIG_USB_ULPI)			+= phy-ulpi.o
 obj-$(CONFIG_USB_ULPI_VIEWPORT)		+= phy-ulpi-viewport.o
 obj-$(CONFIG_KEYSTONE_USB_PHY)		+= phy-keystone.o
+obj-$(CONFIG_LG1K_USBPHY)		+= phy-lg1k-usb.o
+obj-$(CONFIG_LG1K_USB1PHY)		+= phy-lg1k-usb1.o
+obj-$(CONFIG_LG1K_USB2PHY)		+= phy-lg1k-usb2.o
+obj-$(CONFIG_LG1K_USB3PHY)		+= phy-lg1k-usb3.o

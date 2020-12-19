@@ -415,6 +415,7 @@ void generic_shutdown_super(struct super_block *sb)
 		sb->s_flags &= ~MS_ACTIVE;
 
 		fsnotify_unmount_inodes(sb);
+		cgroup_writeback_umount();
 
 		evict_inodes(sb);
 
@@ -813,6 +814,15 @@ static void do_emergency_remount(struct work_struct *work)
 	spin_unlock(&sb_lock);
 	kfree(work);
 	printk("Emergency Remount complete\n");
+	/*GPU work around patch for Q9823 & Q8781
+		background: AP request draw task make GPU full fill work queue.
+		work queue handle GPU work affect remount ro work finish time.
+                that will make micom timeout error.
+                solution:disable GPU interrupt before start emergency remount.
+                		enable GPU int after finish emergency remount
+	*/
+	rtd_outl(0xb810E050, 0x1);
+	/*end*/
 }
 
 void emergency_remount(void)
@@ -822,6 +832,14 @@ void emergency_remount(void)
 	work = kmalloc(sizeof(*work), GFP_ATOMIC);
 	if (work) {
 		INIT_WORK(work, do_emergency_remount);
+		/*GPU work around patch for Q9823 & Q8781
+		background: AP request draw task make GPU full fill work queue.
+		work queue handle GPU work affect remount ro work finish time.
+                that will make micom timeout error.
+                solution:disable GPU interrupt before start emergency remount.
+		*/
+		rtd_outl(0xb810E050, 0x0);
+		/*end*/
 		schedule_work(work);
 	}
 }
@@ -1325,8 +1343,8 @@ int freeze_super(struct super_block *sb)
 		}
 	}
 	/*
-	 * This is just for debugging purposes so that fs can warn if it
-	 * sees write activity when frozen is set to SB_FREEZE_COMPLETE.
+	 * For debugging purposes so that fs can warn if it sees write activity
+	 * when frozen is set to SB_FREEZE_COMPLETE, and for thaw_super().
 	 */
 	sb->s_writers.frozen = SB_FREEZE_COMPLETE;
 	up_write(&sb->s_umount);
@@ -1345,7 +1363,7 @@ int thaw_super(struct super_block *sb)
 	int error;
 
 	down_write(&sb->s_umount);
-	if (sb->s_writers.frozen == SB_UNFROZEN) {
+	if (sb->s_writers.frozen != SB_FREEZE_COMPLETE) {
 		up_write(&sb->s_umount);
 		return -EINVAL;
 	}

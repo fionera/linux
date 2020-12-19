@@ -38,7 +38,9 @@ struct mtd_blktrans_dev {
 	struct mutex lock;
 	int devnum;
 	bool bg_stop;
-	unsigned long size;
+	//unsigned long size;
+	int blksize;
+	uint64_t size;
 	int readonly;
 	int open;
 	struct kref ref;

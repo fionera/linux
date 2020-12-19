@@ -53,8 +53,33 @@
  */
 
 #include <stddef.h>
-#include <stdint.h>
-#include <string.h>
+//#include <stdint.h>
+//#include <string.h>
+#include <linux/string.h>
+
+#ifndef uint8_t
+#define uint8_t u_int8_t
+#endif
+
+#ifndef uint16_t
+#define uint16_t u_int16_t
+#endif
+
+#ifndef uint32_t
+#define uint32_t u_int32_t
+#endif
+
+#ifndef uint64_t
+#define uint64_t u_int64_t
+#endif
+
+#ifndef uintptr_t
+#define uintptr_t u_int32_t
+#endif
+
+
+
+
 
 #ifdef __CHECKER__
 #define __force __attribute__((force))

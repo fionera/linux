@@ -299,12 +299,12 @@ static int create_image(int platform_mode)
 	save_processor_state();
 	trace_suspend_resume(TPS("machine_suspend"), PM_EVENT_HIBERNATE, true);
 	error = swsusp_arch_suspend();
+	/* Restore control flow magically appears here */
+	restore_processor_state();
 	trace_suspend_resume(TPS("machine_suspend"), PM_EVENT_HIBERNATE, false);
 	if (error)
 		printk(KERN_ERR "PM: Error %d creating hibernation image\n",
 			error);
-	/* Restore control flow magically appears here */
-	restore_processor_state();
 	if (!in_suspend)
 		events_check_enabled = false;
 
@@ -339,6 +339,7 @@ int hibernation_snapshot(int platform_mode)
 	pm_message_t msg;
 	int error;
 
+	pm_suspend_clear_flags();
 	error = platform_begin(platform_mode);
 	if (error)
 		goto Close;
@@ -378,6 +379,12 @@ int hibernation_snapshot(int platform_mode)
 	else
 		error = create_image(platform_mode);
 
+#ifdef CONFIG_LG_SNAPSHOT_BOOT
+	if (!in_suspend) {
+		extern unsigned int snapshot_status;
+		snapshot_status = 1;
+	}
+#endif
 	/*
 	 * In the case that we call create_image() above, the control
 	 * returns here (1) after the image has been created or the
@@ -588,6 +595,11 @@ int hibernation_platform_enter(void)
 	return error;
 }
 
+#ifdef CONFIG_LG_SNAPSHOT_BOOT
+extern unsigned int snapshot_enable;
+extern unsigned int hibernation_enable;
+#endif
+
 /**
  * power_down - Shut the machine down for hibernation.
  *
@@ -601,6 +613,10 @@ static void power_down(void)
 	int error;
 #endif
 
+#ifdef CONFIG_LG_SNAPSHOT_BOOT
+	if (!hibernation_enable)
+		return;
+#endif
 	switch (hibernation_mode) {
 	case HIBERNATION_REBOOT:
 		kernel_restart(NULL);
@@ -648,6 +664,13 @@ int hibernate(void)
 {
 	int error;
 
+#ifdef CONFIG_LG_SNAPSHOT_BOOT
+	if(!snapshot_enable && !hibernation_enable)
+		return -EPERM;
+
+	/* Check if the device is there */
+	swsusp_resume_device = name_to_dev_t(resume_file);
+#endif
 	if (!hibernation_available()) {
 		pr_debug("PM: Hibernation not available.\n");
 		return -EPERM;
@@ -694,7 +717,13 @@ int hibernate(void)
 		        flags |= SF_CRC32_MODE;
 
 		pr_debug("PM: writing image.\n");
+
+#ifdef CONFIG_LG_SNAPSHOT_BOOT
+		error = rawdev_snapshot_write(flags);
+#else
 		error = swsusp_write(flags);
+#endif
+
 		swsusp_free();
 		if (!error)
 			power_down();
@@ -713,6 +742,10 @@ int hibernate(void)
 	/* Don't bother checking whether freezer_test_done is true */
 	freezer_test_done = false;
  Exit:
+#ifdef CONFIG_LG_SNAPSHOT_BOOT
+	free_cma_forbidden_memory();
+	hibernation_free_bootmem();
+#endif
 	pm_notifier_call_chain(PM_POST_HIBERNATION);
 	pm_restore_console();
 	atomic_inc(&snapshot_device_available);
@@ -867,7 +900,9 @@ static int software_resume(void)
 	goto Finish;
 }
 
+#ifndef CONFIG_LG_SNAPSHOT_BOOT
 late_initcall_sync(software_resume);
+#endif
 
 
 static const char * const hibernation_modes[] = {
@@ -1087,7 +1122,7 @@ static int __init pm_disk_init(void)
 	return sysfs_create_group(power_kobj, &attr_group);
 }
 
-core_initcall(pm_disk_init);
+core_initcall_sync(pm_disk_init);
 
 
 static int __init resume_setup(char *str)

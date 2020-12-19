@@ -1,0 +1,9 @@
+menu "platform dependent drivers (TV006)"
+depends on CUSTOMER_TV006
+
+config RTK_PANEL_ERROR_DETECT
+        bool "Enable GPIO Interrupt for Panel error detect"
+        select RTK_KDRV_GPIO
+        default n
+
+endmenu

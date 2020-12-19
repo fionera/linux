@@ -116,10 +116,33 @@ config ICPLUS_PHY
 	---help---
 	  Currently supports the IP175C and IP1001 PHYs.
 
+config OMNIPHY_PHY
+	tristate "Drivers for OmniPhy 10/100Mbps Ethernet PHY"
+	---help---
+	  Supports the OmniPhy 10/100Mbps Ethernet PHY.
+
 config REALTEK_PHY
 	tristate "Drivers for Realtek PHYs"
 	---help---
 	  Supports the Realtek 821x PHY.
+
+config RTL8201F_PHY
+	tristate "Driver for Realtek RTL8201F 10/100Mbps PHY"
+	depends on GPIOLIB
+	---help---
+	  Supports Realtek RTL8201F PHY.
+
+config RTL8211E_PHY
+	tristate "Driver for Realtek RTL8211E(G) Gigabit Ethernet PHY"
+	depends on GPIOLIB
+	---help---
+	  Supports Realtek RTL8211E(G) PHY.
+
+config SUNPLUS_PHY
+	tristate "Driver for Sunplus Fast Ethernet Transceiver"
+	---help---
+	  Supports the Sunplus SP-10_100ETHERNET-T12FFC Fast Ethernet
+	  Transceiver.
 
 config NATIONAL_PHY
 	tristate "Drivers for National Semiconductor PHYs"

@@ -59,6 +59,7 @@ Currently, these files are in /proc/sys/vm:
 - user_reserve_kbytes
 - vfs_cache_pressure
 - zone_reclaim_mode
+- swap_full_const
 
 ==============================================================
 
@@ -811,5 +812,15 @@ of other processes running on other nodes will not be affected.
 Allowing regular swap effectively restricts allocations to the local
 node unless explicitly overridden by memory policies or cpuset
 configurations.
+
+==============================================================
+
+swap_full_const:
+
+A constant value that determines whether the swap space is full.
+To reclaim swapcaches more quickly, increase this value.
+The default value is 2, that means 50 percents of total swap pages.
+
+% echo 3 > /proc/sys/vm/swap_full_const
 
 ============ End of Document =================================

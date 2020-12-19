@@ -212,3 +212,20 @@ config USB_UAS
 	  say 'Y' or 'M' here and the kernel will use the right driver.
 
 	  If you compile this driver as a module, it will be named uas.
+
+config USB_STORAGE_SCAN_HELPER
+	bool "Scan complete helper"
+	depends on SCSI && USB_STORAGE
+	default y if WEBOS
+	help
+	  Say Y here to invoke the specific user helper function when
+	  SCSI-device scanning is completed. This help to quicken
+	  the storage device recognition.
+
+config USB_STORAGE_SCAN_HELPER_PATH
+	string "Path to scan complete helper"
+	depends on USB_STORAGE_SCAN_HELPER
+	default ""
+	help
+	  This option is specified user space helper program for
+	  "Scan complete helper" feature.

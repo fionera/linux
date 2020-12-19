@@ -176,6 +176,7 @@ static void sf_markstate(struct ip_mc_list *pmc);
 static void ip_mc_clear_src(struct ip_mc_list *pmc);
 static int ip_mc_add_src(struct in_device *in_dev, __be32 *pmca, int sfmode,
 			 int sfcount, __be32 *psfsrc, int delta);
+static __u8 igmp_tos = 0xc0;
 
 static void ip_ma_put(struct ip_mc_list *im)
 {
@@ -225,9 +226,14 @@ static void igmp_start_timer(struct ip_mc_list *im, int max_delay)
 static void igmp_gq_start_timer(struct in_device *in_dev)
 {
 	int tv = prandom_u32() % in_dev->mr_maxdelay;
+	unsigned long exp = jiffies + tv + 2;
+
+	if (in_dev->mr_gq_running &&
+	    time_after_eq(exp, (in_dev->mr_gq_timer).expires))
+		return;
 
 	in_dev->mr_gq_running = 1;
-	if (!mod_timer(&in_dev->mr_gq_timer, jiffies+tv+2))
+	if (!mod_timer(&in_dev->mr_gq_timer, exp))
 		in_dev_hold(in_dev);
 }
 
@@ -356,9 +362,8 @@ static struct sk_buff *igmpv3_newpack(struct net_device *dev, unsigned int mtu)
 	skb_dst_set(skb, &rt->dst);
 	skb->dev = dev;
 
-	skb->reserved_tailroom = skb_end_offset(skb) -
-				 min(mtu, skb_end_offset(skb));
 	skb_reserve(skb, hlen);
+	skb_tailroom_reserve(skb, mtu, tlen);
 
 	skb_reset_network_header(skb);
 	pip = ip_hdr(skb);
@@ -366,7 +371,7 @@ static struct sk_buff *igmpv3_newpack(struct net_device *dev, unsigned int mtu)
 
 	pip->version  = 4;
 	pip->ihl      = (sizeof(struct iphdr)+4)>>2;
-	pip->tos      = 0xc0;
+	pip->tos      = igmp_tos;
 	pip->frag_off = htons(IP_DF);
 	pip->ttl      = 1;
 	pip->daddr    = fl4.daddr;
@@ -720,7 +725,7 @@ static int igmp_send_report(struct in_device *in_dev, struct ip_mc_list *pmc,
 
 	iph->version  = 4;
 	iph->ihl      = (sizeof(struct iphdr)+4)>>2;
-	iph->tos      = 0xc0;
+	iph->tos      = igmp_tos;
 	iph->frag_off = htons(IP_DF);
 	iph->ttl      = 1;
 	iph->daddr    = dst;
@@ -1098,6 +1103,7 @@ static void igmpv3_add_delrec(struct in_device *in_dev, struct ip_mc_list *im)
 	pmc = kzalloc(sizeof(*pmc), GFP_KERNEL);
 	if (!pmc)
 		return;
+	spin_lock_init(&pmc->lock);
 	spin_lock_bh(&im->lock);
 	pmc->interface = im->interface;
 	in_dev_hold(in_dev);
@@ -2022,21 +2028,26 @@ static int ip_mc_add_src(struct in_device *in_dev, __be32 *pmca, int sfmode,
 
 static void ip_mc_clear_src(struct ip_mc_list *pmc)
 {
-	struct ip_sf_list *psf, *nextpsf;
+	struct ip_sf_list *psf, *nextpsf, *tomb, *sources;
 
-	for (psf = pmc->tomb; psf; psf = nextpsf) {
-		nextpsf = psf->sf_next;
-		kfree(psf);
-	}
+	spin_lock_bh(&pmc->lock);
+	tomb = pmc->tomb;
 	pmc->tomb = NULL;
-	for (psf = pmc->sources; psf; psf = nextpsf) {
-		nextpsf = psf->sf_next;
-		kfree(psf);
-	}
+	sources = pmc->sources;
 	pmc->sources = NULL;
 	pmc->sfmode = MCAST_EXCLUDE;
 	pmc->sfcount[MCAST_INCLUDE] = 0;
 	pmc->sfcount[MCAST_EXCLUDE] = 1;
+	spin_unlock_bh(&pmc->lock);
+
+	for (psf = tomb; psf; psf = nextpsf) {
+		nextpsf = psf->sf_next;
+		kfree(psf);
+	}
+	for (psf = sources; psf; psf = nextpsf) {
+		nextpsf = psf->sf_next;
+		kfree(psf);
+	}
 }
 
 /* Join a multicast group
@@ -2899,6 +2910,39 @@ static const struct file_operations igmp_mcf_seq_fops = {
 	.release	=	seq_release_net,
 };
 
+static ssize_t read_igmp_tos(struct file *file, char __user *buf,
+				size_t size, loff_t *ppos)
+{
+	size_t len;
+	char kbuf[6];
+
+	if (*ppos > 0)
+		return 0;
+	len = sprintf(kbuf, "0x%02x\n", igmp_tos);
+	if (copy_to_user(buf, kbuf, len))
+		return -EINVAL;
+	*ppos += len;
+	return len;
+}
+
+static ssize_t write_igmp_tos(struct file *file, const char __user *buffer,
+	size_t count, loff_t *ppos)
+{
+	char kbuf[6];
+
+	if (count == 0 || count >= 6 || copy_from_user(kbuf, buffer, count))
+		return  -EINVAL;
+	kbuf[count] = '\0';
+	igmp_tos = simple_strtoul(kbuf, NULL, 0);
+	return count;
+}
+
+static const struct file_operations igmp_tos_fops = {
+	.read	= read_igmp_tos,
+	.write	= write_igmp_tos,
+	.llseek	= noop_llseek,
+};
+
 static int __net_init igmp_net_init(struct net *net)
 {
 	struct proc_dir_entry *pde;
@@ -2911,6 +2955,11 @@ static int __net_init igmp_net_init(struct net *net)
 			  &igmp_mcf_seq_fops);
 	if (!pde)
 		goto out_mcfilter;
+
+	pde = proc_create("igmp_tos", S_IRUGO, net->proc_net, &igmp_tos_fops);
+	if (!pde)
+		goto out_sock;
+
 	err = inet_ctl_sock_create(&net->ipv4.mc_autojoin_sk, AF_INET,
 				   SOCK_DGRAM, 0, net);
 	if (err < 0) {
@@ -2931,6 +2980,7 @@ out_igmp:
 
 static void __net_exit igmp_net_exit(struct net *net)
 {
+	remove_proc_entry("igmp_tos", net->proc_net);
 	remove_proc_entry("mcfilter", net->proc_net);
 	remove_proc_entry("igmp", net->proc_net);
 	inet_ctl_sock_destroy(net->ipv4.mc_autojoin_sk);

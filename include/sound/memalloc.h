@@ -57,6 +57,7 @@ struct snd_dma_device {
 #else
 #define SNDRV_DMA_TYPE_DEV_IRAM	SNDRV_DMA_TYPE_DEV
 #endif
+#define SNDRV_RTK_DMA_TYPE			5	/* rtk memory (0 ~ 512 MB) mealloc buffer */
 
 /*
  * info for buffer allocation

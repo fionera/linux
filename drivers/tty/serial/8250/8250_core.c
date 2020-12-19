@@ -37,6 +37,7 @@
 #include <linux/uaccess.h>
 #include <linux/pm_runtime.h>
 #include <linux/io.h>
+#include <linux/of_address.h>
 #ifdef CONFIG_SPARC
 #include <linux/sunserialcore.h>
 #endif
@@ -44,6 +45,45 @@
 #include <asm/irq.h>
 
 #include "8250.h"
+
+
+#if defined(CONFIG_ARCH_RTK299S) || defined(CONFIG_ARCH_RTK299O)
+	#include <rbus/rbusInterruptReg.h>
+#elif defined(CONFIG_ARCH_RTK289X) || defined(CONFIG_ARCH_RTK287X)
+	#include <rbus/iso_misc_off_uart_reg.h>
+#else // RTKS2B
+	#include "rbus/interrupt_reg.h"
+#endif
+#include <mach/rtk_platform.h>
+
+
+extern int rtice_uart_handler(unsigned char SBUF, unsigned int dir);
+
+/**** Stan add to ignore the printk between kernel init and busybox. BEGIN ****/
+#ifdef CONFIG_REALTEK_DISABLE_PRINTK_WHEN_BOOT
+	int KERNEL_PRINT_ENABLE=1;
+#endif
+/**** Stan add to ignore the printk between kernel init and busybox. END ****/
+
+// Add to ignore all printk. BEGIN
+#ifdef CONFIG_REALTEK_IGNORE_ALL_PRINTK
+	int KERNEL_PRINTALL_ENABLE=1;
+#endif
+
+
+#if defined(CONFIG_REALTEK_RTICE) || defined(CONFIG_RTK_KDRV_RTICE)
+
+	extern int rtice_enable;
+	//int rtice_enable=1;
+#ifdef CONFIG_REALTEK_UART_DMA	
+	int rtice_port = 1;
+#else
+	int rtice_port = 0;
+#endif
+	int rtice_early_disable_tx_int_flag=0;
+	int rtice_early_disable_tx_int=0;
+#endif
+
 
 /*
  * Configuration:
@@ -74,7 +114,11 @@ static const struct old_serial_port old_serial_port[] = {
 	SERIAL_PORT_DFNS /* defined in asm/serial.h */
 };
 
+
 #define UART_NR	CONFIG_SERIAL_8250_NR_UARTS
+
+struct uart_8250_port serial8250_ports[UART_NR];
+
 
 #ifdef CONFIG_SERIAL_8250_RSA
 
@@ -82,6 +126,7 @@ static const struct old_serial_port old_serial_port[] = {
 static unsigned long probe_rsa[PORT_RSA_MAX];
 static unsigned int probe_rsa_count;
 #endif /* CONFIG_SERIAL_8250_RSA  */
+
 
 struct irq_info {
 	struct			hlist_node node;
@@ -114,7 +159,27 @@ static irqreturn_t serial8250_interrupt(int irq, void *dev_id)
 	struct list_head *l, *end = NULL;
 	int pass_counter = 0, handled = 0;
 
+#if defined(CONFIG_REALTEK_RTICE) || defined(CONFIG_RTK_KDRV_RTICE)
+    struct uart_8250_port *up_rtice;
+#endif
+
+
 	DEBUG_INTR("serial8250_interrupt(%d)...", irq);
+
+
+#if defined(CONFIG_REALTEK_RTICE) || defined(CONFIG_RTK_KDRV_RTICE)
+    up_rtice= &serial8250_ports[rtice_port];
+    if (rtice_early_disable_tx_int==1){
+        up_rtice->ier &= ~UART_IER_THRI;
+        serial_out(up_rtice, UART_IER, up_rtice->ier);
+    }
+    if(rtice_early_disable_tx_int_flag==1) {
+        up_rtice->ier |= UART_IER_THRI;
+        serial_out(up_rtice, UART_IER, up_rtice->ier);
+        rtice_early_disable_tx_int_flag=0;
+    }
+#endif
+
 
 	spin_lock(&i->lock);
 
@@ -304,8 +369,16 @@ static void serial8250_backup_timeout(unsigned long data)
 		iir |= UART_IIR_THRI;
 	}
 
-	if (!(iir & UART_IIR_NO_INT))
+	if (!(iir & UART_IIR_NO_INT)){
+
+#if defined(CONFIG_REALTEK_RTICE) || defined(CONFIG_RTK_KDRV_RTICE)
+		if(rtice_early_disable_tx_int == 0)
+			serial8250_tx_chars(up);
+#else
 		serial8250_tx_chars(up);
+#endif
+
+	}
 
 	if (up->port.irq)
 		serial_out(up, UART_IER, ier);
@@ -404,7 +477,7 @@ static const struct uart_8250_ops univ8250_driver_ops = {
 	.release_irq	= univ8250_release_irq,
 };
 
-static struct uart_8250_port serial8250_ports[UART_NR];
+
 
 /**
  * serial8250_get_port - retrieve struct uart_8250_port
@@ -547,7 +620,7 @@ static void __init serial8250_isa_init_ports(void)
 		port->iobase   = old_serial_port[i].port;
 		port->irq      = irq_canonicalize(old_serial_port[i].irq);
 		port->irqflags = old_serial_port[i].irqflags;
-		port->uartclk  = old_serial_port[i].baud_base * 16;
+		port->uartclk  = get_uart_clock();//old_serial_port[i].baud_base * 16;
 		port->flags    = old_serial_port[i].flags;
 		port->hub6     = old_serial_port[i].hub6;
 		port->membase  = old_serial_port[i].iomem_base;
@@ -556,7 +629,25 @@ static void __init serial8250_isa_init_ports(void)
 		serial8250_set_defaults(up);
 
 		port->irqflags |= irqflag;
-		if (serial8250_isa_config != NULL)
+#ifdef CONFIG_REALTEK_UART_DMA
+		up->rtk_dma_config.dma_membase = old_serial_port[i].dma_iomem_base;
+		up->rtk_dma_config.dma_membase_ofst = (old_serial_port[i].dma_iomem_base -old_serial_port[i].iomem_base) >> old_serial_port[i].iomem_reg_shift;
+		up->rtk_dma_config.dma_ring_buf_len = old_serial_port[i].dma_ring_buf_len;
+		up->rtk_dma_config.dma_tx_thd = old_serial_port[i].dma_tx_thd;
+		up->rtk_dma_config.dma_tx_empty_thd = old_serial_port[i].dma_tx_empty_thd;
+		up->rtk_dma = NULL;
+		/*
+		pr_warning(KERN_WARNING "DMA CONFIG:%d, %08x, %08x, %08x %08x, %08x %08x\n", 
+			i,old_serial_port[i].iomem_base,
+			(unsigned long)up->rtk_dma_config.dma_membase,
+			up->rtk_dma_config.dma_membase_ofst,
+			up->rtk_dma_config.dma_ring_buf_len,
+			up->rtk_dma_config.dma_tx_thd,
+			up->rtk_dma_config.dma_tx_empty_thd
+			);
+		*/
+#endif		
+		if(serial8250_isa_config)
 			serial8250_isa_config(i, &up->port, &up->capabilities);
 	}
 }
@@ -686,6 +777,18 @@ static int __init univ8250_console_init(void)
 }
 console_initcall(univ8250_console_init);
 
+int serial8250_find_port(struct uart_port *p)
+{
+	int line;
+	struct uart_port *port;
+
+	for (line = 0; line < nr_uarts; line++) {
+		port = &serial8250_ports[line].port;
+		if (uart_match_port(p, port))
+			return line;
+	}
+	return -ENODEV;
+}
 #define SERIAL8250_CONSOLE	&univ8250_console
 #else
 #define SERIAL8250_CONSOLE	NULL
@@ -794,6 +897,34 @@ void serial8250_resume_port(int line)
  * list is terminated with a zero flags entry, which means we expect
  * all entries to have at least UPF_BOOT_AUTOCONF set.
  */
+#ifdef CONFIG_REALTEK_OF
+static int serial8250_probe(struct platform_device *pdev)
+{
+
+	int ret;
+
+#if defined(CONFIG_REALTEK_RTICE) || defined(CONFIG_RTK_KDRV_RTICE)
+	pr_info("[RTICE]rtice_enable : %d, rtice_port : %d\n",
+		rtice_enable, rtice_port);
+#endif
+
+	pr_info("Serial: 8250/16550 driver, %d ports, IRQ sharing %sabled\n",
+		nr_uarts, share_irqs ? "en" : "dis");
+
+	serial8250_isa_init_ports();
+
+	serial8250_reg.nr = UART_NR;
+	ret = uart_register_driver(&serial8250_reg);
+	if (ret) {
+		dev_err(&pdev->dev, "Failed to initialize serial8250\n");
+		goto probe_out;
+	}
+
+	serial8250_register_ports(&serial8250_reg, &pdev->dev);
+probe_out:
+	return ret;
+}
+#else
 static int serial8250_probe(struct platform_device *dev)
 {
 	struct plat_serial8250_port *p = dev_get_platdata(&dev->dev);
@@ -836,6 +967,8 @@ static int serial8250_probe(struct platform_device *dev)
 	}
 	return 0;
 }
+#endif
+
 
 /*
  * Remove serial ports registered against a platform device.
@@ -853,6 +986,8 @@ static int serial8250_remove(struct platform_device *dev)
 	return 0;
 }
 
+static struct platform_device *g_serial8250_dev = 0;
+
 static int serial8250_suspend(struct platform_device *dev, pm_message_t state)
 {
 	int i;
@@ -860,8 +995,33 @@ static int serial8250_suspend(struct platform_device *dev, pm_message_t state)
 	for (i = 0; i < UART_NR; i++) {
 		struct uart_8250_port *up = &serial8250_ports[i];
 
-		if (up->port.type != PORT_UNKNOWN && up->port.dev == &dev->dev)
+		if (up->port.type != PORT_UNKNOWN && up->port.dev == &dev->dev){
+			g_serial8250_dev = dev;
 			uart_suspend_port(&serial8250_reg, &up->port);
+
+#ifndef CONFIG_REALTEK_FPGA
+
+#if defined(CONFIG_ARCH_RTKS2B)
+			if (up->port.membase == (unsigned char *)GET_MAPPED_RBUS_ADDR(U0RBR_THR_DLL_reg))
+				rtd_clearbits(INTERRUPT_INT_CTRL_SCPU_VADDR, BIT(8)); //iso_misc_off_int_scpu_routing _en
+			else if(up->port.membase == (unsigned char *)GET_MAPPED_RBUS_ADDR(U1RBR_THR_DLL_reg))
+				rtd_clearbits(INTERRUPT_INT_CTRL_SCPU_VADDR, BIT(6));  //iso_misc_int_scpu_routing _en
+#elif defined(CONFIG_ARCH_RTK299S)
+			if (up->port.membase == (unsigned char *)GET_MAPPED_RBUS_ADDR(U0RBR_THR_DLL_reg)) {
+				rtd_clearbits(0xb8000290, BIT(25));  //iso_misc_off_int_scpu_routing disable
+			}
+#elif defined(CONFIG_ARCH_RTK299O)
+			if (up->port.membase == (unsigned char *)GET_MAPPED_RBUS_ADDR(U0RBR_THR_DLL_reg)) {
+				rtd_maskl(0xb806020c, 0x0fffffff, BIT(30) | BIT(29)); // switch to uart2 Rx pin to avoid character timeout issue
+				rtd_clearbits(0xb8000290, BIT(25));  //iso_misc_off_int_scpu_routing disable
+			}
+#elif defined(CONFIG_ARCH_RTK289X)
+			if (up->port.membase == (unsigned char *)GET_MAPPED_RBUS_ADDR(ISO_MISC_OFF_UART_U0RBR_THR_DLL_reg)) {
+				rtd_clearbits(0xb8000290, BIT(25));  //iso_misc_off_int_scpu_routing disable
+			}
+#endif
+#endif	//!CONFIG_REALTEK_FPGA
+		}
 	}
 
 	return 0;
@@ -870,16 +1030,72 @@ static int serial8250_suspend(struct platform_device *dev, pm_message_t state)
 static int serial8250_resume(struct platform_device *dev)
 {
 	int i;
-
+	g_serial8250_dev = 0;
 	for (i = 0; i < UART_NR; i++) {
 		struct uart_8250_port *up = &serial8250_ports[i];
 
-		if (up->port.type != PORT_UNKNOWN && up->port.dev == &dev->dev)
+#if defined(CONFIG_ARCH_RTK299O)
+		if (up->port.membase == (unsigned char *)GET_MAPPED_RBUS_ADDR(U0RBR_THR_DLL_reg)) {
+			if (get_uart_clock() == UART_CLOCK_98M) {
+				if ((rtd_inl(0xb80004e4) & (BIT(0) | BIT(1) | BIT(3))) != 0x9)
+				{
+					rtd_setbits(0xb80004e4, BIT(0) | BIT(3));
+					rtd_clearbits(0xb80004e4, BIT(1));
+				}
+				rtd_clearbits(0xB8060058, BIT(0));
+			}
+		}
+#endif
+
+		if (up->port.type != PORT_UNKNOWN && up->port.dev == &dev->dev){
 			serial8250_resume_port(i);
+#ifndef CONFIG_REALTEK_FPGA
+
+#if defined(CONFIG_ARCH_RTKS2B)
+			// enable uart global interrupt
+			if (up->port.membase == (unsigned char *)GET_MAPPED_RBUS_ADDR(U0RBR_THR_DLL_reg))
+				rtd_setbits(INTERRUPT_INT_CTRL_SCPU_VADDR, BIT(8));  //iso_misc_off_int_scpu_routing _en
+			else if(up->port.membase == (unsigned char *)GET_MAPPED_RBUS_ADDR(U1RBR_THR_DLL_reg))
+				rtd_setbits(INTERRUPT_INT_CTRL_SCPU_VADDR, BIT(6));    //iso_misc_int_scpu_routing _en
+#elif defined(CONFIG_ARCH_RTK299S)
+			// enable uart global interrupt
+			if (up->port.membase == (unsigned char *)GET_MAPPED_RBUS_ADDR(U0RBR_THR_DLL_reg)) {
+				rtd_clearbits(0xb800029C, BIT(25));  //iso_misc_off_int_kcpu_routing disable
+				rtd_setbits(0xb8000290, BIT(25)); //iso_misc_off_int_scpu_routing enable
+			}
+#elif defined(CONFIG_ARCH_RTK299O)
+			// enable uart global interrupt
+			if (up->port.membase == (unsigned char *)GET_MAPPED_RBUS_ADDR(U0RBR_THR_DLL_reg)) {
+				rtd_maskl(0xb806020c, 0x0fffffff, BIT(31) | BIT(28));	// swtich  back to uart0 Rx pin
+				rtd_clearbits(0xb800029C, BIT(25));  //iso_misc_off_int_kcpu_routing disable
+				rtd_setbits(0xb8000290, BIT(25)); //iso_misc_off_int_scpu_routing enable
+			}
+#elif defined(CONFIG_ARCH_RTK289X)
+			// enable uart global interrupt
+			if (up->port.membase == (unsigned char *)GET_MAPPED_RBUS_ADDR(ISO_MISC_OFF_UART_U0RBR_THR_DLL_reg)) {
+				rtd_clearbits(0xb800029C, BIT(25));  //iso_misc_off_int_kcpu_routing disable
+            rtd_setbits(0xb8000290, BIT(25)); //iso_misc_off_int_scpu_routing enable
+			}
+#endif
+
+#endif	//!CONFIG_REALTEK_FPGA
+		}
 	}
 
 	return 0;
 }
+
+
+#ifdef CONFIG_REALTEK_OF
+static const struct of_device_id rtk_uart_of_match[] = {
+	{
+		.compatible = "realtek,rtd29xx-uart",
+	},
+	{},
+};
+MODULE_DEVICE_TABLE(of, rtk_uart_of_match);
+#endif
+
 
 static struct platform_driver serial8250_isa_driver = {
 	.probe		= serial8250_probe,
@@ -888,8 +1104,21 @@ static struct platform_driver serial8250_isa_driver = {
 	.resume		= serial8250_resume,
 	.driver		= {
 		.name	= "serial8250",
+
+#ifdef CONFIG_REALTEK_OF
+		.of_match_table = rtk_uart_of_match,
+#endif
 	},
 };
+
+void serial8250_emergency_resume(void)
+{
+
+	if(g_serial8250_dev && console_suspend_enabled)
+		serial8250_resume(g_serial8250_dev);
+	g_serial8250_dev = 0;
+}
+
 
 /*
  * This "device" covers _all_ ISA 8250-compatible serial devices listed
@@ -1083,18 +1312,106 @@ void serial8250_unregister_port(int line)
 }
 EXPORT_SYMBOL(serial8250_unregister_port);
 
+
+#if defined(CONFIG_REALTEK_RTICE) || defined(CONFIG_RTK_KDRV_RTICE)
+
+void early_disable_printk(void) {
+    rtice_early_disable_tx_int=1;
+}
+void early_enable_printk(void) {
+    rtice_early_disable_tx_int=0;
+    //add flag to avoid unneccessary re-writing tx register
+    rtice_early_disable_tx_int_flag=1;
+}
+
+void disable_printk(void)
+{
+	struct uart_8250_port *up;
+
+	if (rtice_port < UART_NR)
+	{
+		unsigned long flags;
+		up= &serial8250_ports[rtice_port];
+		up->disable_printk = 1;
+#ifdef CONFIG_REALTEK_UART_DMA
+		spin_lock_irqsave(&up->port.lock, flags);
+		if(up->rtk_dma) {
+			struct uart_port *port = &up->port;
+			int dma_reg_ofst = up->rtk_dma_config.dma_membase_ofst;
+			serial_port_out(port, dma_reg_ofst + UART_DMA_INT_EN, UR1_UR_TX_THD_EN(0));
+			rtk_serial8250_dma_flush_buffer(up);
+		}
+		spin_unlock_irqrestore(&up->port.lock, flags);
+		
+#endif		
+	}
+}
+
+void enable_printk(void)
+{
+   	struct uart_8250_port *up;
+
+	if (rtice_port < UART_NR)
+	{
+		unsigned long flags;
+		up= &serial8250_ports[rtice_port];
+		up->disable_printk = 0;
+#ifdef CONFIG_REALTEK_UART_DMA	
+		spin_lock_irqsave(&up->port.lock, flags);	
+		if(up->rtk_dma) {
+			struct uart_port *port = &up->port;
+			int dma_reg_ofst = up->rtk_dma_config.dma_membase_ofst;
+			rtk_serial8250_dma_flush_buffer(up);
+			serial_port_out(port, dma_reg_ofst + UART_DMA_INT_EN, UR1_UR_TX_THD_EN(1));
+		}
+		spin_unlock_irqrestore(&up->port.lock, flags);
+#endif	
+		
+		uart_write_wakeup(&up->port);   // wait up tty...
+	
+	}
+}
+
+
+void rtice_putchar(char ch)
+{
+	struct uart_8250_port *up;
+	if (rtice_port >= UART_NR)
+	    return;
+	up= &serial8250_ports[rtice_port];
+	wait_for_xmitr(up, UART_LSR_THRE);
+	_serial_out(up, UART_TX, ch);
+}
+
+
+
+
+#endif
+
+
+
+#ifdef CONFIG_REALTEK_OF
+module_platform_driver(serial8250_isa_driver);
+#else
+
+
 static int __init serial8250_init(void)
 {
 	int ret;
 
 	if (nr_uarts == 0)
 		return -ENODEV;
-
+	
 	serial8250_isa_init_ports();
 
 	printk(KERN_INFO "Serial: 8250/16550 driver, "
 		"%d ports, IRQ sharing %sabled\n", nr_uarts,
 		share_irqs ? "en" : "dis");
+
+#if defined(CONFIG_REALTEK_RTICE) || defined(CONFIG_RTK_KDRV_RTICE)
+	printk("[RTICE]rtice_enable : %d, rtice_port : %d\n", rtice_enable, rtice_port);
+#endif
+
 
 #ifdef CONFIG_SPARC
 	ret = sunserial_register_minors(&serial8250_reg, UART_NR);
@@ -1167,6 +1484,7 @@ static void __exit serial8250_exit(void)
 module_init(serial8250_init);
 module_exit(serial8250_exit);
 
+#endif
 EXPORT_SYMBOL(serial8250_suspend_port);
 EXPORT_SYMBOL(serial8250_resume_port);
 

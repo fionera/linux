@@ -26,6 +26,14 @@
 #include <net/sock.h>
 #include <net/net_namespace.h>
 
+#ifdef CONFIG_USB_STORAGE_SCAN_HELPER
+#include <linux/device.h>
+#include <linux/genhd.h>
+#include <linux/ctype.h> // for isdigit()
+#include <scsi/scsi_device.h>
+#include <scsi/scsi_host.h>
+#include <linux/usb.h>
+#endif
 
 u64 uevent_seqnum;
 #ifdef CONFIG_UEVENT_HELPER
@@ -51,7 +59,137 @@ static const char *kobject_actions[] = {
 	[KOBJ_ONLINE] =		"online",
 	[KOBJ_OFFLINE] =	"offline",
 };
+#ifdef CONFIG_USB_STORAGE_SCAN_HELPER
+extern unsigned int pusb_dev_off;
+/**
+ * rtd_get_device_by_type_name - get "type name" device
+ * @blk_dev: device of block
+ * @type_name: device type name
+ *
+ * This function get parent device for the given device @blk_dev and @type_name.
+ *
+ */
+static struct device *rtd_get_device_by_type_name(struct device *blk_dev,const char *type_name)
+{
+	struct device *dev = blk_dev;
 
+	if (blk_dev == NULL)
+		return NULL;
+
+	while(dev)
+	{
+		dev = dev->parent;
+
+		if (dev && dev->type && dev->type->name && (!strncmp(dev->type->name,type_name,strlen(type_name))))
+		{
+			return dev;
+		}
+	}
+
+	return NULL;
+}
+
+
+
+/**
+ * RtdBlockHotplugUevent - Hack function in kobject_uevent_env() <kobject_uevent.c>.
+ * @kobj: kernel objec
+ * @env: environment variable of user helper funtion.
+ *
+ * This function send uevent of block subsystem for RTD hotplug.
+ *
+ */
+
+void RtdBlockHotplugUevent(struct kobject *kobj, const char *subsystem, struct kobj_uevent_env *env)
+{
+	struct device *dev;
+	struct device *scsi_dev = NULL;
+	char *kobj_path = NULL;
+	int is_part = 0;
+
+	struct usb_device       *pusb_dev;
+	struct scsi_device *real_scsi;
+	char *ptr;
+
+	char	envp1[20], envp2[20];
+	char	*argv[] = {CONFIG_USB_STORAGE_SCAN_HELPER_PATH, NULL};
+	char	*envp[] = {"USB_SCAN_COMPLETE=YES", envp1, envp2, NULL};
+
+	// Not block subsystem
+	if ((subsystem == NULL) || strncmp(subsystem,"block",5))
+		return;
+
+	if (kobj == NULL)
+		return;
+
+	// kobj_path of emmc, sdio, and scsi_disk
+	// emmc /devices/platform/rtkemmc/mmc_host/mmc0/mmc0:0001/block/mmcblk0
+	//      /devices/platform/rtkemmc/mmc_host/mmc0/mmc0:0001/block/mmcblk0/mmcblk0p1
+	//      /devices/platform/rtkemmc/mmc_host/mmc0/mmc0:0001/block/mmcblk0/mmcblk0boot1
+	// sdio /devices/platform/rtksdio/mmc_host/mmc1/mmc1:f730/block/mmcblk1
+	//      /devices/platform/rtksdio/mmc_host/mmc1/mmc1:f730/block/mmcblk1/mmcblk1p1
+	// scsi_disk /devices/platform/xhci-hcd/usb1/1-2/1-2:1.0/host0/target0:0:0/0:0:0:0/block/sda
+	//           /devices/platform/xhci-hcd/usb1/1-2/1-2:1.0/host0/target0:0:0/0:0:0:0/block/sda/sda1
+
+	kobj_path = kobject_get_path(kobj, GFP_KERNEL);
+	if (kobj_path == NULL)
+		return ;
+
+	/* Do nothing if neither SCSI Disk nor SCSI CD-ROM.
+	 *
+	 * FIXME:
+	 * If you want more types of scsi device supprot call_usermodehelper,
+	 * add pattern of name of device here.
+	 * */
+	if (!(strstr(kobj_path, "sd")) && !(strstr(kobj_path, "sr"))) {
+		kfree(kobj_path);
+		return;
+	}
+
+
+	dev = kobj_to_dev(kobj);
+
+	if (dev == NULL) {
+		kfree(kobj_path);
+		return;
+	}
+
+	// this dev is a partition of disk
+	// for a scsi disk
+	if (strstr(kobj_path, "sd")) {
+		is_part = isdigit(kobj_path[strlen(kobj_path) - 1]);
+		if (is_part) {
+			/* doesn't handle sda1, sda2. only do it in sda */
+			kfree(kobj_path);
+			return;
+		}
+	}
+	kfree(kobj_path);
+
+
+	// Find SCSI Device.
+	scsi_dev = rtd_get_device_by_type_name(dev,"scsi_device");
+
+	if (scsi_dev)
+	{
+		real_scsi = to_scsi_device(scsi_dev);
+		if(real_scsi) {
+			ptr = real_scsi->host->hostdata;
+			pusb_dev = *((unsigned long*)(ptr + pusb_dev_off));					
+
+			/* for checking USB scan completion */
+			sprintf(envp1,"BUSNUM=%d",pusb_dev->bus->busnum);
+			sprintf(envp2,"DEVNUM=%d",pusb_dev->devnum);
+							
+			dev_info(dev, "[KOBJ] RtdBlockHotplugUevent call user helper - %s %s %s %s\n",
+					argv[0], envp[0], envp[1], envp[2]);
+			call_usermodehelper(argv[0], argv, envp, UMH_WAIT_PROC);
+		}
+	}
+}
+#else
+void RtdBlockHotplugUevent(struct kobject *kobj, const char *subsystem, struct kobj_uevent_env *env) { }
+#endif
 /**
  * kobject_action_type - translate action string to numeric type
  *
@@ -352,6 +490,9 @@ int kobject_uevent_env(struct kobject *kobj, enum kobject_action action,
 		}
 	}
 #endif
+
+	if (action == KOBJ_ADD)
+		RtdBlockHotplugUevent(kobj, subsystem, env);
 
 exit:
 	kfree(devpath);

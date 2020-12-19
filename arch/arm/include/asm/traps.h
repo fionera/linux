@@ -52,4 +52,8 @@ extern void ptrace_break(struct task_struct *tsk, struct pt_regs *regs);
 
 extern void *vectors_page;
 
+#if defined(CONFIG_REALTEK_WATCHPOINT) || defined(CONFIG_RTK_KDRV_WATCHPOINT)
+void dump_info(struct pt_regs *regs, struct task_struct *tsk);
+#endif
+
 #endif

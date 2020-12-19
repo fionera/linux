@@ -1,0 +1,88 @@
+<root>
+
+<options>
+
+	<option>
+		<name>picW</name>
+		<ctype>int</ctype>
+		<has_arg>required_argument</has_arg>
+		<usage>-w, --picW number</usage>
+		<desc>picW</desc>
+		<default>1920</default>
+	</option>
+
+	<option>
+		<name>picH</name>
+		<ctype>int</ctype>
+		<has_arg>required_argument</has_arg>
+		<usage>-h, --picH number</usage>
+		<desc>picH</desc>
+		<default>1080</default>
+	</option>
+
+	<option>
+		<name>outW</name>
+		<ctype>int</ctype>
+		<has_arg>required_argument</has_arg>
+		<usage>--outW number</usage>
+		<desc>outW</desc>
+		<default>3840</default>
+	</option>
+
+	<option>
+		<name>outH</name>
+		<ctype>int</ctype>
+		<has_arg>required_argument</has_arg>
+		<usage>--outH number</usage>
+		<desc>outH</desc>
+		<default>2160</default>
+	</option>
+
+	<option>
+		<name>input_type</name>
+		<ctype>int</ctype>
+		<has_arg>required_argument</has_arg>
+		<usage>--input_type number</usage>
+		<desc>input type</desc>
+		<default>3</default>
+	</option>
+
+	<option>
+		<name>input_attr</name>
+		<ctype>int</ctype>
+		<has_arg>required_argument</has_arg>
+		<usage>--input_attr number</usage>
+		<desc>input attr</desc>
+		<default>0</default>
+	</option>
+
+	<option>
+		<name>input_resourceIndex</name>
+		<ctype>int</ctype>
+		<has_arg>required_argument</has_arg>
+		<usage>--input_resourceIndex number</usage>
+		<desc>input resource index</desc>
+		<default>0</default>
+	</option>
+
+	<option>
+		<name>output_mode</name>
+		<ctype>int</ctype>
+		<has_arg>required_argument</has_arg>
+		<usage>--output_mode number</usage>
+		<desc>output mode</desc>
+		<default>0</default>
+	</option>
+
+	<option>
+		<name>winID</name>
+		<ctype>int</ctype>
+		<has_arg>required_argument</has_arg>
+		<usage>--winID number</usage>
+		<desc>window ID</desc>
+		<default>0</default>
+	</option>
+
+</options>
+
+</root>

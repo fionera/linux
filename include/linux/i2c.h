@@ -71,6 +71,24 @@ extern int i2c_transfer(struct i2c_adapter *adap, struct i2c_msg *msgs,
 /* Unlocked flavor */
 extern int __i2c_transfer(struct i2c_adapter *adap, struct i2c_msg *msgs,
 			  int num);
+/*
+ * These two apis are created by Kevin, that used to ease the way of
+ * issuing sequential read, random read or write command on specified bus.
+ */
+extern int i2c_master_send_ex(unsigned char bus_id, unsigned char addr,
+	unsigned char *write_buff, unsigned int write_len);
+
+extern int i2c_master_recv_ex(unsigned char bus_id, unsigned char addr,
+	unsigned char *p_sub_addr, unsigned char sub_addr_len,
+	unsigned char *p_read_buff, unsigned int read_len);
+
+extern int i2c_master_send_ex_flag(unsigned char bus_id, unsigned char addr,
+	unsigned char *write_buff, unsigned int write_len, __u16 flags);
+
+extern int i2c_master_recv_ex_flag(unsigned char bus_id, unsigned char addr,
+	unsigned char *p_sub_addr, unsigned char sub_addr_len,
+	unsigned char *p_read_buff, unsigned int read_len, __u16 flags);
+
 
 /* This is the very generalized SMBus access routine. You probably do not
    want to use this, though; one of the functions below may be much easier,

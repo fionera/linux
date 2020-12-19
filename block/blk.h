@@ -302,4 +302,10 @@ static inline int blk_throtl_init(struct request_queue *q) { return 0; }
 static inline void blk_throtl_exit(struct request_queue *q) { }
 #endif /* CONFIG_BLK_DEV_THROTTLING */
 
+#ifdef CONFIG_BLOCK_DUMP_MSG
+extern void (*block_dump_msg)(int rw, struct bio *bio, unsigned int count);
+#else
+static inline void block_dump_msg(int rw, struct bio *bio, unsigned int count) { }
+#endif
+
 #endif /* BLK_INTERNAL_H */

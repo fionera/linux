@@ -128,4 +128,17 @@ config ARCH_ZYNQMP
 	help
 	  This enables support for Xilinx ZynqMP Family
 
+config ARCH_LG1K
+	bool "LG Electronics LG1K DTV SoCs"
+	select ARM_TIMER_SP804
+	select PINCTRL
+	select PINMUX
+	help
+	  This enables support for the LG Electronics LG1K DTV SoCs.
+
+config ARCH_RTK287O
+    bool "Realtek 287o boards"
+    select RTK_KDRIVER_SUPPORT
+    help
+        This enables support for the Realtek 287o based boards.
 endmenu

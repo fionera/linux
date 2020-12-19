@@ -19,6 +19,8 @@
 #ifndef __ASM_PGALLOC_H
 #define __ASM_PGALLOC_H
 
+#include <linux/romempool.h>
+
 #include <asm/pgtable-hwdef.h>
 #include <asm/processor.h>
 #include <asm/cacheflush.h>
@@ -26,20 +28,29 @@
 
 #define check_pgt_cache()		do { } while (0)
 
-#define PGALLOC_GFP	(GFP_KERNEL | __GFP_NOTRACK | __GFP_REPEAT | __GFP_ZERO)
+#define PGALLOC_GFP	(GFP_KERNEL | __GFP_NOTRACK | __GFP_REPEAT | __GFP_ZERO | __GFP_READONLY)
 #define PGD_SIZE	(PTRS_PER_PGD * sizeof(pgd_t))
 
 #if CONFIG_PGTABLE_LEVELS > 2
 
 static inline pmd_t *pmd_alloc_one(struct mm_struct *mm, unsigned long addr)
 {
-	return (pmd_t *)__get_free_page(PGALLOC_GFP);
+	pmd_t *pmd;
+
+	pmd = (pmd_t *)romempool_alloc(PGALLOC_GFP, RMP_PMD, 0);
+	if (!pmd)
+		pmd = (pmd_t *)__get_free_page(PGALLOC_GFP);
+
+	return pmd;
 }
 
 static inline void pmd_free(struct mm_struct *mm, pmd_t *pmd)
 {
 	BUG_ON((unsigned long)pmd & (PAGE_SIZE-1));
-	free_page((unsigned long)pmd);
+	if (is_romempool_addr((unsigned long)pmd))
+		romempool_free((unsigned long)pmd, RMP_PMD, 0);
+	else
+		free_page((unsigned long)pmd);
 }
 
 static inline void pud_populate(struct mm_struct *mm, pud_t *pud, pmd_t *pmd)
@@ -75,7 +86,13 @@ extern void pgd_free(struct mm_struct *mm, pgd_t *pgd);
 static inline pte_t *
 pte_alloc_one_kernel(struct mm_struct *mm, unsigned long addr)
 {
-	return (pte_t *)__get_free_page(PGALLOC_GFP);
+	pte_t *pte;
+
+	pte = (pte_t *)romempool_alloc(PGALLOC_GFP, RMP_PTE_KERNEL, 0);
+	if (!pte)
+		pte = (pte_t *)__get_free_page(PGALLOC_GFP);
+
+	return pte;
 }
 
 static inline pgtable_t
@@ -83,11 +100,17 @@ pte_alloc_one(struct mm_struct *mm, unsigned long addr)
 {
 	struct page *pte;
 
-	pte = alloc_pages(PGALLOC_GFP, 0);
+	pte = romempool_alloc_pages(PGALLOC_GFP, RMP_PTE_USER, 0);
+	if (!pte)
+		pte = alloc_pages(PGALLOC_GFP, 0);
 	if (!pte)
 		return NULL;
 	if (!pgtable_page_ctor(pte)) {
-		__free_page(pte);
+		if (is_romempool_addr((unsigned long)pte))
+			romempool_free((unsigned long)pte, RMP_PTE_USER,
+				       0);
+		else
+			__free_page(pte);
 		return NULL;
 	}
 	return pte;
@@ -98,14 +121,23 @@ pte_alloc_one(struct mm_struct *mm, unsigned long addr)
  */
 static inline void pte_free_kernel(struct mm_struct *mm, pte_t *pte)
 {
-	if (pte)
-		free_page((unsigned long)pte);
+	if (pte) {
+		if (is_romempool_addr((unsigned long)pte))
+			romempool_free((unsigned long)pte, RMP_PTE_KERNEL,
+				       0);
+		else
+			free_page((unsigned long)pte);
+	}
 }
 
 static inline void pte_free(struct mm_struct *mm, pgtable_t pte)
 {
 	pgtable_page_dtor(pte);
-	__free_page(pte);
+	if (is_romempool_addr((unsigned long)page_address(pte)))
+		romempool_free((unsigned long)page_address(pte),
+			       RMP_PTE_USER, 0);
+	else
+		__free_page(pte);
 }
 
 static inline void __pmd_populate(pmd_t *pmdp, phys_addr_t pte,

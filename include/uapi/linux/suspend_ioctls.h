@@ -30,4 +30,10 @@ struct resume_swap_area {
 #define SNAPSHOT_ALLOC_SWAP_PAGE	_IOR(SNAPSHOT_IOC_MAGIC, 20, __kernel_loff_t)
 #define SNAPSHOT_IOC_MAXNR	20
 
+#ifdef CONFIG_LG_INSTANT_BOOT
+#define LGIB_IOC_MAGIC		'i'
+#define LGIB_SUSPEND_TO_RAM		_IO(LGIB_IOC_MAGIC, 1)
+#define LGIB_IOC_MAXNR		1
+#endif	/* CONFIG_LG_INSTANT_BOOT */
+
 #endif /* _LINUX_SUSPEND_IOCTLS_H */

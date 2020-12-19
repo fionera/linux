@@ -37,6 +37,20 @@
 
 static LIST_HEAD(blktrans_majors);
 static DEFINE_MUTEX(blktrans_ref_mutex);
+static unsigned char *mtdReadBuf = NULL;
+static unsigned int readIdx = 0xFFFFFFFF;
+
+
+#ifdef CONFIG_MTD_SPI_NOR_CACHE
+//20130301 Andy Teng -  hardcode disable mtd spi cache
+//#define ENABLE_SPI_MTD_CACHE	(1)
+#define ENABLE_SPI_MTD_CACHE	(0)
+#else
+#define ENABLE_SPI_MTD_CACHE	(0)
+#endif
+
+//#define MTD_DATA_FLASH_OOBSIZE	(4096)
+#define MTD_DATA_FLASH_OOBSIZE CONFIG_MTD_SPI_NOR_CACHE_SIZE
 
 static void blktrans_dev_release(struct kref *kref)
 {
@@ -80,6 +94,17 @@ static int do_blktrans_request(struct mtd_blktrans_ops *tr,
 	unsigned long block, nsect;
 	char *buf;
 
+	//-----------------------------------------------------
+	//unsigned long long tmpBlkNo = 0;
+	unsigned long whichBlock = 0;
+	unsigned long whichSect = 0;
+	//	sector_t nDiv = 0;
+	//	unsigned int nMod = 0;
+
+	//Add by alexchang 1029-2010
+	struct mtd_info *mtd = dev->mtd;
+	int page2sect_num = 0;
+	//------------------------------------------------------
 	block = blk_rq_pos(req) << 9 >> tr->blkshift;
 	nsect = blk_rq_cur_bytes(req) >> tr->blkshift;
 	buf = bio_data(req->bio);
@@ -97,10 +122,79 @@ static int do_blktrans_request(struct mtd_blktrans_ops *tr,
 	if (req->cmd_flags & REQ_DISCARD)
 		return tr->discard(dev, block, nsect);
 
-	if (rq_data_dir(req) == READ) {
-		for (; nsect > 0; nsect--, block++, buf += tr->blksize)
-			if (tr->readsect(dev, block, buf))
+#if ENABLE_SPI_MTD_CACHE	
+	if(mtd->type == MTD_DATAFLASH)
+		mtd->oobblock = MTD_DATA_FLASH_OOBSIZE;//mtd->erasesize;
+#endif
+	
+	//Add by alexchang 1029-2010
+#if ENABLE_SPI_MTD_CACHE
+	if ( mtd->type == MTD_DATAFLASH||mtd->type == MTD_NANDFLASH || strstr(mtd->name, "nand") )
+#else
+	if ( mtd->type == MTD_NANDFLASH || strstr(mtd->name, "nand") )
+#endif
+		page2sect_num = (mtd->oobblock) >> 9;
+
+	//Add by alexchang 0705-2011
+	if(blk_rq_cur_bytes(req)<mtd->oobblock)
+	{
+		if(!mtdReadBuf)
+		{
+			mtdReadBuf=kmalloc(mtd->oobblock, GFP_KERNEL);
+			if(!mtdReadBuf)
+			{
+				printk("[%s]Not enough memory for read!!\n",__FUNCTION__);
 				return -EIO;
+			}
+		}
+		
+		whichBlock = (block/page2sect_num)*page2sect_num;
+		whichSect  = (block % page2sect_num)<<tr->blkshift;
+	}
+	if (rq_data_dir(req) == READ) {
+	#if ENABLE_SPI_MTD_CACHE
+		if ( mtd->type == MTD_DATAFLASH||mtd->type == MTD_NANDFLASH || strstr(mtd->name, "nand") )
+	#else
+		if ( mtd->type == MTD_NANDFLASH || strstr(mtd->name, "nand") )
+	#endif
+		{	
+			if(blk_rq_cur_bytes(req)<mtd->oobblock)
+			{
+				if((whichBlock!=readIdx)||(whichBlock==0xFFFFFFFF))
+				{
+					if (tr->readsect(dev, whichBlock, mtdReadBuf))
+					{
+						if(mtdReadBuf)
+						{
+							printk("[%s]read error!!\n",__FUNCTION__);
+							kfree(mtdReadBuf);
+							mtdReadBuf=NULL;
+						}
+						return -EIO;
+					}
+					else
+	                    			readIdx = whichBlock ;
+				}
+					memcpy(buf,mtdReadBuf+whichSect, blk_rq_cur_bytes(req));
+			}
+			else
+			{
+				for (; nsect > 0; nsect--, block++, buf += 512){
+					if ( !(block%page2sect_num) )
+					{
+						if (tr->readsect(dev, block, buf))
+							return -EIO;
+					}
+				}
+			}
+		}
+		else
+		{
+			for (; nsect > 0; nsect--, block++, buf += tr->blksize)
+				if (tr->readsect(dev, block, buf))
+					return -EIO;
+		}
+		
 		rq_flush_dcache_pages(req);
 		return 0;
 	} else {
@@ -108,9 +202,44 @@ static int do_blktrans_request(struct mtd_blktrans_ops *tr,
 			return -EIO;
 
 		rq_flush_dcache_pages(req);
-		for (; nsect > 0; nsect--, block++, buf += tr->blksize)
-			if (tr->writesect(dev, block, buf))
-				return -EIO;
+		//-------------------------------------------------------
+		//Add by alexchang 1029-2010
+	#if ENABLE_SPI_MTD_CACHE
+		if ( mtd->type == MTD_DATAFLASH||mtd->type == MTD_NANDFLASH || strstr(mtd->name, "nand") )
+	#else
+		if ( mtd->type == MTD_NANDFLASH || strstr(mtd->name, "nand") )
+	#endif
+		{	
+			if(mtd->oobblock>0x1000)
+			{
+				page2sect_num /= (mtd->oobblock/blk_rq_cur_bytes(req));//Add by alexchang for page size which is large than request size. 1220-2011
+				for (; nsect > 0; nsect--, block++, buf += 512)
+				{	
+					if ( !(block%page2sect_num) )
+					{
+						if (tr->writesect(dev, block, buf))
+							return -EIO;
+					}
+				}
+			}
+			else
+			{
+				for (; nsect > 0; nsect--, block++, buf += 512)
+				{	
+					if ( !(block%page2sect_num) )
+					{
+						if (tr->writesect(dev, block, buf))
+							return -EIO;
+					}
+				}
+			}
+		}
+		else
+		{
+			for (; nsect > 0; nsect--, block++, buf += tr->blksize)
+				if (tr->writesect(dev, block, buf))
+					return -EIO;
+		}
 		return 0;
 	}
 }
@@ -238,6 +367,11 @@ static void blktrans_release(struct gendisk *disk, fmode_t mode)
 {
 	struct mtd_blktrans_dev *dev = blktrans_dev_get(disk);
 
+	if(mtdReadBuf)
+	{
+		kfree(mtdReadBuf);
+		mtdReadBuf=NULL;
+	}
 	if (!dev)
 		return;
 
@@ -386,7 +520,7 @@ int add_mtd_blktrans_dev(struct mtd_blktrans_dev *new)
 	gd->first_minor = (new->devnum) << tr->part_bits;
 	gd->fops = &mtd_block_ops;
 
-	if (tr->part_bits)
+	if (tr->part_bits){
 		if (new->devnum < 26)
 			snprintf(gd->disk_name, sizeof(gd->disk_name),
 				 "%s%c", tr->name, 'a' + new->devnum);
@@ -395,10 +529,21 @@ int add_mtd_blktrans_dev(struct mtd_blktrans_dev *new)
 				 "%s%c%c", tr->name,
 				 'a' - 1 + new->devnum / 26,
 				 'a' + new->devnum % 26);
-	else
-		snprintf(gd->disk_name, sizeof(gd->disk_name),
+	}else{
+	//--------------------------------------------------
+		if(!strcmp(new->mtd->name, "disc")) //Add by alexchang2131 for adding mtdblock/disc partition. 0408-2011
+		{
+			snprintf(gd->disk_name, sizeof(gd->disk_name),
+				 "%sdisc",tr->name);
+		}
+		else
+		{
+			snprintf(gd->disk_name, sizeof(gd->disk_name),
 			 "%s%d", tr->name, new->devnum);
+		}
 
+	//--------------------------------------------------
+	}
 	set_capacity(gd, ((u64)new->size * tr->blksize) >> 9);
 
 	/* Create the request queue */

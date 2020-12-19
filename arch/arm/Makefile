@@ -40,6 +40,10 @@ MMUEXT		:= -nommu
 KBUILD_CFLAGS	+= $(call cc-option,-mno-unaligned-access)
 endif
 
+ifeq ($(CONFIG_KASAN),y)
+KBUILD_CFLAGS	+= $(call cc-option,-mno-unaligned-access)
+endif
+
 ifeq ($(CONFIG_FRAME_POINTER),y)
 KBUILD_CFLAGS	+=-fno-omit-frame-pointer -mapcs -mno-sched-prolog
 endif
@@ -54,6 +58,22 @@ AS		+= -EL
 LD		+= -EL
 endif
 
+ifeq ($(CONFIG_ALSA_LGSE_VERSION),63)
+KBUILD_CFLAGS   += -DALSA_LGSE_VERSION=63
+else
+ifeq ($(CONFIG_ALSA_LGSE_VERSION),70)
+KBUILD_CFLAGS   += -DALSA_LGSE_VERSION=70
+else
+KBUILD_CFLAGS   += -DALSA_LGSE_VERSION=63
+endif
+endif
+
+#ifdef CONFIG_ALSA_LGSE_VERSION
+#KBUILD_CFLAGS   += -DALSA_LGSE_VERSION=$(CONFIG_ALSA_LGSE_VERSION)
+#else
+#KBUILD_CFLAGS   += -DALSA_LGSE_VERSION=63
+#endif
+
 #
 # The Scalar Replacement of Aggregates (SRA) optimization pass in GCC 4.9 and
 # later may result in code being generated that handles signed short and signed
@@ -67,7 +87,12 @@ KBUILD_CFLAGS	+= $(call cc-option,-fno-ipa-sra)
 # macro, but instead defines a whole series of macros which makes
 # testing for a specific architecture or later rather impossible.
 arch-$(CONFIG_CPU_32v7M)	=-D__LINUX_ARM_ARCH__=7 -march=armv7-m -Wa,-march=armv7-m
+#RTK_patch: change -march option for our toolchain
+ifeq ($(CONFIG_ARCH_RTK288O),y)
+arch-$(CONFIG_CPU_32v7)         =-D__LINUX_ARM_ARCH__=7 $(call cc-option, -march=armv8-a,-march=armv5t -Wa$(comma)-march=armv8-a)
+else
 arch-$(CONFIG_CPU_32v7)		=-D__LINUX_ARM_ARCH__=7 $(call cc-option,-march=armv7-a,-march=armv5t -Wa$(comma)-march=armv7-a)
+endif
 arch-$(CONFIG_CPU_32v6)		=-D__LINUX_ARM_ARCH__=6 $(call cc-option,-march=armv6,-march=armv5t -Wa$(comma)-march=armv6)
 # Only override the compiler option if ARMv6. The ARMv6K extensions are
 # always available in ARMv7
@@ -106,7 +131,7 @@ tune-$(CONFIG_CPU_V6K)		=$(call cc-option,-mtune=arm1136j-s,-mtune=strongarm)
 tune-y := $(tune-y)
 
 ifeq ($(CONFIG_AEABI),y)
-CFLAGS_ABI	:=-mabi=aapcs-linux -mno-thumb-interwork -mfpu=vfp
+CFLAGS_ABI	:=-mabi=aapcs-linux -mthumb -mthumb-interwork -ftree-vectorize -rdynamic -mfpu=vfp
 else
 CFLAGS_ABI	:=$(call cc-option,-mapcs-32,-mabi=apcs-gnu) $(call cc-option,-mno-thumb-interwork,)
 endif
@@ -142,6 +167,9 @@ head-y		:= arch/arm/kernel/head$(MMUEXT).o
 # provide a means to avoid/resolve conflicts in multi-arch kernels.
 textofs-y	:= 0x00008000
 textofs-$(CONFIG_ARCH_CLPS711X) := 0x00028000
+ifeq ($(CONFIG_CRASH_DUMP),)
+textofs-$(CONFIG_ARCH_LG1K) := 0x00088000
+endif
 # We don't want the htc bootloader to corrupt kernel during resume
 textofs-$(CONFIG_PM_H1940)      := 0x00108000
 # SA1111 DMA bug: we don't want the kernel to live in precious DMA-able memory
@@ -151,6 +179,8 @@ endif
 textofs-$(CONFIG_ARCH_MSM8X60) := 0x00208000
 textofs-$(CONFIG_ARCH_MSM8960) := 0x00208000
 textofs-$(CONFIG_ARCH_AXXIA) := 0x00308000
+# RTK_patch: modify the text offset as 0x108000
+textofs-$(CONFIG_ARCH_RTK288O) := 0x00108000
 
 # Machine directory name.  This list is sorted alphanumerically
 # by CONFIG_* macro name.
@@ -179,6 +209,7 @@ machine-$(CONFIG_ARCH_IOP33X)		+= iop33x
 machine-$(CONFIG_ARCH_IXP4XX)		+= ixp4xx
 machine-$(CONFIG_ARCH_KEYSTONE)		+= keystone
 machine-$(CONFIG_ARCH_KS8695)		+= ks8695
+machine-$(CONFIG_ARCH_LG1K)		+= lg1k
 machine-$(CONFIG_ARCH_LPC18XX)		+= lpc18xx
 machine-$(CONFIG_ARCH_LPC32XX)		+= lpc32xx
 machine-$(CONFIG_ARCH_MESON)		+= meson
@@ -222,6 +253,8 @@ machine-$(CONFIG_ARCH_W90X900)		+= w90x900
 machine-$(CONFIG_ARCH_ZX)		+= zx
 machine-$(CONFIG_ARCH_ZYNQ)		+= zynq
 machine-$(CONFIG_PLAT_SPEAR)		+= spear
+# RTK_patch: add our machine folders
+machine-$(CONFIG_ARCH_RTK288O)          += rtd288o
 
 # Platform directory name.  This list is sorted alphanumerically
 # by CONFIG_* macro name.
@@ -334,8 +367,9 @@ $(INSTALL_TARGETS):
 
 PHONY += dtbs dtbs_install
 
+# RTK_patch: add dependence target: embedded_dtb
 dtbs: prepare scripts
-	$(Q)$(MAKE) $(build)=$(boot)/dts
+	$(Q)$(MAKE) $(build)=$(boot)/dts embedded_dtb
 
 dtbs_install:
 	$(Q)$(MAKE) $(dtbinst)=$(boot)/dts

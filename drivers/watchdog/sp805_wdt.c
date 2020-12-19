@@ -23,6 +23,7 @@
 #include <linux/module.h>
 #include <linux/moduleparam.h>
 #include <linux/pm.h>
+#include <linux/reboot.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
 #include <linux/types.h>
@@ -67,6 +68,7 @@ struct sp805_wdt {
 	struct clk			*clk;
 	struct amba_device		*adev;
 	unsigned int			load_val;
+	struct notifier_block		restart;
 };
 
 static bool nowayout = WATCHDOG_NOWAYOUT;
@@ -201,6 +203,18 @@ static const struct watchdog_ops wdt_ops = {
 };
 
 static int
+wdt_restart(struct notifier_block *this, unsigned long mode, void *cmd)
+{
+       struct sp805_wdt *wdt = container_of(this, struct sp805_wdt, restart);
+
+       writel_relaxed(0, wdt->base + WDTCONTROL);
+       writel_relaxed(0, wdt->base + WDTLOAD);
+       writel_relaxed(INT_ENABLE | RESET_ENABLE, wdt->base + WDTCONTROL);
+
+       return 0;
+}
+
+static int
 sp805_wdt_probe(struct amba_device *adev, const struct amba_id *id)
 {
 	struct sp805_wdt *wdt;
@@ -241,6 +255,10 @@ sp805_wdt_probe(struct amba_device *adev, const struct amba_id *id)
 	}
 	amba_set_drvdata(adev, wdt);
 
+	wdt->restart.notifier_call = wdt_restart;
+	wdt->restart.priority = 128;
+	register_restart_handler(&wdt->restart);
+
 	dev_info(&adev->dev, "registration successful\n");
 	return 0;
 
@@ -253,6 +271,7 @@ static int sp805_wdt_remove(struct amba_device *adev)
 {
 	struct sp805_wdt *wdt = amba_get_drvdata(adev);
 
+	unregister_restart_handler(&wdt->restart);
 	watchdog_unregister_device(&wdt->wdd);
 	watchdog_set_drvdata(&wdt->wdd, NULL);
 

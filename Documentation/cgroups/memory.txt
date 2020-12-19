@@ -48,6 +48,7 @@ Features:
  - memory pressure notifier
  - oom-killer disable knob and oom-notifier
  - Root cgroup has no limit controls.
+ - pressure stall information (PSI)
 
  Kernel memory support is a work in progress, and the current version provides
  basically functionality. (See Section 2.7)
@@ -87,6 +88,11 @@ Brief summary of control files.
  memory.kmem.tcp.usage_in_bytes  # show current tcp buf memory allocation
  memory.kmem.tcp.failcnt            # show the number of tcp buf memory usage hits limits
  memory.kmem.tcp.max_usage_in_bytes # show max tcp buf memory usage recorded
+
+ # See Documentation/accounting/psi.txt for details.
+ memory.cpu.pressure		# show pressure stall information for CPU
+ memory.memory.pressure		# show pressure stall information for memory
+ memory.io.pressure		# show pressure stall information for IO
 
 1. History
 
@@ -349,6 +355,13 @@ set:
     triggered for the cgroup for both kinds of memory. This setup gives the
     admin a unified view of memory, and it is also useful for people who just
     want to track kernel memory usage.
+
+2.8 Pressure Stall Information
+In a system with a CONFIG_MEMCG=y kernel and the cgroup filesystem
+mounted, pressure stall information is also tracked for tasks grouped
+into memory cgroups. Each subdirectory for memory cgroup in the cgroupfs
+mountpoint contains cpu.pressure, memory.pressure, and io.pressure files;
+the format is the same as the /proc/pressure/ files.
 
 3. User Interface
 

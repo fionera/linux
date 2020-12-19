@@ -51,6 +51,7 @@ enum ion_heap_type {
 #define ION_HEAP_SYSTEM_CONTIG_MASK	(1 << ION_HEAP_TYPE_SYSTEM_CONTIG)
 #define ION_HEAP_CARVEOUT_MASK		(1 << ION_HEAP_TYPE_CARVEOUT)
 #define ION_HEAP_TYPE_DMA_MASK		(1 << ION_HEAP_TYPE_DMA)
+#define ION_HEAP_TYPE_CUSTOM_MASK   (1 << ION_HEAP_TYPE_CUSTOM)
 
 #define ION_NUM_HEAP_IDS		(sizeof(unsigned int) * 8)
 
@@ -70,6 +71,8 @@ enum ion_heap_type {
 					 * caches must be managed
 					 * manually
 					 */
+#define ION_FLAG_FROM_DCU1 4        /* memory allocated from DCU1 only */
+#define ION_FLAG_FROM_DCU2 8        /* memory allocated from DCU2 only */
 
 /**
  * DOC: Ion Userspace API
@@ -119,6 +122,18 @@ struct ion_fd_data {
  */
 struct ion_handle_data {
 	ion_user_handle_t handle;
+};
+
+struct RT_ION_QUERY_PHY_data {
+    unsigned int cmd;//need in first argument for fit ion_custom_data
+    int handle_id;   //ion_user_handle_t
+    unsigned int phy_addr;
+    unsigned int leng;
+};
+
+struct ion_custom_data_0 {
+    unsigned int cmd;
+    unsigned long arg;
 };
 
 /**

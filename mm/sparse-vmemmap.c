@@ -25,6 +25,7 @@
 #include <linux/spinlock.h>
 #include <linux/vmalloc.h>
 #include <linux/sched.h>
+#include <linux/ekp.h>
 #include <asm/dma.h>
 #include <asm/pgalloc.h>
 #include <asm/pgtable.h>
@@ -116,9 +117,12 @@ pmd_t * __meminit vmemmap_pmd_populate(pud_t *pud, unsigned long addr, int node)
 {
 	pmd_t *pmd = pmd_offset(pud, addr);
 	if (pmd_none(*pmd)) {
-		void *p = vmemmap_alloc_block(PAGE_SIZE, node);
-		if (!p)
-			return NULL;
+		void *p = ekp_vmemmap_alloc_pt(node, RMP_PTE_KERNEL);
+		if (!p) {
+			p = vmemmap_alloc_block(PAGE_SIZE, node);
+			if (!p)
+				return NULL;
+		}
 		pmd_populate_kernel(&init_mm, pmd, p);
 	}
 	return pmd;
@@ -128,9 +132,12 @@ pud_t * __meminit vmemmap_pud_populate(pgd_t *pgd, unsigned long addr, int node)
 {
 	pud_t *pud = pud_offset(pgd, addr);
 	if (pud_none(*pud)) {
-		void *p = vmemmap_alloc_block(PAGE_SIZE, node);
-		if (!p)
-			return NULL;
+		void *p = ekp_vmemmap_alloc_pt(node, RMP_PMD);
+		if (!p) {
+			p = vmemmap_alloc_block(PAGE_SIZE, node);
+			if (!p)
+				return NULL;
+		}
 		pud_populate(&init_mm, pud, p);
 	}
 	return pud;
@@ -140,9 +147,12 @@ pgd_t * __meminit vmemmap_pgd_populate(unsigned long addr, int node)
 {
 	pgd_t *pgd = pgd_offset_k(addr);
 	if (pgd_none(*pgd)) {
-		void *p = vmemmap_alloc_block(PAGE_SIZE, node);
-		if (!p)
-			return NULL;
+		void *p = ekp_vmemmap_alloc_pt(node, RMP_PUD);
+		if (!p) {
+			p = vmemmap_alloc_block(PAGE_SIZE, node);
+			if (!p)
+				return NULL;
+		}
 		pgd_populate(&init_mm, pgd, p);
 	}
 	return pgd;

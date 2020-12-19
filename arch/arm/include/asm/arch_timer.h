@@ -12,6 +12,9 @@
 #ifdef CONFIG_ARM_ARCH_TIMER
 int arch_timer_arch_init(void);
 
+// RTK_patch: add timer dev register api
+void arch_timer_dev_register(int, int []);
+
 /*
  * These register accessors are marked inline so the compiler can
  * nicely work out which register we want, and chuck away the rest of
@@ -105,6 +108,9 @@ static inline u32 arch_timer_get_cntkctl(void)
 
 static inline void arch_timer_set_cntkctl(u32 cntkctl)
 {
+#if defined (CONFIG_BRINGUP_RTD288O_HACK)
+        pr_crit("%s %d : 0x%08x\n");
+#endif //#if defined (CONFIG_BRINGUP_RTD288O_HACK)        
 	asm volatile("mcr p15, 0, %0, c14, c1, 0" : : "r" (cntkctl));
 }
 

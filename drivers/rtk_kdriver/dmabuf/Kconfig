@@ -1,0 +1,5 @@
+config RTK_KDRV_DMABUF
+	tristate "Driver for DMA buffer Manager"
+	default y
+	help
+	  Driver for DMA buffer Manager

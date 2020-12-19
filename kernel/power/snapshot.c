@@ -29,6 +29,7 @@
 #include <linux/slab.h>
 #include <linux/compiler.h>
 #include <linux/ktime.h>
+#include <linux/romempool.h>
 
 #include <asm/uaccess.h>
 #include <asm/mmu_context.h>
@@ -37,6 +38,22 @@
 #include <asm/io.h>
 
 #include "power.h"
+
+#ifdef CONFIG_LG_SNAPSHOT_BOOT
+#include <asm/dma-contiguous.h>
+#include <linux/auth.h>
+#include <linux/pageremap.h>
+#include <linux/rtkblueprint.h>
+#include <linux/dma-contiguous.h>
+extern unsigned long cma_highmem_start;
+#if (defined CONFIG_REALTEK_SECURE) && (!defined CONFIG_OPTEE)  
+extern void * secure_uncached_virtual;
+extern unsigned long secure_phy_address_start;
+extern unsigned long secure_phy_address_size;
+#endif
+
+void *dma_get_allocator(struct device *dev);
+#endif
 
 static int swsusp_page_is_free(struct page *);
 static void swsusp_set_page_forbidden(struct page *);
@@ -49,6 +66,11 @@ static void swsusp_unset_page_forbidden(struct page *);
  */
 unsigned long reserved_size;
 
+#ifdef CONFIG_LG_SNAPSHOT_BOOT
+extern unsigned int snapshot_enable;
+bool allow_register_forbidden_region = true;
+bool reserve_boot_memory = false;
+#endif
 void __init hibernate_reserved_size_init(void)
 {
 	reserved_size = SPARE_PAGES * PAGE_SIZE;
@@ -122,6 +144,7 @@ static struct page *alloc_image_page(gfp_t gfp_mask)
 {
 	struct page *page;
 
+	gfp_mask |= __GFP_MOVABLE;
 	page = alloc_page(gfp_mask);
 	if (page) {
 		swsusp_set_page_forbidden(page);
@@ -765,9 +788,9 @@ static bool memory_bm_pfn_present(struct memory_bitmap *bm, unsigned long pfn)
  */
 static bool rtree_next_node(struct memory_bitmap *bm)
 {
-	bm->cur.node = list_entry(bm->cur.node->list.next,
-				  struct rtree_node, list);
-	if (&bm->cur.node->list != &bm->cur.zone->leaves) {
+	if (!list_is_last(&bm->cur.node->list, &bm->cur.zone->leaves)) {
+		bm->cur.node = list_entry(bm->cur.node->list.next,
+					  struct rtree_node, list);
 		bm->cur.node_pfn += BM_BITS_PER_BLOCK;
 		bm->cur.node_bit  = 0;
 		touch_softlockup_watchdog();
@@ -775,9 +798,9 @@ static bool rtree_next_node(struct memory_bitmap *bm)
 	}
 
 	/* No more nodes, goto next zone */
-	bm->cur.zone = list_entry(bm->cur.zone->list.next,
+	if (!list_is_last(&bm->cur.zone->list, &bm->zones)) {
+		bm->cur.zone = list_entry(bm->cur.zone->list.next,
 				  struct mem_zone_bm_rtree, list);
-	if (&bm->cur.zone->list != &bm->zones) {
 		bm->cur.node = list_entry(bm->cur.zone->leaves.next,
 					  struct rtree_node, list);
 		bm->cur.node_pfn = 0;
@@ -832,6 +855,11 @@ struct nosave_region {
 
 static LIST_HEAD(nosave_regions);
 
+#ifdef CONFIG_LG_SNAPSHOT_BOOT
+typedef struct nosave_region forbidden_region;
+static LIST_HEAD(forbidden_regions);
+#endif
+
 /**
  *	register_nosave_region - register a range of page frames the contents
  *	of which should not be saved during the suspend (to be used in the early
@@ -870,6 +898,7 @@ __register_nosave_region(unsigned long start_pfn, unsigned long end_pfn,
 	printk(KERN_INFO "PM: Registered nosave memory: [mem %#010llx-%#010llx]\n",
 		(unsigned long long) start_pfn << PAGE_SHIFT,
 		((unsigned long long) end_pfn << PAGE_SHIFT) - 1);
+	return ;
 }
 
 /*
@@ -909,6 +938,80 @@ static void swsusp_set_page_forbidden(struct page *page)
 	if (forbidden_pages_map)
 		memory_bm_set_bit(forbidden_pages_map, page_to_pfn(page));
 }
+
+#ifdef CONFIG_LG_SNAPSHOT_BOOT
+int __register_cma_forbidden_region(unsigned long start_pfn, unsigned long end_pfn)
+{
+	forbidden_region *region;
+
+	if (!allow_register_forbidden_region || !snapshot_enable)
+		return -1;
+
+	if (start_pfn >= end_pfn)
+		return -1;
+
+	if (!list_empty(&forbidden_regions)) {
+		/* Try to extend the previous region (they should be sorted) */
+		region = list_entry(forbidden_regions.prev,
+					forbidden_region, list);
+		if (region->end_pfn == start_pfn) {
+			region->end_pfn = end_pfn;
+			goto Report;
+		}
+	}
+
+	region = kmalloc(sizeof(forbidden_region), GFP_KERNEL);
+	BUG_ON(!region);
+
+	region->start_pfn = start_pfn;
+	region->end_pfn = end_pfn;
+
+	list_add_tail(&region->list, &forbidden_regions);
+ Report:
+	printk(KERN_INFO "PM: Registered forbidden memory: %016lx - %016lx\n",
+		start_pfn << PAGE_SHIFT, end_pfn << PAGE_SHIFT);
+	return 0;
+}
+
+void free_cma_forbidden_memory(void)
+{
+	if (!snapshot_enable)
+		return;
+
+	while (!list_empty(&forbidden_regions)) {
+		forbidden_region *p;
+		p = list_first_entry(&forbidden_regions, forbidden_region, list);
+		list_del(&p->list);
+		kfree(p);
+	}
+}
+
+void cma_page_set_forbidden(void)
+{
+	forbidden_region *region;
+
+	allow_register_forbidden_region = false;
+
+	if (!snapshot_enable)
+		return;
+
+	if (list_empty(&forbidden_regions))
+		return;
+
+	list_for_each_entry(region, &forbidden_regions, list) {
+		unsigned long pfn;
+
+		pr_debug("PM: Marking forbidden pages: [mem %#010llx-%#010llx]\n",
+			(unsigned long long) region->start_pfn << PAGE_SHIFT,
+			((unsigned long long) region->end_pfn << PAGE_SHIFT)
+				- 1);
+
+		for (pfn = region->start_pfn; pfn < region->end_pfn; pfn++) {
+			swsusp_set_page_forbidden(pfn_to_page(pfn));
+		}
+	}
+}
+#endif
 
 int swsusp_page_is_forbidden(struct page *page)
 {
@@ -1042,6 +1145,14 @@ unsigned int snapshot_additional_pages(struct zone *zone)
 {
 	unsigned int rtree, nodes;
 
+	/*
+	 * Estimation of needed pages for ZONE_CMA is already considered
+	 * when calculating other zones since span of ZONE_CMA is subset
+	 * of other zones.
+	 */
+	if (is_zone_cma(zone))
+		return 0;
+
 	rtree = nodes = DIV_ROUND_UP(zone->spanned_pages, BM_BITS_PER_BLOCK);
 	rtree += DIV_ROUND_UP(rtree * sizeof(struct rtree_node),
 			      LINKED_PAGE_DATA_SIZE);
@@ -1064,10 +1175,17 @@ static unsigned int count_free_highmem_pages(void)
 	struct zone *zone;
 	unsigned int cnt = 0;
 
-	for_each_populated_zone(zone)
+	for_each_populated_zone(zone) {
+		/*
+		 * Free pages count for ZONE_CMA shouldn't be added to
+		 * free highmem pages because kernel cannot allocate
+		 * memory from ZONE_CMA in webOS environment.
+		 */
+		if (is_zone_cma(zone))
+			continue;
 		if (is_highmem(zone))
 			cnt += zone_page_state(zone, NR_FREE_PAGES);
-
+	}
 	return cnt;
 }
 
@@ -1117,6 +1235,13 @@ static unsigned int count_highmem_pages(void)
 		if (!is_highmem(zone))
 			continue;
 
+		/*
+		 * ZONE_CMA is a virtual zone and we don't allow to save
+		 * pages in ZONE_CMA for snapshot image. That is, there is
+		 * no need to check all PFN-s in the zone.
+		 */
+		if (is_zone_cma(zone))
+			continue;
 		mark_free_pages(zone);
 		max_zone_pfn = zone_end_pfn(zone);
 		for (pfn = zone->zone_start_pfn; pfn < max_zone_pfn; pfn++)
@@ -1132,6 +1257,11 @@ static inline void *saveable_highmem_page(struct zone *z, unsigned long p)
 }
 #endif /* CONFIG_HIGHMEM */
 
+int __weak arch_pfn_is_nosave(unsigned long pfn)
+{
+	return 0;
+}
+
 /**
  *	saveable_page - Determine whether a non-highmem page should be included
  *	in the suspend image.
@@ -1143,6 +1273,12 @@ static inline void *saveable_highmem_page(struct zone *z, unsigned long p)
 static struct page *saveable_page(struct zone *zone, unsigned long pfn)
 {
 	struct page *page;
+
+#if (defined CONFIG_REALTEK_SECURE) && (!defined CONFIG_OPTEE)  
+	// save kcpu area for memblock_remove
+	if((__pfn_to_phys(pfn) >= secure_phy_address_start) && (__pfn_to_phys(pfn) < (secure_phy_address_start + secure_phy_address_size)))
+		return pfn_to_page(pfn);
+#endif
 
 	if (!pfn_valid(pfn))
 		return NULL;
@@ -1163,6 +1299,9 @@ static struct page *saveable_page(struct zone *zone, unsigned long pfn)
 	if (page_is_guard(page))
 		return NULL;
 
+	if (arch_pfn_is_nosave(pfn))
+		return NULL;
+
 	return page;
 }
 
@@ -1180,8 +1319,15 @@ static unsigned int count_data_pages(void)
 	for_each_populated_zone(zone) {
 		if (is_highmem(zone))
 			continue;
-
+		/*
+		 * ZONE_CMA is a virtual zone and we don't allow to save
+		 * pages in ZONE_CMA for snapshot image. That is, there is
+		 * no need to check all PFN-s in the zone.
+		 */
+		if (is_zone_cma(zone))
+			continue;
 		mark_free_pages(zone);
+		mark_free_romempool();
 		max_zone_pfn = zone_end_pfn(zone);
 		for (pfn = zone->zone_start_pfn; pfn < max_zone_pfn; pfn++)
 			if (saveable_page(zone, pfn))
@@ -1246,12 +1392,44 @@ static void copy_data_page(unsigned long dst_pfn, unsigned long src_pfn)
 			/* Page pointed to by src may contain some kernel
 			 * data modified by kmap_atomic()
 			 */
+#if (defined CONFIG_REALTEK_SECURE) && (!defined CONFIG_OPTEE)  
+			if((__pfn_to_phys(src_pfn) >= secure_phy_address_start) && (__pfn_to_phys(src_pfn) < (secure_phy_address_start + secure_phy_address_size)))
+			{
+				src = secure_uncached_virtual + __pfn_to_phys(src_pfn) - secure_phy_address_start;
+				dst = kmap_atomic(d_page);
+				do_copy_page(dst, src);
+				kunmap_atomic(dst);
+			}else{
+				safe_copy_page(buffer, s_page);
+				dst = kmap_atomic(d_page);
+				copy_page(dst, buffer);
+				kunmap_atomic(dst);
+			}
+
+#else
 			safe_copy_page(buffer, s_page);
 			dst = kmap_atomic(d_page);
 			copy_page(dst, buffer);
 			kunmap_atomic(dst);
+#endif
+                        
 		} else {
-			safe_copy_page(page_address(d_page), s_page);
+		
+#if (defined CONFIG_REALTEK_SECURE) && (!defined CONFIG_OPTEE)  
+			// save kcpu area for memblock_remove
+			if((__pfn_to_phys(src_pfn) >= secure_phy_address_start) && (__pfn_to_phys(src_pfn) < (secure_phy_address_start + secure_phy_address_size)))
+			{
+				src = secure_uncached_virtual + __pfn_to_phys(src_pfn) - secure_phy_address_start;
+				dst = page_address(d_page);
+				do_copy_page(dst, src);				
+			}
+			else
+			{
+				safe_copy_page(page_address(d_page), s_page);
+			}
+#else
+			safe_copy_page(page_address(d_page), s_page);                                        
+#endif
 		}
 	}
 }
@@ -1274,7 +1452,15 @@ copy_data_pages(struct memory_bitmap *copy_bm, struct memory_bitmap *orig_bm)
 	for_each_populated_zone(zone) {
 		unsigned long max_zone_pfn;
 
+		/*
+		 * ZONE_CMA is a virtual zone and we don't allow to save
+		 * pages in ZONE_CMA for snapshot image. That is, there is
+		 * no need to check all PFN-s in the zone.
+		 */
+		if (is_zone_cma(zone))
+			continue;
 		mark_free_pages(zone);
+		mark_free_romempool();
 		max_zone_pfn = zone_end_pfn(zone);
 		for (pfn = zone->zone_start_pfn; pfn < max_zone_pfn; pfn++)
 			if (page_is_saveable(zone, pfn))
@@ -1563,6 +1749,7 @@ int hibernate_preallocate_memory(void)
 	unsigned long alloc, save_highmem, pages_highmem, avail_normal;
 	ktime_t start, stop;
 	int error;
+	unsigned long memory_shrunk = 0;
 
 	printk(KERN_INFO "PM: Preallocating image memory... ");
 	start = ktime_get();
@@ -1575,6 +1762,9 @@ int hibernate_preallocate_memory(void)
 	if (error)
 		goto err_out;
 
+#ifdef CONFIG_LG_SNAPSHOT_BOOT
+	cma_page_set_forbidden();
+#endif
 	alloc_normal = 0;
 	alloc_highmem = 0;
 
@@ -1592,6 +1782,15 @@ int hibernate_preallocate_memory(void)
 	size = 0;
 	for_each_populated_zone(zone) {
 		size += snapshot_additional_pages(zone);
+
+		/*
+		 * Free page count for ZONE_CMA shouldn't be added to
+		 * free highmem pages because kernel cannot allocate
+		 * memory from ZONE_CMA in webOS environment.
+		 */
+		if (is_zone_cma(zone))
+			continue;
+
 		if (is_highmem(zone))
 			highmem += zone_page_state(zone, NR_FREE_PAGES);
 		else
@@ -1642,7 +1841,12 @@ int hibernate_preallocate_memory(void)
 	 * NOTE: If this is not done, performance will be hurt badly in some
 	 * test cases.
 	 */
-	shrink_all_memory(saveable - size);
+#ifdef CONFIG_LG_HIBERNATION_HACK
+	// workaround for hibernation test : shrink more
+	memory_shrunk = shrink_all_memory(max_t(unsigned long, saveable - size, count - max_size));
+#else
+	memory_shrunk = shrink_all_memory(saveable - size);
+#endif
 
 	/*
 	 * The number of saveable pages in memory was too high, so apply some
@@ -1664,7 +1868,16 @@ int hibernate_preallocate_memory(void)
 		pages += pages_highmem;
 		pages_highmem = preallocate_image_highmem(alloc);
 		if (pages_highmem < alloc)
+	#ifdef CONFIG_LG_HIBERNATION_HACK
+		{
+			// workaround for using swap space in no highmem condition
+			if(preallocate_image_pages(alloc, GFP_IMAGE) < alloc)
+				goto err_out;
+
+		}
+	#else
 			goto err_out;
+	#endif
 		pages += pages_highmem;
 		/*
 		 * size is the desired number of saveable pages to leave in
@@ -1695,7 +1908,7 @@ int hibernate_preallocate_memory(void)
 
  out:
 	stop = ktime_get();
-	printk(KERN_CONT "done (allocated %lu pages)\n", pages);
+	printk(KERN_CONT "done (allocated %lu pages, shrunk %lu pages)\n", pages, memory_shrunk);
 	swsusp_show_speed(start, stop, pages, "Allocated");
 
 	return 0;
@@ -1706,28 +1919,6 @@ int hibernate_preallocate_memory(void)
 	return -ENOMEM;
 }
 
-#ifdef CONFIG_HIGHMEM
-/**
-  *	count_pages_for_highmem - compute the number of non-highmem pages
-  *	that will be necessary for creating copies of highmem pages.
-  */
-
-static unsigned int count_pages_for_highmem(unsigned int nr_highmem)
-{
-	unsigned int free_highmem = count_free_highmem_pages() + alloc_highmem;
-
-	if (free_highmem >= nr_highmem)
-		nr_highmem = 0;
-	else
-		nr_highmem -= free_highmem;
-
-	return nr_highmem;
-}
-#else
-static unsigned int
-count_pages_for_highmem(unsigned int nr_highmem) { return 0; }
-#endif /* CONFIG_HIGHMEM */
-
 /**
  *	enough_free_mem - Make sure we have enough free memory for the
  *	snapshot image.
@@ -1736,17 +1927,16 @@ count_pages_for_highmem(unsigned int nr_highmem) { return 0; }
 static int enough_free_mem(unsigned int nr_pages, unsigned int nr_highmem)
 {
 	struct zone *zone;
-	unsigned int free = alloc_normal;
+	unsigned int free = alloc_normal + alloc_highmem;
 
-	for_each_populated_zone(zone)
-		if (!is_highmem(zone))
+	for_each_populated_zone(zone) {
 			free += zone_page_state(zone, NR_FREE_PAGES);
+	}
 
-	nr_pages += count_pages_for_highmem(nr_highmem);
 	pr_debug("PM: Normal pages needed: %u + %u, available pages: %u\n",
 		nr_pages, PAGES_FOR_IO, free);
 
-	return free > nr_pages + PAGES_FOR_IO;
+	return free > nr_pages + nr_highmem + PAGES_FOR_IO;
 }
 
 #ifdef CONFIG_HIGHMEM
@@ -1791,6 +1981,83 @@ static inline unsigned int
 alloc_highmem_pages(struct memory_bitmap *bm, unsigned int n) { return 0; }
 #endif /* CONFIG_HIGHMEM */
 
+static int count_free_normal_pages(void)
+{
+	struct zone *zone;
+	int cnt = 0;
+
+	for_each_populated_zone(zone) {
+		/*
+		 * ZONE_CMA is a virtual zone and we don't allow to save
+		 * pages in ZONE_CMA for snapshot image. That is, there is
+		 * no need to check all PFN-s in the zone.
+		 */
+		if (is_zone_cma(zone))
+			continue;
+
+		if (!is_highmem(zone))
+			cnt += zone_page_state(zone, NR_FREE_PAGES);
+	}
+	return cnt;
+}
+
+static inline unsigned int
+alloc_normal_pages(struct memory_bitmap *bm, unsigned int nr_pages)
+{
+	int to_alloc = count_free_normal_pages();
+
+	if (to_alloc > PAGES_FOR_IO)
+		to_alloc -= PAGES_FOR_IO;
+	else
+		return nr_pages;
+
+        if (to_alloc > nr_pages)
+                to_alloc = nr_pages;
+
+        nr_pages -= to_alloc;
+        while (to_alloc-- > 0) {
+                struct page *page;
+
+                page = alloc_image_page(GFP_ATOMIC | __GFP_COLD);
+		if(!page)
+			break;
+                memory_bm_set_bit(bm, page_to_pfn(page));
+        }
+
+	return nr_pages + to_alloc + 1;
+}
+
+#ifdef CONFIG_CMA
+static inline unsigned int
+alloc_cma_pages(struct memory_bitmap *bm, unsigned int nr_cma)
+{
+	int ret = 0;
+	gfp_t saved_gfp_mask;
+
+	saved_gfp_mask = gfp_allowed_mask;
+	gfp_allowed_mask |= __GFP_CMA;
+	while (nr_cma-- > 0) {
+		struct page *page;
+
+		page = alloc_image_page(GFP_ATOMIC | __GFP_HIGHMEM
+					| __GFP_MOVABLE | __GFP_COLD | __GFP_CMA);
+		if (!page) {
+			ret = -1;
+			goto err_out;
+		}
+
+		memory_bm_set_bit(bm, page_to_pfn(page));
+	}
+
+err_out:
+	gfp_allowed_mask = saved_gfp_mask;
+	return ret;
+}
+#else
+static inline unsigned int
+alloc_cma_pages(struct memory_bitmap *bm, unsigned int nr_cma) { return -1; }
+#endif
+
 /**
  *	swsusp_alloc - allocate memory for the suspend image
  *
@@ -1807,6 +2074,8 @@ static int
 swsusp_alloc(struct memory_bitmap *orig_bm, struct memory_bitmap *copy_bm,
 		unsigned int nr_pages, unsigned int nr_highmem)
 {
+	unsigned int nr_cma = 0;
+
 	if (nr_highmem > 0) {
 		if (get_highmem_buffer(PG_ANY))
 			goto err_out;
@@ -1817,15 +2086,11 @@ swsusp_alloc(struct memory_bitmap *orig_bm, struct memory_bitmap *copy_bm,
 	}
 	if (nr_pages > alloc_normal) {
 		nr_pages -= alloc_normal;
-		while (nr_pages-- > 0) {
-			struct page *page;
-
-			page = alloc_image_page(GFP_ATOMIC | __GFP_COLD);
-			if (!page)
-				goto err_out;
-			memory_bm_set_bit(copy_bm, page_to_pfn(page));
-		}
+		nr_cma += alloc_normal_pages(copy_bm, nr_pages);
 	}
+
+	if (nr_cma && alloc_cma_pages(copy_bm, nr_cma))
+		goto err_out;
 
 	return 0;
 
@@ -2012,6 +2277,13 @@ static int mark_unsafe_pages(struct memory_bitmap *bm)
 
 	/* Clear page flags */
 	for_each_populated_zone(zone) {
+		/*
+		 * ZONE_CMA is a virtual zone and we don't allow to save
+		 * pages in ZONE_CMA for snapshot image. That is, there is
+		 * no need to check all PFN-s in the zone.
+		 */
+                if (is_zone_cma(zone))
+                        continue;
 		max_zone_pfn = zone_end_pfn(zone);
 		for (pfn = zone->zone_start_pfn; pfn < max_zone_pfn; pfn++)
 			if (pfn_valid(pfn))
@@ -2605,3 +2877,43 @@ int restore_highmem(void)
 	return 0;
 }
 #endif /* CONFIG_HIGHMEM */
+
+#ifdef CONFIG_LG_SNAPSHOT_BOOT
+int hibernation_free_bootmem(void)
+{
+	enum PLAFTORM_TYPE platform = get_platform();
+
+	if (reserve_boot_memory) {
+        unsigned long addr, size;
+        size = carvedout_buf_query(CARVEDOUT_SNAPSHOT, &addr);
+		if (size) { 
+			unsigned long pfn = addr >> PAGE_SHIFT;
+			unsigned long end = (addr + size) >> PAGE_SHIFT;
+			unsigned long base = cma_highmem_start >> PAGE_SHIFT;
+
+            if (PageHighMem(pfn_to_page(pfn)))
+            {
+
+			for (; pfn < end; pfn++) {
+#ifdef CONFIG_HIGHMEM
+				free_highmem_page(pfn_to_page(pfn));
+#else
+                free_reserved_page(pfn_to_page(pfn));
+#endif
+				if (in_cma_range(auth_dev, pfn))
+					free_rtkbp_memory((struct mem_bp *)dma_get_allocator(auth_dev), pfn - base, 0);
+			}
+            }
+            else 
+            {
+				free_reserved_area(__va(pfn << PAGE_SHIFT), __va(end << PAGE_SHIFT), -1, "snapshot_reserved");
+
+            }
+		}
+
+		reserve_boot_memory = 0;
+	}
+	return 0;
+}
+#endif
+

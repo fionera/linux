@@ -32,6 +32,8 @@ void handle_bad_irq(struct irq_desc *desc)
 
 	print_irq_desc(irq, desc);
 	kstat_incr_irqs_this_cpu(desc);
+	printk(KERN_ERR "handle_bad_irq: irq/hwirq(%d/%d) \n",
+	       irq, (irq_desc_get_irq_data(desc)) ? (irq_desc_get_irq_data(desc)->hwirq): -1);
 	ack_bad_irq(irq);
 }
 EXPORT_SYMBOL_GPL(handle_bad_irq);
@@ -138,7 +140,8 @@ irqreturn_t handle_irq_event_percpu(struct irq_desc *desc)
 	unsigned int flags = 0, irq = desc->irq_data.irq;
 	struct irqaction *action = desc->action;
 
-	do {
+	/* action might have become NULL since we dropped the lock */
+	while (action) {
 		irqreturn_t res;
 
 		trace_irq_handler_entry(irq, action);
@@ -173,7 +176,7 @@ irqreturn_t handle_irq_event_percpu(struct irq_desc *desc)
 
 		retval |= res;
 		action = action->next;
-	} while (action);
+	}
 
 	add_interrupt_randomness(irq, flags);
 

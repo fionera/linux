@@ -48,9 +48,6 @@
 #error TEXT_OFFSET must be less than 2MB
 #endif
 
-#define KERNEL_START	_text
-#define KERNEL_END	_end
-
 /*
  * Kernel startup entry point.
  * ---------------------------
@@ -207,7 +204,35 @@ section_table:
 	.align 12
 #endif
 
+#define MAGIC_TAG1                      0x508   /* Secondary */
+#define MAGIC_TAG2                      0x510
+#define MAGIC_TAG3                      0x518
+
 ENTRY(stext)
+#if  1 //defined(CONFIG_SMP) && defined(CONFIG_OPTEE)
+    mrs   x4, mpidr_el1
+    lsr   x4, x4, #8
+    and   x4, x4, #3
+    cmp   w4, #0
+    beq   master_core
+    ldr   x5 , =MAGIC_TAG1
+    cmp   w4, #1
+    beq   secondary_core
+    ldr   x5 , =MAGIC_TAG2
+    cmp   w4, #2
+    beq   secondary_core
+    ldr   x5 , =MAGIC_TAG3
+    cmp   w4, #3
+    beq   secondary_core
+secondary_core:
+    ldr   x4, [x5]
+    cmp   x4, #0
+    beq   secondary_core
+    ldr   x6, =0x0
+    str   x6, [x5] //clear tag here 
+    br    x4
+master_core:
+#endif
 	bl	preserve_boot_args
 	bl	el2_setup			// Drop to EL1, w20=cpu_boot_mode
 	adrp	x24, __PHYS_OFFSET
@@ -518,8 +543,9 @@ CPU_LE(	movk	x0, #0x30d0, lsl #16	)	// Clear EE and E0E on LE systems
 	b.lt	4f				// Skip if no PMU present
 	mrs	x0, pmcr_el0			// Disable debug access traps
 	ubfx	x0, x0, #11, #5			// to EL2 and allow access to
-	msr	mdcr_el2, x0			// all PMU counters from EL1
 4:
+	csel	x0, xzr, x0, lt			// all PMU counters from EL1
+	msr	mdcr_el2, x0			// (if they exist)
 
 	/* Stage-2 translation */
 	msr	vttbr_el2, xzr
@@ -627,7 +653,7 @@ ENDPROC(__secondary_switched)
  * If it isn't, park the CPU
  */
 	.section	".idmap.text", "ax"
-__enable_mmu:
+ENTRY(__enable_mmu)
 	mrs	x1, ID_AA64MMFR0_EL1
 	ubfx	x2, x1, #ID_AA64MMFR0_TGRAN_SHIFT, 4
 	cmp	x2, #ID_AA64MMFR0_TGRAN_SUPPORTED

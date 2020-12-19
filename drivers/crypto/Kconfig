@@ -459,6 +459,17 @@ config CRYPTO_DEV_QCE
 	  This driver supports Qualcomm crypto engine accelerator
 	  hardware. To compile this driver as a module, choose M here. The
 	  module will be called qcrypto.
+config CRYPTO_DEV_ZACC
+	tristate "Support for LGE ZACC HW compressor/decompressor"
+	depends on ARCH_LG1K
+	default y
+	help
+
+config CRYPTO_DEV_RTK_ZACC
+	tristate "Support for RTK ZACC HW compressor/decompressor"
+	depends on ARCH_RTK288O
+	default y
+	help
 
 config CRYPTO_DEV_VMX
 	bool "Support for VMX cryptographic acceleration instructions"

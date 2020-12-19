@@ -81,6 +81,16 @@
 #include <linux/integrity.h>
 #include <linux/proc_ns.h>
 #include <linux/io.h>
+#include <linux/ekp.h>
+#include <linux/romempool.h>
+
+#if defined(CONFIG_ARCH_RTK288O)
+#include <linux/pageremap.h>
+#endif
+
+#ifdef CONFIG_LG_SNAPSHOT_BOOT
+#include <linux/suspend.h>
+#endif
 
 #include <asm/io.h>
 #include <asm/bugs.h>
@@ -93,8 +103,29 @@ static int kernel_init(void *);
 extern void init_IRQ(void);
 extern void fork_init(void);
 extern void radix_tree_init(void);
+#ifdef CONFIG_ANDROID_RECOVERY_KERNEL
+extern void rtk_post_processing(void);
+#endif
 #ifndef CONFIG_DEBUG_RODATA
 static inline void mark_rodata_ro(void) { }
+#endif
+
+#ifdef CONFIG_REALTEK_LOGBUF
+__attribute__((weak)) int thread_logbuf_reader(void* p)
+{
+        return -1;
+}
+#endif
+extern void __init hw_monitor_early_init(void);
+
+#if defined(CONFIG_ARCH_RTK288O)
+//#define LAST_IMAGE_SIZE 4*1024*1024
+phys_addr_t __initdata reserved_dvr_start = 0;
+phys_addr_t __initdata reserved_dvr_size = 0;
+phys_addr_t __initdata reserved_last_image_start = 0;
+phys_addr_t __initdata reserved_last_image_size = 0;
+void *pAnimation = 0;
+//void *pLastImage = 0;
 #endif
 
 /*
@@ -382,7 +413,9 @@ static void __init setup_command_line(char *command_line)
  */
 
 static __initdata DECLARE_COMPLETION(kthreadd_done);
-
+#if defined(CONFIG_REALTEK_WATCHDOG) || defined(CONFIG_RTK_KDRV_WATCHDOG)
+int hw_watchdog(void *p);
+#endif
 static noinline void __init_refok rest_init(void)
 {
 	int pid;
@@ -395,6 +428,15 @@ static noinline void __init_refok rest_init(void)
 	 * we schedule it before we create kthreadd, will OOPS.
 	 */
 	kernel_thread(kernel_init, NULL, CLONE_FS);
+
+#ifndef CONFIG_REALTEK_FPGA
+#if defined(CONFIG_REALTEK_WATCHDOG) || defined(CONFIG_RTK_KDRV_WATCHDOG)
+    kernel_thread(hw_watchdog, NULL, CLONE_FS | CLONE_SIGHAND);
+#else
+	/* disable hw watchdog for debug */
+#endif
+#endif
+
 	numa_default_policy();
 	pid = kernel_thread(kthreadd, NULL, CLONE_FS | CLONE_FILES);
 	rcu_read_lock();
@@ -494,6 +536,9 @@ static void __init mm_init(void)
 	ioremap_huge_init();
 }
 
+void __weak hw_monitor_early_init()
+{}
+
 asmlinkage __visible void __init start_kernel(void)
 {
 	char *command_line;
@@ -527,6 +572,8 @@ asmlinkage __visible void __init start_kernel(void)
 	pr_notice("%s", linux_banner);
 	setup_arch(&command_line);
 	mm_init_cpumask(&init_mm);
+
+        hw_monitor_early_init();/*init rtk hw_monitor*/
 	setup_command_line(command_line);
 	setup_nr_cpu_ids();
 	setup_per_cpu_areas();
@@ -557,6 +604,7 @@ asmlinkage __visible void __init start_kernel(void)
 	sort_main_extable();
 	trap_init();
 	mm_init();
+	romempool_init();
 
 	/*
 	 * Set up the scheduler prior starting any interrupts (such as the
@@ -573,6 +621,14 @@ asmlinkage __visible void __init start_kernel(void)
 		 "Interrupts were enabled *very* early, fixing it\n"))
 		local_irq_disable();
 	idr_init_cache();
+
+	/*
+	 * Allow workqueue creation and work item queueing/cancelling
+	 * early.  Work item execution depends on kthreads and starts after
+	 * workqueue_init().
+	 */
+	workqueue_init_early();
+
 	rcu_init();
 
 	/* trace_printk() and trace points may be used after this */
@@ -938,10 +994,20 @@ static int __ref kernel_init(void *unused)
 	async_synchronize_full();
 	free_initmem();
 	mark_rodata_ro();
+	mark_romempool_ro();
+	ekp_start();
 	system_state = SYSTEM_RUNNING;
 	numa_default_policy();
 
+#ifdef CONFIG_REALTEK_LOGBUF
+        kthread_run(thread_logbuf_reader,NULL,"RtdLogReader");
+#endif
+
 	flush_delayed_fput();
+
+#ifdef CONFIG_ANDROID_RECOVERY_KERNEL
+	rtk_post_processing();
+#endif
 
 	if (ramdisk_execute_command) {
 		ret = run_init_process(ramdisk_execute_command);
@@ -981,8 +1047,22 @@ static noinline void __init kernel_init_freeable(void)
 	 */
 	wait_for_completion(&kthreadd_done);
 
+#ifdef CONFIG_CMA
+	/*
+	 * Now the scheduler is fully set up and can do blocking allocations
+	 * If snapshot boot is enabled, the allocation of CMA pages are
+	 * not allowed during boot. __GFP_CMA will be settled after making
+	 * snapshot image in the pm_restore_gfp_mask. gfp_allowed_mask need
+	 * to be considered both here and hib_state_set_snapshot.
+	 */
+	if (gfp_allowed_mask & __GFP_CMA)
+		gfp_allowed_mask = __GFP_BITS_MASK;
+	else
+		gfp_allowed_mask = __GFP_BITS_MASK & ~__GFP_CMA;
+#else
 	/* Now the scheduler is fully set up and can do blocking allocations */
 	gfp_allowed_mask = __GFP_BITS_MASK;
+#endif
 
 	/*
 	 * init can allocate pages on any node
@@ -996,6 +1076,8 @@ static noinline void __init kernel_init_freeable(void)
 	cad_pid = task_pid(current);
 
 	smp_prepare_cpus(setup_max_cpus);
+
+	workqueue_init();
 
 	do_pre_smp_initcalls();
 	lockup_detector_init();
@@ -1038,3 +1120,33 @@ static noinline void __init kernel_init_freeable(void)
 	integrity_load_keys();
 	load_default_modules();
 }
+
+/* RTK_patch: handle the power on video/logo/audio memory issue */
+static int __init reserve_dvr_memory(void)
+{
+#if defined(CONFIG_ARCH_RTK288O)
+	/*
+	 * if bootcode assign last_image= in kernel cmdline, use bootcode's memory setting.
+	 * if kernel_cmd doesn't exist last_image=, last image buffer use 4MB after decode buffer region.
+	 */
+	if (reserved_dvr_size) {
+		pAnimation = dvr_malloc_specific_addr(reserved_dvr_size,
+							GFP_DCU1, reserved_dvr_start);
+#ifdef CONFIG_LG_SNAPSHOT_BOOT
+		register_cma_forbidden_region(__phys_to_pfn(reserved_dvr_start), reserved_dvr_size);
+#endif
+	#if 0
+		if (reserved_last_image_size) {
+			pLastImage = dvr_malloc_specific_addr(reserved_last_image_size,
+							GFP_DCU1, reserved_last_image_start);
+		}
+		else {
+			pLastImage = dvr_malloc_specific_addr(LAST_IMAGE_SIZE,
+							GFP_DCU1, reserved_dvr_start+reserved_dvr_size);
+		}
+	#endif
+	}
+#endif
+	return 0;
+}
+postcore_initcall(reserve_dvr_memory);

@@ -443,14 +443,34 @@ int add_mtd_device(struct mtd_info *mtd)
 	mtd->dev.type = &mtd_devtype;
 	mtd->dev.class = &mtd_class;
 	mtd->dev.devt = MTD_DEVT(i);
-	dev_set_name(&mtd->dev, "mtd%d", i);
+	if(!strcmp(mtd->name, "disc"))//Add mtddisc partition. add by alexchang 0408-2011
+		dev_set_name(&mtd->dev, "mtddisc");
+	else
+		dev_set_name(&mtd->dev, "mtd%d", i);
 	dev_set_drvdata(&mtd->dev, mtd);
 	error = device_register(&mtd->dev);
 	if (error)
 		goto fail_added;
 
-	device_create(&mtd_class, mtd->dev.parent, MTD_DEVT(i) + 1, NULL,
-		      "mtd%dro", i);
+#if 0
+	if (MTD_DEVT(i))
+		device_create(&mtd_class, mtd->dev.parent,
+			      MTD_DEVT(i) + 1,
+			      NULL, "mtd%dro", i);
+#else
+	if (MTD_DEVT(i))
+	{
+		if(!strcmp(mtd->name, "disc"))//Add mtddisc partition. add by alexchang 0408-2011
+			device_create(&mtd_class, mtd->dev.parent,
+				MTD_DEVT(i) + 1,
+				NULL, "mtddiscro", i);
+		else
+			device_create(&mtd_class, mtd->dev.parent,
+				MTD_DEVT(i) + 1,
+				NULL, "mtd%dro", i);
+	}
+
+#endif
 
 	pr_debug("mtd: Giving out device %d to %s\n", i, mtd->name);
 	/* No need to get a refcount on the module containing

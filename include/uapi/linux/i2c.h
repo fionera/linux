@@ -76,6 +76,31 @@ struct i2c_msg {
 #define I2C_M_IGNORE_NAK	0x1000	/* if I2C_FUNC_PROTOCOL_MANGLING */
 #define I2C_M_NO_RD_ACK		0x0800	/* if I2C_FUNC_PROTOCOL_MANGLING */
 #define I2C_M_RECV_LEN		0x0400	/* length will be first received byte */
+/* Added by Realtek */
+#define I2C_GPIO_RW		0x0080
+
+#ifdef CONFIG_CUSTOMER_TV006
+#define I2C_M_DEFAULT_SPEED     0x0000// Default speed defined for each channels
+#define I2C_M_LOW_SPEED         0x0002// Low speed (50KHz)
+#define I2C_M_NORMAL_SPEED      0x0004// Normal speed (100KHz)
+#define I2C_M_HIGH_SPEED        0x0006// High speed (400KHz)
+#define I2C_M_FAST_SPEED        0x0008// Fast speed (chip defined (800KHz), some chips can not have 800KHz)
+#define I2C_M_SPEED_MASK        0x000E
+#define I2C_M_NO_GUARD_TIME     0x0100
+#else
+#define I2C_M_NORMAL_SPEED	0x0000
+#define I2C_M_FAST_SPEED	0x0002
+#define I2C_M_HIGH_SPEED	0x0004
+#define I2C_M_LOW_SPEED		0x0006
+#define I2C_M_SPEED_MASK	0x0006
+#define I2C_M_NO_GUARD_TIME	0x0008
+#endif
+#define I2C_M_HW_DELAY_MASK	0x0070
+#define I2C_M_400US_DELAY	0x0010
+#define I2C_M_600US_DELAY	0x0020
+#define I2C_M_800US_DELAY	0x0030
+#define I2C_M_1000US_DELAY	0x0040
+#define I2C_M_2000US_DELAY	0x0050
 	__u16 len;		/* msg length				*/
 	__u8 *buf;		/* pointer to msg data			*/
 };

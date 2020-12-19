@@ -1,0 +1,777 @@
+diff --git a/audio/rtkaudio_driver.c b/audio/rtkaudio_driver.c
+index 9514426..7f3c7de 100644
+--- a/audio/rtkaudio_driver.c
++++ b/audio/rtkaudio_driver.c
+@@ -35,6 +35,7 @@
+ 
+ #include <linux/dma-mapping.h>
+ /*#include <sound/rtk_snd.h>*/
++#include <linux/dma-buf.h>
+ 
+ #include <linux/pageremap.h>
+ #ifdef CONFIG_ARM64
+@@ -65,12 +66,12 @@ static int rtkaudio_str_suspend(struct device *dev);
+ static int rtkaudio_str_resume(struct device *dev);
+ 
+ static const struct dev_pm_ops rtkaudio_pm_ops = {
+-	.freeze		= rtkaudio_std_suspend,
+-	.thaw		= rtkaudio_std_resume,
+-	.poweroff	= rtkaudio_std_suspend,
+-	.restore	= rtkaudio_std_resume,
+-	.suspend	= rtkaudio_str_suspend,
+-	.resume		= rtkaudio_str_resume,
++	.freeze         = rtkaudio_std_suspend,
++	.thaw           = rtkaudio_std_resume,
++	.poweroff       = rtkaudio_std_suspend,
++	.restore        = rtkaudio_std_resume,
++	.suspend        = rtkaudio_str_suspend,
++	.resume         = rtkaudio_str_resume,
+ };
+ #endif
+ 
+@@ -82,6 +83,10 @@ static int rtkaudio_minor = RTKAUDIO_MINOR;
+ module_param(rtkaudio_major, int, S_IRUGO);
+ module_param(rtkaudio_minor, int, S_IRUGO);
+ 
++static bool is_release_dma_buf = true;
++static struct dma_buf *dmabuf;
++static struct dma_buf_attachment *attachment;
++static struct device *rtkadec_device;
+ static struct class *rtkaudio_class;
+ static struct cdev rtkaudio_cdev;
+ static struct platform_device *rtkaudio_platform_devs;
+@@ -1182,6 +1187,11 @@ int rtkaudio_open(struct inode *inode, struct file *filp)
+ 
+ int rtkaudio_release(struct inode *inode, struct file *filp)
+ {
++    pr_err("[adma:%d] release\n", __LINE__);
++    if (!is_release_dma_buf && dmabuf) {
++        pr_err("[adma:%d] release -> dma_buf_put \n", __LINE__);
++        dma_buf_put(dmabuf);
++    }
+ 	if (filp->private_data) {
+ 		struct rtkaudio_open_list *info_list = filp->private_data;
+ 		struct list_head *del_list;
+@@ -1265,11 +1275,70 @@ long rtkaudio_send_hdmi_fs(long hdmi_fs)
+ long rtkaudio_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
+ {
+ 	long ret = 0;
++	rtk_dmadev_handle_t *clock;
+ 
+ 	pr_debug("rtkaudio: receive ioctl(cmd:0x%08x, arg:0x%08lx)\n",
+ 		cmd, arg);
+ 
+ 	switch (cmd) {
++	case RTKAUDIO_IOC_DMA_OPEN:
++	{
++		rtk_dma_request_t req;
++		if (copy_from_user(&req, (void __user *)arg, sizeof(req))) {
++			return -EFAULT;
++		}
++		if (req.fd >= 0) {
++			pr_err("[adma:%d] fd:%d \n", __LINE__, req.fd);
++			dmabuf = dma_buf_get(req.fd);
++			pr_info ("[adma:%d] ref:%d\n", __LINE__, atomic_read(&dmabuf->file->f_count));
++			if (IS_ERR(dmabuf)) {
++				pr_err ("[adma:%d] buf get err\n", __LINE__);
++				 break;
++			} else {
++				pr_err ("[adma:%d] buf get success \n", __LINE__);
++			}
++			is_release_dma_buf = false;
++			pr_err("[adma:%d] dmabuf->size:%d \n", __LINE__, dmabuf->size);
++			if (req.attach) {
++				attachment = dma_buf_attach(dmabuf, rtkadec_device);
++				pr_info ("[adma:%d] attach ref:%d\n", __LINE__, atomic_read(&dmabuf->file->f_count));
++				if (IS_ERR_OR_NULL(attachment)) {
++					pr_err("[adma:%d] error \n", __LINE__);
++					break;
++				}
++			} else {
++				pr_info ("[adma:%d] not attach ref:%d\n", __LINE__, atomic_read(&dmabuf->file->f_count));
++			}
++			clock = dmabuf->priv;
++			pr_err("[adma:%d] va:%p pa:0x%lx \n", __LINE__, clock->dma_addr, clock->phyaddr);
++		} else {
++			pr_err("[adma:%d] fd error \n", __LINE__);
++		}
++		break;
++	}
++	case RTKAUDIO_IOC_DMA_CLOSE:
++	{
++		rtk_dma_request_t req;
++		if (copy_from_user(&req, (void __user *)arg, sizeof(req))) {
++			return -EFAULT;
++		}
++		if (req.fd >= 0) {
++			pr_err("[adma:%d] fd:%d \n", __LINE__, req.fd);
++			if (IS_ERR(dmabuf)) {
++				pr_err ("[adma:%d] dmabuf err\n", __LINE__);
++				break;
++			}
++			pr_err("[adma:%d] dmabuf detach size:%d \n", __LINE__, dmabuf->size);
++			dma_buf_detach(dmabuf, attachment);
++			pr_info ("[adma:%d] dmabuf ref:%d\n", __LINE__, atomic_read(&dmabuf->file->f_count));
++			dma_buf_put(dmabuf);
++			is_release_dma_buf = true;
++			pr_err("[adma:%d] dmabuf put ref:%d \n", __LINE__, atomic_read(&dmabuf->file->f_count));
++		} else {
++			pr_err("[adma:%d] fd error \n", __LINE__);
++		}
++		break;
++	}
+ 	case RTKAUDIO_IOC_INIT:
+ 		blocking_notifier_call_chain(&rtkaudio_chain_head,
+ 			RTKAUDIO_RESET_PREPARE, NULL);
+@@ -2392,7 +2461,7 @@ static int rtkaudio_init(void)
+ 		pr_info("rtkaudio: can not add character device...\n");
+ 		goto fail_cdev_init;
+ 	}
+-	device_create(rtkaudio_class, NULL, dev, NULL, "rtkaudio");
++	rtkadec_device = device_create(rtkaudio_class, NULL, dev, NULL, "rtkaudio");
+ 
+ 
+ 	device_enable_async_suspend(&(rtkaudio_platform_devs->dev));
+diff --git a/dmabuf/Kconfig b/dmabuf/Kconfig
+index 3e8ed2e..abada6b 100755
+--- a/dmabuf/Kconfig
++++ b/dmabuf/Kconfig
+@@ -1,5 +1,5 @@
+ config RTK_KDRV_DMABUF
+ 	tristate "Driver for DMA buffer Manager"
+-	default n
++	default y
+ 	help
+ 	  Driver for DMA buffer Manager
+diff --git a/dmabuf/userTest/vdec_adec_dma_sample.diff b/dmabuf/userTest/vdec_adec_dma_sample.diff
+index a55c6a8..5cc54a4 100644
+--- a/dmabuf/userTest/vdec_adec_dma_sample.diff
++++ b/dmabuf/userTest/vdec_adec_dma_sample.diff
+@@ -1,383 +0,0 @@
+-diff --git a/audio/rtkaudio_driver.c b/audio/rtkaudio_driver.c
+-index 9514426..93750c3 100644
+---- a/audio/rtkaudio_driver.c
+-+++ b/audio/rtkaudio_driver.c
+-@@ -35,6 +35,7 @@
+- 
+- #include <linux/dma-mapping.h>
+- /*#include <sound/rtk_snd.h>*/
+-+#include <linux/dma-buf.h>
+- 
+- #include <linux/pageremap.h>
+- #ifdef CONFIG_ARM64
+-@@ -65,12 +66,12 @@ static int rtkaudio_str_suspend(struct device *dev);
+- static int rtkaudio_str_resume(struct device *dev);
+- 
+- static const struct dev_pm_ops rtkaudio_pm_ops = {
+--	.freeze		= rtkaudio_std_suspend,
+--	.thaw		= rtkaudio_std_resume,
+--	.poweroff	= rtkaudio_std_suspend,
+--	.restore	= rtkaudio_std_resume,
+--	.suspend	= rtkaudio_str_suspend,
+--	.resume		= rtkaudio_str_resume,
+-+	.freeze         = rtkaudio_std_suspend,
+-+	.thaw           = rtkaudio_std_resume,
+-+	.poweroff       = rtkaudio_std_suspend,
+-+	.restore        = rtkaudio_std_resume,
+-+	.suspend        = rtkaudio_str_suspend,
+-+	.resume         = rtkaudio_str_resume,
+- };
+- #endif
+- 
+-@@ -82,6 +83,9 @@ static int rtkaudio_minor = RTKAUDIO_MINOR;
+- module_param(rtkaudio_major, int, S_IRUGO);
+- module_param(rtkaudio_minor, int, S_IRUGO);
+- 
+-+static struct dma_buf *dmabuf;
+-+static struct dma_buf_attachment *attachment;
+-+static struct device *rtkadec_device;
+- static struct class *rtkaudio_class;
+- static struct cdev rtkaudio_cdev;
+- static struct platform_device *rtkaudio_platform_devs;
+-@@ -1182,6 +1186,11 @@ int rtkaudio_open(struct inode *inode, struct file *filp)
+- 
+- int rtkaudio_release(struct inode *inode, struct file *filp)
+- {
+-+    pr_err("[adma:%d] release\n", __LINE__);
+-+    if (dmabuf) {
+-+        pr_err("[adma:%d] dma_buf_put \n", __LINE__);
+-+        dma_buf_put(dmabuf);
+-+    }
+- 	if (filp->private_data) {
+- 		struct rtkaudio_open_list *info_list = filp->private_data;
+- 		struct list_head *del_list;
+-@@ -1265,11 +1274,68 @@ long rtkaudio_send_hdmi_fs(long hdmi_fs)
+- long rtkaudio_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
+- {
+- 	long ret = 0;
+-+	rtk_dmadev_handle_t *clock;
+- 
+- 	pr_debug("rtkaudio: receive ioctl(cmd:0x%08x, arg:0x%08lx)\n",
+- 		cmd, arg);
+- 
+- 	switch (cmd) {
+-+	case RTKAUDIO_IOC_DMA_OPEN:
+-+	{
+-+		rtk_dma_request_t req;
+-+		if (copy_from_user(&req, (void __user *)arg, sizeof(req))) {
+-+			return -EFAULT;
+-+		}
+-+		if (req.fd >= 0) {
+-+			pr_err("[adma:%d] fd:%d \n", __LINE__, req.fd);
+-+			dmabuf = dma_buf_get(req.fd);
+-+			pr_info ("[adma:%d] ref:%d\n", __LINE__, atomic_read(&dmabuf->file->f_count));
+-+			if (IS_ERR(dmabuf)) {
+-+				pr_err ("[adma:%d] buf get err\n", __LINE__);
+-+				 break;
+-+			} else {
+-+				pr_err ("[adma:%d] buf get success \n", __LINE__);
+-+			}
+-+			pr_err("[adma:%d] dmabuf->size:%d \n", __LINE__, dmabuf->size);
+-+			if (req.attach) {
+-+				attachment = dma_buf_attach(dmabuf, rtkadec_device);
+-+				pr_info ("[adma:%d] attach ref:%d\n", __LINE__, atomic_read(&dmabuf->file->f_count));
+-+				if (IS_ERR_OR_NULL(attachment)) {
+-+					pr_err("[adma:%d] error \n", __LINE__);
+-+					break;
+-+				}
+-+			} else {
+-+				pr_info ("[adma:%d] not attach ref:%d\n", __LINE__, atomic_read(&dmabuf->file->f_count));
+-+			}
+-+			clock = dmabuf->priv;
+-+			pr_err("[adma:%d] va:%p pa:0x%lx \n", __LINE__, clock->dma_addr, clock->phyaddr);
+-+		} else {
+-+			pr_err("[adma:%d] fd error \n", __LINE__);
+-+		}
+-+		break;
+-+	}
+-+	case RTKAUDIO_IOC_DMA_CLOSE:
+-+	{
+-+		rtk_dma_request_t req;
+-+		if (copy_from_user(&req, (void __user *)arg, sizeof(req))) {
+-+			return -EFAULT;
+-+		}
+-+		if (req.fd >= 0) {
+-+			pr_err("[adma:%d] fd:%d \n", __LINE__, req.fd);
+-+			if (IS_ERR(dmabuf)) {
+-+				pr_err ("[adma:%d] dmabuf err\n", __LINE__);
+-+				break;
+-+			}
+-+			pr_err("[adma:%d] dmabuf detach size:%d \n", __LINE__, dmabuf->size);
+-+			dma_buf_detach(dmabuf, attachment);
+-+			pr_info ("[adma:%d] dmabuf ref:%d\n", __LINE__, atomic_read(&dmabuf->file->f_count));
+-+			dma_buf_put(dmabuf);
+-+			pr_err("[adma:%d] dmabuf put ref:%d \n", __LINE__, atomic_read(&dmabuf->file->f_count));
+-+		} else {
+-+			pr_err("[adma:%d] fd error \n", __LINE__);
+-+		}
+-+		break;
+-+	}
+- 	case RTKAUDIO_IOC_INIT:
+- 		blocking_notifier_call_chain(&rtkaudio_chain_head,
+- 			RTKAUDIO_RESET_PREPARE, NULL);
+-@@ -2392,7 +2458,7 @@ static int rtkaudio_init(void)
+- 		pr_info("rtkaudio: can not add character device...\n");
+- 		goto fail_cdev_init;
+- 	}
+--	device_create(rtkaudio_class, NULL, dev, NULL, "rtkaudio");
+-+	rtkadec_device = device_create(rtkaudio_class, NULL, dev, NULL, "rtkaudio");
+- 
+- 
+- 	device_enable_async_suspend(&(rtkaudio_platform_devs->dev));
+-diff --git a/dmabuf/Kconfig b/dmabuf/Kconfig
+-index 3e8ed2e..abada6b 100755
+---- a/dmabuf/Kconfig
+-+++ b/dmabuf/Kconfig
+-@@ -1,5 +1,5 @@
+- config RTK_KDRV_DMABUF
+- 	tristate "Driver for DMA buffer Manager"
+--	default n
+-+	default y
+- 	help
+- 	  Driver for DMA buffer Manager
+-diff --git a/include/rtk_kdriver/rtk_vdec.h b/include/rtk_kdriver/rtk_vdec.h
+-index 70247f1..0468802 100755
+---- a/include/rtk_kdriver/rtk_vdec.h
+-+++ b/include/rtk_kdriver/rtk_vdec.h
+-@@ -20,6 +20,8 @@
+- #include <linux/file.h>
+- #include <linux/list.h>
+- 
+-+#include <rpc_common.h>
+-+
+- #ifndef RTKVDEC_MAJOR
+- #define RTKVDEC_MAJOR 0 /* dynamic major by default */
+- #endif
+-@@ -237,6 +239,37 @@ typedef struct VDEC_RBINFO_STRUCT {
+- 	unsigned int ibRingHeader ;
+- } VDEC_RBINFO_STRUCT;
+- 
+-+typedef struct _rtk_dma_request_t {
+-+	  unsigned long phyaddr;
+-+	  unsigned int attach;
+-+	  size_t size;
+-+	  int fd;
+-+} rtk_dma_request_t;
+-+
+-+typedef struct _rtk_dma_priv_t {
+-+  unsigned long va;
+-+  unsigned long pa;
+-+  size_t size;
+-+} rtk_dma_priv_t;
+-+
+-+typedef struct _rtk_dmadev_handle_t {
+-+    void *dma_addr;
+-+    ulong phyaddr;
+-+    int fd;
+-+    struct dma_buf *dmabuf;
+-+    unsigned int group;
+-+    unsigned int num_client;
+-+    uint64_t time;
+-+} __attribute__((__aligned__(256))) rtk_dmadev_handle_t;
+-+
+-+typedef struct _rtk_vdec_dmabuf_ref {
+-+	struct list_head dmabuf_list;
+-+    int fd;
+-+     struct dma_buf *dmabuf;
+-+     struct dma_buf_attachment *attach;
+-+     struct sg_table *sgt;
+-+} rtk_vdec_dmabuf_ref_t;
+-+
+- /* Use 'v' as magic number */
+- #define VDEC_IOC_MAGIC  'v'
+- #define VDEC_IOC_INIT       _IO  (VDEC_IOC_MAGIC, 1)
+-@@ -276,6 +309,8 @@ typedef struct VDEC_RBINFO_STRUCT {
+- #define VDEC_IOC_GET_RBINFO  _IOWR(VDEC_IOC_MAGIC,23, int)
+- #define VDEC_IOC_RTN_RBINFO  _IOW (VDEC_IOC_MAGIC,24, int)
+- #define VDEC_IOC_ALLOCSVPMP  _IOWR(VDEC_IOC_MAGIC,25, VDEC_SVPMEM_STRUCT *)
+-+#define VDEC_IOC_DMA_OPEN    _IOWR(VDEC_IOC_MAGIC,26, rtk_dma_request_t)
+-+#define VDEC_IOC_DMA_CLOSE   _IOWR(VDEC_IOC_MAGIC,27, rtk_dma_request_t)
+- 
+- void rtkvdec_vtm_state(void) ;
+- void rtkvdec_send_sharedmemory(void) ;
+-diff --git a/include/rtk_kdriver/rtkaudio.h b/include/rtk_kdriver/rtkaudio.h
+-index 511635a..606d4af 100644
+---- a/include/rtk_kdriver/rtkaudio.h
+-+++ b/include/rtk_kdriver/rtkaudio.h
+-@@ -125,6 +125,29 @@ typedef struct
+- 	int data;   	/* value for data write */
+- } AUDIO_REGISTER_ACCESS_T;
+- 
+-+typedef struct _rtk_dma_request_t {
+-+	  unsigned long phyaddr;
+-+	  unsigned int attach;
+-+	  size_t size;
+-+	  int fd;
+-+} rtk_dma_request_t;
+-+
+-+typedef struct _rtk_dma_priv_t {
+-+  unsigned long va;
+-+  unsigned long pa;
+-+  size_t size;
+-+} rtk_dma_priv_t;
+-+
+-+typedef struct _rtk_dmadev_handle_t {
+-+    void *dma_addr;
+-+    ulong phyaddr;
+-+    int fd;
+-+    struct dma_buf *dmabuf;
+-+    unsigned int group;
+-+    unsigned int num_client;
+-+    uint64_t time;
+-+} __attribute__((__aligned__(256))) rtk_dmadev_handle_t;
+-+
+- #define ENUM_KERNEL_RPC_AUDIO_CONFIG 0x204
+- 
+- /* defined in kernel/printk.c */
+-@@ -169,6 +192,8 @@ extern int console_printk[4];
+- #define RTKAUDIO_IOC_AUDIO_CONFIG           _IOWR(RTKAUDIO_IOC_MAGIC, 13, int)
+- #define RTKAUDIO_IOC_READ_REG               _IOR(RTKAUDIO_IOC_MAGIC, 14, int)
+- #define RTKAUDIO_IOC_WRITE_REG              _IOW(RTKAUDIO_IOC_MAGIC, 15, int)
+-+#define RTKAUDIO_IOC_DMA_OPEN               _IOWR(RTKAUDIO_IOC_MAGIC, 16, rtk_dma_request_t)
+-+#define RTKAUDIO_IOC_DMA_CLOSE              _IOWR(RTKAUDIO_IOC_MAGIC, 17, rtk_dma_request_t)
+- 
+- #endif
+- 
+-diff --git a/vdec/rtk_vdec_driver.c b/vdec/rtk_vdec_driver.c
+-index d04602d..acb880e 100755
+---- a/vdec/rtk_vdec_driver.c
+-+++ b/vdec/rtk_vdec_driver.c
+-@@ -45,6 +45,7 @@
+- #endif
+- #include <linux/freezer.h>
+- #include <rtk_dc_mt.h>
+-+#include <linux/dma-buf.h>
+- 
+- #ifdef CONFIG_RTK_KDRV_DEMUX
+- #include <demux/rtkdemux_export.h>
+-@@ -88,11 +89,16 @@ extern unsigned int snapshot_enable;
+- 
+- static BLOCKING_NOTIFIER_HEAD(rtkvdec_chain_head);
+- 
+-+static struct dma_buf *dmabuf;
+-+static struct dma_buf_attachment *attachment;
+- static struct device *rtkvdec_device;
+- static struct class *rtkvdec_class = NULL;
+- static struct cdev rtkvdec_cdev;
+- static struct platform_device *rtkvdec_platform_devs = NULL;
+--
+-+rtk_vdec_dmabuf_ref_t* vdec_ref;
+-+#if 0
+-+static struct list_head rtk_dma_list_head;
+-+#endif
+- static const struct dev_pm_ops rtkvdec_pm_ops = {
+- #ifdef CONFIG_HIBERNATION
+- 	.freeze 	= rtkvdec_suspend,
+-@@ -2527,6 +2533,11 @@ long rtkvdec_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
+- {
+- 	int ret = 0;
+- 
+-+	//rtk_dma_priv_t *dma_priv;
+-+	rtk_dmadev_handle_t *clock;
+-+#if 0
+-+	rtk_vdec_dmabuf_ref_t* dma_ref;
+-+#endif
+- 	pr_debug("rtkvdec: receive ioctl(cmd:0x%08x, arg:0x%08x)\n", cmd, (unsigned int)arg);
+- 	switch (cmd) {
+- 		case VDEC_IOC_INIT:
+-@@ -2655,7 +2666,63 @@ long rtkvdec_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
+- 			}
+- 			break;
+- 		}
+-+		case VDEC_IOC_DMA_OPEN:
+-+		{
+-+			rtk_dma_request_t req;
+-+			if (copy_from_user(&req, (void __user *)arg, sizeof(req))) {
+-+				return -EFAULT;
+-+			}
+-+			if (req.fd >= 0) {
+-+				pr_err("[vdma:%d] fd:%d \n", __LINE__, req.fd);
+-+				dmabuf = dma_buf_get(req.fd);
+-+				pr_info ("[vdma:%d] ref:%d\n", __LINE__, atomic_read(&dmabuf->file->f_count));
+-+				if (IS_ERR(dmabuf)) {
+-+					pr_err ("[vdma:%d] buf get err\n", __LINE__);
+-+					break;
+-+				} else {
+-+					pr_err ("[vdma:%d] buf get success \n", __LINE__);
+-+				}
+-+				pr_err("[vdma:%d] dmabuf->size:%d \n", __LINE__, dmabuf->size);
+-+				if (req.attach) {
+-+					attachment = dma_buf_attach(dmabuf, rtkvdec_device);
+-+					pr_info ("[vdma:%d] attach ref:%d\n", __LINE__, atomic_read(&dmabuf->file->f_count));
+-+					if (IS_ERR_OR_NULL(attachment)) {
+-+						pr_err("[vdma:%d] error \n", __LINE__);
+-+						break;
+-+					}
+-+				} else {
+-+					pr_err("[vdma:%d] not attach\n", __LINE__);
+-+				}
+-+				clock = dmabuf->priv;
+-+				pr_err("[vdma:%d] va:%p pa:0x%lx \n", __LINE__, clock->dma_addr, clock->phyaddr);
+-+			} else {
+-+				pr_err("[vdma:%d] fd error \n", __LINE__);
+-+			}
+-+			break;
+-+		}
+-+		case VDEC_IOC_DMA_CLOSE:
+-+		{
+-+			rtk_dma_request_t req;
+-+			if (copy_from_user(&req, (void __user *)arg, sizeof(req))) {
+-+				return -EFAULT;
+-+			}
+- 
+-+			if (req.fd >= 0) {
+-+				pr_err("[vdma:%d] fd:%d \n", __LINE__, req.fd);
+-+				if (IS_ERR(dmabuf)) {
+-+					pr_err ("[vdma:%d] buf get err\n", __LINE__);
+-+					break;
+-+				}
+-+				pr_err ("[vdma:%d] dmabuf detach ref:%d\n", __LINE__, atomic_read(&dmabuf->file->f_count));
+-+				dma_buf_detach (dmabuf, attachment);
+-+				pr_info ("[vdma:%d] dmabuf ref:%d\n", __LINE__, atomic_read(&dmabuf->file->f_count));
+-+				dma_buf_put(dmabuf);
+-+				pr_err ("[vdma:%d] dmabuf put ref:%d\n", __LINE__, atomic_read(&dmabuf->file->f_count));
+-+			} else {
+-+				pr_err("[vdma:%d] fd error \n", __LINE__);
+-+			}
+-+			break;
+-+		}
+- 		case VDEC_IOC_CLOSE:
+- 		{
+- 			/* pr_debug("rtkvdec: close\n"); */
+-@@ -3730,6 +3797,11 @@ int rtkvdec_open(struct inode *inode, struct file *filp)
+- 
+- int rtkvdec_release(struct inode *inode, struct file *filp)
+- {
+-+	pr_err("[vdma:%d] release\n", __LINE__);
+-+	if (dmabuf) {
+-+		pr_err("[vdma:%d] dma_buf_put \n", __LINE__);
+-+		dma_buf_put(dmabuf);
+-+	}
+- 	if (filp->private_data) {
+- 		VDEC_FRAMEINFO_LIST *frame_info_list = filp->private_data;
+- 		struct list_head *del_list;
+-@@ -4334,6 +4406,9 @@ static int rtkvdec_init(void)
+- 	rtkvdec_VBM_memory_init();
+- 	rtkvdec_InbandBuf_init();
+- 
+-+    /* create rtk_vdec_dmabuf_ref */
+-+	vdec_ref = (rtk_vdec_dmabuf_ref_t*) kzalloc(sizeof(rtk_vdec_dmabuf_ref_t), GFP_KERNEL);
+-+
+- #ifdef CONFIG_LG_SNAPSHOT_BOOT
+- 	if(snapshot_enable == 0)
+- 		wake_up_process(rtkvdec_vcreate_tsk);
+-@@ -4395,6 +4470,9 @@ static void rtkvdec_exit(void)
+- 	if ((rtkvdec_platform_devs == NULL) || (rtkvdec_class == NULL))
+- 		BUG();
+- 
+-+	if (vdec_ref) {
+-+	  kfree(vdec_ref);
+-+	}
+- 	device_destroy(rtkvdec_class, dev);
+- 	cdev_del(&rtkvdec_cdev);
+- 
+diff --git a/include/rtk_kdriver/rtk_vdec.h b/include/rtk_kdriver/rtk_vdec.h
+index 70247f1..0468802 100755
+--- a/include/rtk_kdriver/rtk_vdec.h
++++ b/include/rtk_kdriver/rtk_vdec.h
+@@ -20,6 +20,8 @@
+ #include <linux/file.h>
+ #include <linux/list.h>
+ 
++#include <rpc_common.h>
++
+ #ifndef RTKVDEC_MAJOR
+ #define RTKVDEC_MAJOR 0 /* dynamic major by default */
+ #endif
+@@ -237,6 +239,37 @@ typedef struct VDEC_RBINFO_STRUCT {
+ 	unsigned int ibRingHeader ;
+ } VDEC_RBINFO_STRUCT;
+ 
++typedef struct _rtk_dma_request_t {
++	  unsigned long phyaddr;
++	  unsigned int attach;
++	  size_t size;
++	  int fd;
++} rtk_dma_request_t;
++
++typedef struct _rtk_dma_priv_t {
++  unsigned long va;
++  unsigned long pa;
++  size_t size;
++} rtk_dma_priv_t;
++
++typedef struct _rtk_dmadev_handle_t {
++    void *dma_addr;
++    ulong phyaddr;
++    int fd;
++    struct dma_buf *dmabuf;
++    unsigned int group;
++    unsigned int num_client;
++    uint64_t time;
++} __attribute__((__aligned__(256))) rtk_dmadev_handle_t;
++
++typedef struct _rtk_vdec_dmabuf_ref {
++	struct list_head dmabuf_list;
++    int fd;
++     struct dma_buf *dmabuf;
++     struct dma_buf_attachment *attach;
++     struct sg_table *sgt;
++} rtk_vdec_dmabuf_ref_t;
++
+ /* Use 'v' as magic number */
+ #define VDEC_IOC_MAGIC  'v'
+ #define VDEC_IOC_INIT       _IO  (VDEC_IOC_MAGIC, 1)
+@@ -276,6 +309,8 @@ typedef struct VDEC_RBINFO_STRUCT {
+ #define VDEC_IOC_GET_RBINFO  _IOWR(VDEC_IOC_MAGIC,23, int)
+ #define VDEC_IOC_RTN_RBINFO  _IOW (VDEC_IOC_MAGIC,24, int)
+ #define VDEC_IOC_ALLOCSVPMP  _IOWR(VDEC_IOC_MAGIC,25, VDEC_SVPMEM_STRUCT *)
++#define VDEC_IOC_DMA_OPEN    _IOWR(VDEC_IOC_MAGIC,26, rtk_dma_request_t)
++#define VDEC_IOC_DMA_CLOSE   _IOWR(VDEC_IOC_MAGIC,27, rtk_dma_request_t)
+ 
+ void rtkvdec_vtm_state(void) ;
+ void rtkvdec_send_sharedmemory(void) ;
+diff --git a/include/rtk_kdriver/rtkaudio.h b/include/rtk_kdriver/rtkaudio.h
+index 511635a..606d4af 100644
+--- a/include/rtk_kdriver/rtkaudio.h
++++ b/include/rtk_kdriver/rtkaudio.h
+@@ -125,6 +125,29 @@ typedef struct
+ 	int data;   	/* value for data write */
+ } AUDIO_REGISTER_ACCESS_T;
+ 
++typedef struct _rtk_dma_request_t {
++	  unsigned long phyaddr;
++	  unsigned int attach;
++	  size_t size;
++	  int fd;
++} rtk_dma_request_t;
++
++typedef struct _rtk_dma_priv_t {
++  unsigned long va;
++  unsigned long pa;
++  size_t size;
++} rtk_dma_priv_t;
++
++typedef struct _rtk_dmadev_handle_t {
++    void *dma_addr;
++    ulong phyaddr;
++    int fd;
++    struct dma_buf *dmabuf;
++    unsigned int group;
++    unsigned int num_client;
++    uint64_t time;
++} __attribute__((__aligned__(256))) rtk_dmadev_handle_t;
++
+ #define ENUM_KERNEL_RPC_AUDIO_CONFIG 0x204
+ 
+ /* defined in kernel/printk.c */
+@@ -169,6 +192,8 @@ extern int console_printk[4];
+ #define RTKAUDIO_IOC_AUDIO_CONFIG           _IOWR(RTKAUDIO_IOC_MAGIC, 13, int)
+ #define RTKAUDIO_IOC_READ_REG               _IOR(RTKAUDIO_IOC_MAGIC, 14, int)
+ #define RTKAUDIO_IOC_WRITE_REG              _IOW(RTKAUDIO_IOC_MAGIC, 15, int)
++#define RTKAUDIO_IOC_DMA_OPEN               _IOWR(RTKAUDIO_IOC_MAGIC, 16, rtk_dma_request_t)
++#define RTKAUDIO_IOC_DMA_CLOSE              _IOWR(RTKAUDIO_IOC_MAGIC, 17, rtk_dma_request_t)
+ 
+ #endif
+ 
+diff --git a/vdec/rtk_vdec_driver.c b/vdec/rtk_vdec_driver.c
+index d04602d..55cf3cf 100755
+--- a/vdec/rtk_vdec_driver.c
++++ b/vdec/rtk_vdec_driver.c
+@@ -45,6 +45,7 @@
+ #endif
+ #include <linux/freezer.h>
+ #include <rtk_dc_mt.h>
++#include <linux/dma-buf.h>
+ 
+ #ifdef CONFIG_RTK_KDRV_DEMUX
+ #include <demux/rtkdemux_export.h>
+@@ -88,11 +89,17 @@ extern unsigned int snapshot_enable;
+ 
+ static BLOCKING_NOTIFIER_HEAD(rtkvdec_chain_head);
+ 
++static bool is_release_dma_buf = true;
++static struct dma_buf *dmabuf;
++static struct dma_buf_attachment *attachment;
+ static struct device *rtkvdec_device;
+ static struct class *rtkvdec_class = NULL;
+ static struct cdev rtkvdec_cdev;
+ static struct platform_device *rtkvdec_platform_devs = NULL;
+-
++rtk_vdec_dmabuf_ref_t* vdec_ref;
++#if 0
++static struct list_head rtk_dma_list_head;
++#endif
+ static const struct dev_pm_ops rtkvdec_pm_ops = {
+ #ifdef CONFIG_HIBERNATION
+ 	.freeze 	= rtkvdec_suspend,
+@@ -2527,6 +2534,11 @@ long rtkvdec_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
+ {
+ 	int ret = 0;
+ 
++	//rtk_dma_priv_t *dma_priv;
++	rtk_dmadev_handle_t *clock;
++#if 0
++	rtk_vdec_dmabuf_ref_t* dma_ref;
++#endif
+ 	pr_debug("rtkvdec: receive ioctl(cmd:0x%08x, arg:0x%08x)\n", cmd, (unsigned int)arg);
+ 	switch (cmd) {
+ 		case VDEC_IOC_INIT:
+@@ -2655,7 +2667,65 @@ long rtkvdec_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
+ 			}
+ 			break;
+ 		}
++		case VDEC_IOC_DMA_OPEN:
++		{
++			rtk_dma_request_t req;
++			if (copy_from_user(&req, (void __user *)arg, sizeof(req))) {
++				return -EFAULT;
++			}
++			if (req.fd >= 0) {
++				pr_err("[vdma:%d] fd:%d \n", __LINE__, req.fd);
++				dmabuf = dma_buf_get(req.fd);
++				pr_info ("[vdma:%d] ref:%d\n", __LINE__, atomic_read(&dmabuf->file->f_count));
++				if (IS_ERR(dmabuf)) {
++					pr_err ("[vdma:%d] buf get err\n", __LINE__);
++					break;
++				} else {
++					is_release_dma_buf = false;
++					pr_err ("[vdma:%d] buf get success \n", __LINE__);
++				}
++				pr_err("[vdma:%d] dmabuf->size:%d \n", __LINE__, dmabuf->size);
++				if (req.attach) {
++					attachment = dma_buf_attach(dmabuf, rtkvdec_device);
++					pr_info ("[vdma:%d] attach ref:%d\n", __LINE__, atomic_read(&dmabuf->file->f_count));
++					if (IS_ERR_OR_NULL(attachment)) {
++						pr_err("[vdma:%d] error \n", __LINE__);
++						break;
++					}
++				} else {
++					pr_err("[vdma:%d] not attach\n", __LINE__);
++				}
++				clock = dmabuf->priv;
++				pr_err("[vdma:%d] va:%p pa:0x%lx \n", __LINE__, clock->dma_addr, clock->phyaddr);
++			} else {
++				pr_err("[vdma:%d] fd error \n", __LINE__);
++			}
++			break;
++		}
++		case VDEC_IOC_DMA_CLOSE:
++		{
++			rtk_dma_request_t req;
++			if (copy_from_user(&req, (void __user *)arg, sizeof(req))) {
++				return -EFAULT;
++			}
+ 
++			if (req.fd >= 0) {
++				pr_err("[vdma:%d] fd:%d \n", __LINE__, req.fd);
++				if (IS_ERR(dmabuf)) {
++					pr_err ("[vdma:%d] buf get err\n", __LINE__);
++					break;
++				}
++				pr_err ("[vdma:%d] dmabuf detach ref:%d\n", __LINE__, atomic_read(&dmabuf->file->f_count));
++				dma_buf_detach (dmabuf, attachment);
++				pr_info ("[vdma:%d] dmabuf ref:%d\n", __LINE__, atomic_read(&dmabuf->file->f_count));
++				dma_buf_put(dmabuf);
++				is_release_dma_buf = true;
++				pr_err ("[vdma:%d] dmabuf put ref:%d\n", __LINE__, atomic_read(&dmabuf->file->f_count));
++			} else {
++				pr_err("[vdma:%d] fd error \n", __LINE__);
++			}
++			break;
++		}
+ 		case VDEC_IOC_CLOSE:
+ 		{
+ 			/* pr_debug("rtkvdec: close\n"); */
+@@ -3730,6 +3800,11 @@ int rtkvdec_open(struct inode *inode, struct file *filp)
+ 
+ int rtkvdec_release(struct inode *inode, struct file *filp)
+ {
++	pr_err("[vdma:%d] release\n", __LINE__);
++	if (!is_release_dma_buf && dmabuf) {
++		pr_err("[vdma:%d] release -> dma_buf_put \n", __LINE__);
++		dma_buf_put(dmabuf);
++	}
+ 	if (filp->private_data) {
+ 		VDEC_FRAMEINFO_LIST *frame_info_list = filp->private_data;
+ 		struct list_head *del_list;
+@@ -4334,6 +4409,9 @@ static int rtkvdec_init(void)
+ 	rtkvdec_VBM_memory_init();
+ 	rtkvdec_InbandBuf_init();
+ 
++	/* create rtk_vdec_dmabuf_ref */
++	vdec_ref = (rtk_vdec_dmabuf_ref_t*) kzalloc(sizeof(rtk_vdec_dmabuf_ref_t), GFP_KERNEL);
++
+ #ifdef CONFIG_LG_SNAPSHOT_BOOT
+ 	if(snapshot_enable == 0)
+ 		wake_up_process(rtkvdec_vcreate_tsk);
+@@ -4395,6 +4473,9 @@ static void rtkvdec_exit(void)
+ 	if ((rtkvdec_platform_devs == NULL) || (rtkvdec_class == NULL))
+ 		BUG();
+ 
++	if (vdec_ref) {
++	  kfree(vdec_ref);
++	}
+ 	device_destroy(rtkvdec_class, dev);
+ 	cdev_del(&rtkvdec_cdev);
+ 

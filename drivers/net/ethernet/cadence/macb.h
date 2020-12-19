@@ -249,6 +249,8 @@
 #define GEM_RXBS_SIZE		8
 #define GEM_DDRP_OFFSET		24 /* disc_when_no_ahb */
 #define GEM_DDRP_SIZE		1
+#define GEM_BDBRW_OFFSET	27
+#define GEM_BDBRW_SIZE		1
 
 
 /* Bitfields in NSR */
@@ -398,7 +400,7 @@
 /* Capability mask bits */
 #define MACB_CAPS_ISR_CLEAR_ON_WRITE		0x00000001
 #define MACB_CAPS_USRIO_HAS_CLKEN		0x00000002
-#define MACB_CAPS_USRIO_DEFAULT_IS_MII		0x00000004
+#define MACB_CAPS_USRIO_DEFAULT_IS_MII_GMII	0x00000004
 #define MACB_CAPS_NO_GIGABIT_HALF		0x00000008
 #define MACB_CAPS_FIFO_MODE			0x10000000
 #define MACB_CAPS_GIGABIT_MODE_AVAILABLE	0x20000000
@@ -754,6 +756,7 @@ struct macb_or_gem_ops {
 	void	(*mog_free_rx_buffers)(struct macb *bp);
 	void	(*mog_init_rings)(struct macb *bp);
 	int	(*mog_rx)(struct macb *bp, int budget);
+	u32	(*mog_read_isr)(struct macb *bp);
 };
 
 struct macb_config {

@@ -21,6 +21,8 @@
 #include <linux/gfp.h>
 #include <linux/highmem.h>
 #include <linux/slab.h>
+#include <linux/ekp.h>
+#include <linux/romempool.h>
 
 #include <asm/pgalloc.h>
 #include <asm/page.h>
@@ -32,16 +34,27 @@ static struct kmem_cache *pgd_cache;
 
 pgd_t *pgd_alloc(struct mm_struct *mm)
 {
-	if (PGD_SIZE == PAGE_SIZE)
-		return (pgd_t *)__get_free_page(PGALLOC_GFP);
+	pgd_t *pgd;
+
+	if (PGD_SIZE == PAGE_SIZE) {
+		pgd = (pgd_t *)romempool_alloc(PGALLOC_GFP, RMP_PGD, 0);
+		if (!pgd)
+			pgd = (pgd_t *)__get_free_page(PGALLOC_GFP);
+
+		return pgd;
+	}
 	else
 		return kmem_cache_alloc(pgd_cache, PGALLOC_GFP);
 }
 
 void pgd_free(struct mm_struct *mm, pgd_t *pgd)
 {
-	if (PGD_SIZE == PAGE_SIZE)
-		free_page((unsigned long)pgd);
+	if (PGD_SIZE == PAGE_SIZE) {
+		if (is_romempool_addr((unsigned long)pgd))
+			romempool_free((unsigned long)pgd, RMP_PGD, 0);
+		else
+			free_page((unsigned long)pgd);
+	}
 	else
 		kmem_cache_free(pgd_cache, pgd);
 }

@@ -40,6 +40,7 @@
 struct pl061_context_save_regs {
 	u8 gpio_data;
 	u8 gpio_dir;
+	u8 gpio_skip_resume;
 	u8 gpio_is;
 	u8 gpio_ibe;
 	u8 gpio_iev;
@@ -57,6 +58,13 @@ struct pl061_gpio {
 	struct pl061_context_save_regs csave_regs;
 #endif
 };
+
+static int pl061_get_direction(struct gpio_chip *gc, unsigned offset)
+{
+	struct pl061_gpio *chip = container_of(gc, struct pl061_gpio, gc);
+
+	return !(readb(chip->base + GPIODIR) & BIT(offset));
+}
 
 static int pl061_direction_input(struct gpio_chip *gc, unsigned offset)
 {
@@ -221,6 +229,32 @@ static void pl061_irq_handler(struct irq_desc *desc)
 							    offset));
 	}
 
+	if (IS_ENABLED(CONFIG_ARCH_LG1K)) {
+		struct gpio_chip *list;
+		int irq;
+
+		/*
+		 * When there is a gpio_chip sharing same irq_parent with gc,
+		 * handle its IRQs here too. This is a kind of workaround to
+		 * handle IRQs from multiple gpio_chips implementing irq_chips
+		 * sharing an IRQ. The current irq_desc structure can't hold
+		 * multiple irq_chips.
+		 */
+		list_for_each_entry(list, &gc->list, list) {
+			if (list->irqchip != gc->irqchip)
+				continue;
+			if (list->irq_parent != gc->irq_parent)
+				continue;
+
+			chip = container_of(list, struct pl061_gpio, gc);
+			pending = readb(chip->base + GPIOMIS);
+			for_each_set_bit(offset, &pending, PL061_GPIO_NR) {
+				irq = irq_find_mapping(list->irqdomain, offset);
+				generic_handle_irq(irq);
+			}
+		}
+	}
+
 	chained_irq_exit(irqchip, desc);
 }
 
@@ -300,6 +334,8 @@ static int pl061_probe(struct amba_device *adev, const struct amba_id *id)
 		irq_base = 0;
 	}
 
+	of_property_read_s32(dev->of_node, "gpio-base", (s32 *)&chip->gc.base);
+
 	chip->base = devm_ioremap_resource(dev, &adev->res);
 	if (IS_ERR(chip->base))
 		return PTR_ERR(chip->base);
@@ -310,6 +346,7 @@ static int pl061_probe(struct amba_device *adev, const struct amba_id *id)
 		chip->gc.free = gpiochip_generic_free;
 	}
 
+	chip->gc.get_direction = pl061_get_direction;
 	chip->gc.direction_input = pl061_direction_input;
 	chip->gc.direction_output = pl061_direction_output;
 	chip->gc.get = pl061_get_value;
@@ -328,6 +365,12 @@ static int pl061_probe(struct amba_device *adev, const struct amba_id *id)
 	 */
 	writeb(0, chip->base + GPIOIE); /* disable irqs */
 	irq = adev->irq[0];
+
+	/* assume 'irq==0' is no irqchip support */
+	if (irq == 0) {
+		dev_info(&adev->dev, "no irqchip support\n");
+		goto out;
+	}
 	if (irq < 0) {
 		dev_err(&adev->dev, "invalid IRQ\n");
 		return -ENODEV;
@@ -343,6 +386,13 @@ static int pl061_probe(struct amba_device *adev, const struct amba_id *id)
 	gpiochip_set_chained_irqchip(&chip->gc, &pl061_irqchip,
 				     irq, pl061_irq_handler);
 
+#ifdef CONFIG_PM
+	chip->csave_regs.gpio_skip_resume = 0;
+
+	of_property_read_u8(dev->of_node, "skip-resume",
+			    (u8 *)&chip->csave_regs.gpio_skip_resume);
+#endif
+
 	for (i = 0; i < PL061_GPIO_NR; i++) {
 		if (pdata) {
 			if (pdata->directions & (BIT(i)))
@@ -353,6 +403,7 @@ static int pl061_probe(struct amba_device *adev, const struct amba_id *id)
 		}
 	}
 
+out:
 	amba_set_drvdata(adev, chip);
 	dev_info(&adev->dev, "PL061 GPIO chip @%pa registered\n",
 		 &adev->res.start);
@@ -388,6 +439,8 @@ static int pl061_resume(struct device *dev)
 	int offset;
 
 	for (offset = 0; offset < PL061_GPIO_NR; offset++) {
+		if (chip->csave_regs.gpio_skip_resume & (BIT(offset)))
+			continue;
 		if (chip->csave_regs.gpio_dir & (BIT(offset)))
 			pl061_direction_output(&chip->gc, offset,
 					chip->csave_regs.gpio_data &
@@ -405,10 +458,10 @@ static int pl061_resume(struct device *dev)
 }
 
 static const struct dev_pm_ops pl061_dev_pm_ops = {
-	.suspend = pl061_suspend,
-	.resume = pl061_resume,
-	.freeze = pl061_suspend,
-	.restore = pl061_resume,
+	.suspend_late = pl061_suspend,
+	.resume_early = pl061_resume,
+	.freeze_late = pl061_suspend,
+	.restore_early = pl061_resume,
 };
 #endif
 

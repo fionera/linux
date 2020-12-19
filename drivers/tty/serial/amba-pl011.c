@@ -2400,12 +2400,17 @@ static int pl011_remove(struct amba_device *dev)
 }
 
 #ifdef CONFIG_PM_SLEEP
+extern bool console_suspend_lately_disabled;
+
 static int pl011_suspend(struct device *dev)
 {
 	struct uart_amba_port *uap = dev_get_drvdata(dev);
 
 	if (!uap)
 		return -EINVAL;
+
+	if (!console_suspend_lately_disabled)
+		return 0;
 
 	return uart_suspend_port(&amba_reg, &uap->port);
 }
@@ -2417,11 +2422,43 @@ static int pl011_resume(struct device *dev)
 	if (!uap)
 		return -EINVAL;
 
+	if (!console_suspend_lately_disabled)
+		return 0;
+
+	return uart_resume_port(&amba_reg, &uap->port);
+}
+
+static int pl011_suspend_lately(struct device *dev)
+{
+	struct uart_amba_port *uap = dev_get_drvdata(dev);
+
+	if (!uap)
+		return -EINVAL;
+
+	if (console_suspend_lately_disabled)
+		return 0;
+
+	return uart_suspend_port(&amba_reg, &uap->port);
+}
+
+static int pl011_resume_early(struct device *dev)
+{
+	struct uart_amba_port *uap = dev_get_drvdata(dev);
+
+	if (!uap)
+		return -EINVAL;
+
+	if (console_suspend_lately_disabled)
+		return 0;
+
 	return uart_resume_port(&amba_reg, &uap->port);
 }
 #endif
 
-static SIMPLE_DEV_PM_OPS(pl011_dev_pm_ops, pl011_suspend, pl011_resume);
+static const struct dev_pm_ops pl011_dev_pm_ops = {
+	SET_SYSTEM_SLEEP_PM_OPS(pl011_suspend, pl011_resume)
+	SET_LATE_SYSTEM_SLEEP_PM_OPS(pl011_suspend_lately, pl011_resume_early)
+};
 
 static int sbsa_uart_probe(struct platform_device *pdev)
 {

@@ -1,0 +1,12 @@
+# drivers/Kconfig
+
+comment"Smart Card Interface"
+	depends on SMARTCARD
+
+config SMARTCARD_IFD
+	tristate "Smart Card Interface"
+	depends on SMARTCARD && (ARCH_RTK299S || ARCH_RTKS2B || ARCH_RTK299O || ARCH_RTK293x || ARCH_RTK289X)
+	default n
+	help
+	  If you want to use smart card on board, say Y.
+

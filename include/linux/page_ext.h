@@ -3,6 +3,8 @@
 
 #include <linux/types.h>
 #include <linux/stacktrace.h>
+#include <linux/sched.h>
+#include <linux/stackdepot.h>
 
 struct pglist_data;
 struct page_ext_operations {
@@ -25,12 +27,21 @@ struct page_ext_operations {
 enum page_ext_flags {
 	PAGE_EXT_DEBUG_POISON,		/* Page is poisoned */
 	PAGE_EXT_DEBUG_GUARD,
-	PAGE_EXT_OWNER,
+	PAGE_EXT_OWNER_ALLOC,
+	PAGE_EXT_OWNER_FREE,
 #if defined(CONFIG_IDLE_PAGE_TRACKING) && !defined(CONFIG_64BIT)
 	PAGE_EXT_YOUNG,
 	PAGE_EXT_IDLE,
 #endif
 };
+
+#ifdef CONFIG_PAGE_OWNER
+enum page_owner_handles {
+	PAGE_OWNER_HANDLE_ALLOC,
+	PAGE_OWNER_HANDLE_FREE,
+	PAGE_OWNER_HANDLE_MAX
+};
+#endif
 
 /*
  * Page Extension can be considered as an extended mem_map.
@@ -42,10 +53,17 @@ enum page_ext_flags {
 struct page_ext {
 	unsigned long flags;
 #ifdef CONFIG_PAGE_OWNER
+	#ifdef CONFIG_CMA_TRACK_USE_PAGE_OWNER
+	unsigned int count;
+	#else
 	unsigned int order;
+	#endif
 	gfp_t gfp_mask;
+	pid_t pid;			/* pid of the current task */
+	char comm[TASK_COMM_LEN];	/* executable name */
 	unsigned int nr_entries;
 	unsigned long trace_entries[8];
+	depot_stack_handle_t handles[PAGE_OWNER_HANDLE_MAX];
 #endif
 };
 
@@ -58,8 +76,10 @@ static inline void page_ext_init_flatmem(void)
 extern void page_ext_init(void);
 #else
 extern void page_ext_init_flatmem(void);
+extern void __init invoke_init_callbacks(void);
 static inline void page_ext_init(void)
 {
+	invoke_init_callbacks();
 }
 #endif
 

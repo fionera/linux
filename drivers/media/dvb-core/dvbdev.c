@@ -47,7 +47,7 @@ static DEFINE_MUTEX(dvbdev_register_lock);
 
 static const char * const dnames[] = {
 	"video", "audio", "sec", "frontend", "demux", "dvr", "ca",
-	"net", "osd"
+	"net", "osd", "acas"
 };
 
 #ifdef CONFIG_DVB_DYNAMIC_MINORS
@@ -162,6 +162,24 @@ long dvb_generic_ioctl(struct file *file,
 	return dvb_usercopy(file, cmd, arg, dvbdev->kernel_ioctl);
 }
 EXPORT_SYMBOL(dvb_generic_ioctl);
+
+
+#ifdef CONFIG_COMPAT
+long dvb_generic_compat_ioctl(struct file *file,
+		       unsigned int cmd, unsigned long arg)
+{
+	struct dvb_device *dvbdev = file->private_data;
+
+	if (!dvbdev)
+		return -ENODEV;
+
+	if (!dvbdev->kernel_compat_ioctl)
+		return -EINVAL;
+
+	return dvb_usercopy(file, cmd, arg, dvbdev->kernel_compat_ioctl);
+}
+EXPORT_SYMBOL(dvb_generic_compat_ioctl);
+#endif
 
 
 static int dvbdev_get_free_id (struct dvb_adapter *adap, int type)
@@ -508,6 +526,24 @@ int dvb_unregister_adapter(struct dvb_adapter *adap)
 	return 0;
 }
 EXPORT_SYMBOL(dvb_unregister_adapter);
+
+struct dvb_adapter *dvb_find_adapter(int num)
+{
+	struct dvb_adapter *adap;
+	struct list_head *entry;
+
+	mutex_lock(&dvbdev_register_lock);
+	list_for_each(entry, &dvb_adapter_list) {
+		adap = list_entry(entry, struct dvb_adapter, list_head);
+		if (adap->num == num) {
+			mutex_unlock(&dvbdev_register_lock);
+			return adap;
+		}
+	}
+	mutex_unlock(&dvbdev_register_lock);
+	return NULL;
+}
+EXPORT_SYMBOL(dvb_find_adapter);
 
 /* if the miracle happens and "generic_usercopy()" is included into
    the kernel, then this can vanish. please don't make the mistake and

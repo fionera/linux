@@ -40,7 +40,7 @@
 #include "ion.h"
 #include "ion_priv.h"
 #include "compat_ion.h"
-
+#include <linux/module.h>
 /**
  * struct ion_device - the metadata of the ion device node
  * @dev:		the actual misc device
@@ -251,8 +251,10 @@ static struct ion_buffer *ion_buffer_create(struct ion_heap *heap,
 	 * memory coming from the heaps is ready for dma, ie if it has a
 	 * cached mapping that mapping has been invalidated
 	 */
-	for_each_sg(buffer->sg_table->sgl, sg, buffer->sg_table->nents, i)
+	for_each_sg(buffer->sg_table->sgl, sg, buffer->sg_table->nents, i) {
 		sg_dma_address(sg) = sg_phys(sg);
+		sg_dma_len(sg) = sg->length;
+	}
 	mutex_lock(&dev->buffer_lock);
 	ion_buffer_add(dev, buffer);
 	mutex_unlock(&dev->buffer_lock);
@@ -385,13 +387,22 @@ static void ion_handle_get(struct ion_handle *handle)
 	kref_get(&handle->ref);
 }
 
-static int ion_handle_put(struct ion_handle *handle)
+static int ion_handle_put_nolock(struct ion_handle *handle)
+{
+	int ret;
+
+	ret = kref_put(&handle->ref, ion_handle_destroy);
+
+	return ret;
+}
+
+int ion_handle_put(struct ion_handle *handle)
 {
 	struct ion_client *client = handle->client;
 	int ret;
 
 	mutex_lock(&client->lock);
-	ret = kref_put(&handle->ref, ion_handle_destroy);
+	ret = ion_handle_put_nolock(handle);
 	mutex_unlock(&client->lock);
 
 	return ret;
@@ -415,18 +426,28 @@ static struct ion_handle *ion_handle_lookup(struct ion_client *client,
 	return ERR_PTR(-EINVAL);
 }
 
-static struct ion_handle *ion_handle_get_by_id(struct ion_client *client,
+static struct ion_handle *ion_handle_get_by_id_nolock(struct ion_client *client,
+						int id)
+{
+	struct ion_handle *handle;
+
+	handle = idr_find(&client->idr, id);
+	if (handle)
+		ion_handle_get(handle);
+
+	return handle ? handle : ERR_PTR(-EINVAL);
+}
+
+struct ion_handle *ion_handle_get_by_id(struct ion_client *client,
 						int id)
 {
 	struct ion_handle *handle;
 
 	mutex_lock(&client->lock);
-	handle = idr_find(&client->idr, id);
-	if (handle)
-		ion_handle_get(handle);
+	handle = ion_handle_get_by_id_nolock(client, id);
 	mutex_unlock(&client->lock);
 
-	return handle ? handle : ERR_PTR(-EINVAL);
+	return handle;
 }
 
 static bool ion_handle_validate(struct ion_client *client,
@@ -530,22 +551,28 @@ struct ion_handle *ion_alloc(struct ion_client *client, size_t len,
 }
 EXPORT_SYMBOL(ion_alloc);
 
-void ion_free(struct ion_client *client, struct ion_handle *handle)
+static void ion_free_nolock(struct ion_client *client, struct ion_handle *handle)
 {
 	bool valid_handle;
 
 	BUG_ON(client != handle->client);
 
-	mutex_lock(&client->lock);
 	valid_handle = ion_handle_validate(client, handle);
 
 	if (!valid_handle) {
 		WARN(1, "%s: invalid handle passed to free.\n", __func__);
-		mutex_unlock(&client->lock);
 		return;
 	}
+	ion_handle_put_nolock(handle);
+}
+
+void ion_free(struct ion_client *client, struct ion_handle *handle)
+{
+	BUG_ON(client != handle->client);
+
+	mutex_lock(&client->lock);
+	ion_free_nolock(client, handle);
 	mutex_unlock(&client->lock);
-	ion_handle_put(handle);
 }
 EXPORT_SYMBOL(ion_free);
 
@@ -1229,7 +1256,7 @@ static unsigned int ion_ioctl_dir(unsigned int cmd)
 	switch (cmd) {
 	case ION_IOC_SYNC:
 	case ION_IOC_FREE:
-	case ION_IOC_CUSTOM:
+	//case ION_IOC_CUSTOM://RTKmodify: ION_IOC_CUSTOM is read & write!!
 		return _IOC_WRITE;
 	default:
 		return _IOC_DIR(cmd);
@@ -1281,11 +1308,15 @@ static long ion_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 	{
 		struct ion_handle *handle;
 
-		handle = ion_handle_get_by_id(client, data.handle.handle);
-		if (IS_ERR(handle))
+		mutex_lock(&client->lock);
+		handle = ion_handle_get_by_id_nolock(client, data.handle.handle);
+		if (IS_ERR(handle)) {
+			mutex_unlock(&client->lock);
 			return PTR_ERR(handle);
-		ion_free(client, handle);
-		ion_handle_put(handle);
+		}
+		ion_free_nolock(client, handle);
+		ion_handle_put_nolock(handle);
+		mutex_unlock(&client->lock);
 		break;
 	}
 	case ION_IOC_SHARE:
@@ -1322,11 +1353,30 @@ static long ion_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 	{
 		if (!dev->custom_ioctl)
 			return -ENOTTY;
-		ret = dev->custom_ioctl(client, data.custom.cmd,
-						data.custom.arg);
+
+        if( data.custom.cmd == 1) {
+            //RTKmodify: force data.custom.arg point to start of '&data' to pass back value to user level
+
+            struct RT_ION_QUERY_PHY_data to_callee;
+            to_callee.handle_id = data.custom.arg;
+
+            data.custom.arg = (unsigned long)&to_callee;
+            ret = dev->custom_ioctl(client, data.custom.cmd,
+                            data.custom.arg );
+            if(ret ==0) {
+                data.custom.arg = to_callee.phy_addr;
+            }
+
+        }
+        else {
+            //org code.
+        ret = dev->custom_ioctl(client, data.custom.cmd,
+                        data.custom.arg);
+        }
 		break;
 	}
 	default:
+        printk(KERN_ERR " ion invalid cmd:0x%x\n", cmd);
 		return -ENOTTY;
 	}
 

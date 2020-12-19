@@ -58,6 +58,12 @@ struct old_serial_port {
 	unsigned char __iomem *iomem_base;
 	unsigned short iomem_reg_shift;
 	unsigned long irqflags;
+#ifdef CONFIG_REALTEK_UART_DMA	
+	unsigned char *dma_iomem_base;
+	unsigned int dma_ring_buf_len;
+	unsigned int dma_tx_thd;
+	unsigned int dma_tx_empty_thd;
+#endif	
 };
 
 struct serial8250_config {
@@ -97,10 +103,20 @@ static inline int serial_in(struct uart_8250_port *up, int offset)
 	return up->port.serial_in(&up->port, offset);
 }
 
-static inline void serial_out(struct uart_8250_port *up, int offset, int value)
-{
+#if defined(CONFIG_REALTEK_RTICE) || defined(CONFIG_RTK_KDRV_RTICE)
+#define _serial_out(up, offset, value)  \
+        (up->port.serial_out(&(up)->port, (offset), (value)))
+static void serial_out(struct uart_8250_port *up, int offset, int value) {
+    if (up->disable_printk && offset==UART_TX)
+        return;
+    _serial_out(up, offset, value);
+}
+#else
+static inline void serial_out(struct uart_8250_port *up, int offset, int value) {
 	up->port.serial_out(&up->port, offset, value);
 }
+#endif
+
 
 void serial8250_clear_and_reinit_fifos(struct uart_8250_port *p);
 
@@ -195,6 +211,17 @@ static inline int serial8250_request_dma(struct uart_8250_port *p)
 static inline void serial8250_release_dma(struct uart_8250_port *p) { }
 #endif
 
+#ifdef CONFIG_REALTEK_UART_DMA
+extern int rtk_serial8250_request_dma(struct uart_8250_port *);
+extern void rtk_serial8250_release_dma(struct uart_8250_port *);
+extern void rtk_serial8250_tx_dma(struct uart_8250_port *);
+extern void rtk_serial8250_dma_wait_for_xmitr(struct uart_8250_port *up);
+extern void rtk_serial8250_dma_flush_buffer(struct uart_8250_port *up);
+extern void rtk_serial8250_dma_console_write(struct uart_port *port,
+					const unsigned char *buf, int count);
+#endif
+
+
 static inline int ns16550a_goto_highspeed(struct uart_8250_port *up)
 {
 	unsigned char status;
@@ -216,6 +243,8 @@ static inline int serial_index(struct uart_port *port)
 {
 	return port->minor - 64;
 }
+
+void wait_for_xmitr(struct uart_8250_port *up, int bits);
 
 #if 0
 #define DEBUG_INTR(fmt...)	printk(fmt)

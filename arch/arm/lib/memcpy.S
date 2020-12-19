@@ -62,9 +62,14 @@
 /* Prototype: void *memcpy(void *dest, const void *src, size_t n); */
 
 ENTRY(mmiocpy)
+.weak __memcpy
 ENTRY(memcpy)
+ENTRY(__memcpy)
+ENTRY(____memcpy)
 
 #include "copy_template.S"
 
 ENDPROC(memcpy)
 ENDPROC(mmiocpy)
+ENDPROC(__memcpy)
+ENDPROC(____memcpy)

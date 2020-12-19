@@ -103,3 +103,22 @@ config USB_ULPI_BUS
 
 	  To compile this driver as a module, choose M here: the module will
 	  be called ulpi.
+
+config USB_USER_RESUME
+	bool "Enable USB user resume"
+	default y
+	help
+	  Say N here if you don't want USB relative devices be resumed
+	  by user. If you say Y, usb relative devices (hcd and root hub(s))
+	  will be placed in userresume list and wait for user to start their
+	  resume procedure.
+	  "cat /sys/power/pm_userresume" to see user resume list.
+	  "echo 1 /sys/power/pm_userresume" to invoke resume procedure
+	  of devices in userresume list.
+
+config DISABLE_LTM_SUPPORT
+	bool "Disable USB LTM support "
+	depends on USB_SUPPORT
+	default y
+	help
+		Say Y to force disable LTM support, even though device may have this capability.

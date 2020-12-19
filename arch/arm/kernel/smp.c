@@ -51,6 +51,7 @@
 #define CREATE_TRACE_POINTS
 #include <trace/events/ipi.h>
 
+#include <rbus/mc_secure_reg.h>
 /*
  * as from 2.5, kernels no longer have an init_tasks structure
  * so we need some other way of telling a new secondary core
@@ -73,7 +74,8 @@ enum ipi_msg_type {
 	IPI_CPU_STOP,
 	IPI_IRQ_WORK,
 	IPI_COMPLETION,
-	IPI_CPU_BACKTRACE = 15,
+	IPI_CPU_BACKTRACE, 
+	IPI_RTK_TIMER,
 };
 
 static DECLARE_COMPLETION(cpu_running);
@@ -258,6 +260,8 @@ void __cpu_die(unsigned int cpu)
 	 */
 	if (!platform_cpu_kill(cpu))
 		pr_err("CPU%u: unable to kill\n", cpu);
+
+	pr_notice("CPU%u: cpu_kill done\n", cpu);
 }
 
 /*
@@ -348,6 +352,7 @@ static void smp_store_cpu_info(unsigned int cpuid)
  * This is the secondary CPU boot entry.  We're using this CPUs
  * idle thread stack, but a set of temporary page tables.
  */
+
 asmlinkage void secondary_start_kernel(void)
 {
 	struct mm_struct *mm = &init_mm;
@@ -387,6 +392,7 @@ asmlinkage void secondary_start_kernel(void)
 	notify_cpu_starting(cpu);
 
 	calibrate_delay();
+
 
 	smp_store_cpu_info(cpu);
 
@@ -469,6 +475,8 @@ void __init set_smp_cross_call(void (*fn)(const struct cpumask *, unsigned int))
 		__smp_cross_call = fn;
 }
 
+
+
 static const char *ipi_types[NR_IPI] __tracepoint_string = {
 #define S(x,s)	[x] = s
 	S(IPI_WAKEUP, "CPU wakeup interrupts"),
@@ -479,6 +487,9 @@ static const char *ipi_types[NR_IPI] __tracepoint_string = {
 	S(IPI_CPU_STOP, "CPU stop interrupts"),
 	S(IPI_IRQ_WORK, "IRQ work interrupts"),
 	S(IPI_COMPLETION, "completion interrupts"),
+	S(IPI_CPU_BACKTRACE, "backtrace ipi interrupts"),
+	S(IPI_RTK_TIMER, "rtk timer interrupts"),
+
 };
 
 static void smp_cross_call(const struct cpumask *target, unsigned int ipinr)
@@ -557,6 +568,9 @@ static void ipi_cpu_stop(unsigned int cpu)
 		dump_stack();
 		raw_spin_unlock(&stop_lock);
 	}
+	//dummy(MC_secure_dummy_test_1) to record the erro info of mem_prison
+	if(rtd_inl(MC_SECURE_MC_secure_dummy_test_1_reg)!=0)
+		panic("MEM_PRISON info=0x%08x\n", rtd_inl(MC_SECURE_MC_secure_dummy_test_1_reg));
 
 	set_cpu_online(cpu, false);
 
@@ -588,10 +602,14 @@ asmlinkage void __exception_irq_entry do_IPI(int ipinr, struct pt_regs *regs)
 	handle_IPI(ipinr, regs);
 }
 
+extern void rtk_timer_handler(int cpu);
 void handle_IPI(int ipinr, struct pt_regs *regs)
 {
 	unsigned int cpu = smp_processor_id();
 	struct pt_regs *old_regs = set_irq_regs(regs);
+#ifdef CONFIG_REALTEK_SCHED_LOG
+	extern spinlock_t sched_log_lock;
+#endif
 
 	if ((unsigned)ipinr < NR_IPI) {
 		trace_ipi_entry_rcuidle(ipi_types[ipinr]);
@@ -600,35 +618,118 @@ void handle_IPI(int ipinr, struct pt_regs *regs)
 
 	switch (ipinr) {
 	case IPI_WAKEUP:
+	#ifdef CONFIG_REALTEK_SCHED_LOG
+		if (sched_log_flag & 0x1) {
+			spin_lock(&sched_log_lock);
+			log_intr_enter(cpu, ipinr);
+			spin_unlock(&sched_log_lock);
+		}
+		if (sched_log_flag & 0x1) {
+			spin_lock(&sched_log_lock);
+			log_intr_exit(cpu, ipinr);
+			spin_unlock(&sched_log_lock);
+		}
+	#endif // CONFIG_REALTEK_SCHED_LOG
+
 		break;
 
 #ifdef CONFIG_GENERIC_CLOCKEVENTS_BROADCAST
 	case IPI_TIMER:
 		irq_enter();
+	#ifdef CONFIG_REALTEK_SCHED_LOG
+		if (sched_log_flag & 0x1) {
+			spin_lock(&sched_log_lock);
+			log_intr_enter(cpu, ipinr);
+			spin_unlock(&sched_log_lock);
+		}
+	#endif // CONFIG_REALTEK_SCHED_LOG
 		tick_receive_broadcast();
+	#ifdef CONFIG_REALTEK_SCHED_LOG
+		if (sched_log_flag & 0x1) {
+			spin_lock(&sched_log_lock);
+			log_intr_exit(cpu, ipinr);
+			spin_unlock(&sched_log_lock);
+		}
+	#endif // CONFIG_REALTEK_SCHED_LOG
 		irq_exit();
 		break;
 #endif
 
 	case IPI_RESCHEDULE:
+	#ifdef CONFIG_REALTEK_SCHED_LOG
+		if (sched_log_flag & 0x1) {
+			spin_lock(&sched_log_lock);
+			log_intr_enter(cpu, ipinr);
+			spin_unlock(&sched_log_lock);
+		}
+	#endif // CONFIG_REALTEK_SCHED_LOG
 		scheduler_ipi();
+	#ifdef CONFIG_REALTEK_SCHED_LOG
+		if (sched_log_flag & 0x1) {
+			spin_lock(&sched_log_lock);
+			log_intr_exit(cpu, ipinr);
+			spin_unlock(&sched_log_lock);
+		}
+	#endif // CONFIG_REALTEK_SCHED_LOG
 		break;
 
 	case IPI_CALL_FUNC:
 		irq_enter();
+	#ifdef CONFIG_REALTEK_SCHED_LOG
+		if (sched_log_flag & 0x1) {
+			spin_lock(&sched_log_lock);
+			log_intr_enter(cpu, ipinr);
+			spin_unlock(&sched_log_lock);
+		}
+	#endif // CONFIG_REALTEK_SCHED_LOG
 		generic_smp_call_function_interrupt();
+	#ifdef CONFIG_REALTEK_SCHED_LOG
+		if (sched_log_flag & 0x1) {
+			spin_lock(&sched_log_lock);
+			log_intr_exit(cpu, ipinr);
+			spin_unlock(&sched_log_lock);
+		}
+	#endif // CONFIG_REALTEK_SCHED_LOG
 		irq_exit();
 		break;
 
 	case IPI_CALL_FUNC_SINGLE:
 		irq_enter();
+	#ifdef CONFIG_REALTEK_SCHED_LOG
+		if (sched_log_flag & 0x1) {
+			spin_lock(&sched_log_lock);
+			log_intr_enter(cpu, ipinr);
+			spin_unlock(&sched_log_lock);
+		}
+	#endif // CONFIG_REALTEK_SCHED_LOG
 		generic_smp_call_function_single_interrupt();
+	#ifdef CONFIG_REALTEK_SCHED_LOG
+		if (sched_log_flag & 0x1) {
+			spin_lock(&sched_log_lock);
+			log_intr_exit(cpu, ipinr);
+			spin_unlock(&sched_log_lock);
+		}
+	#endif // CONFIG_REALTEK_SCHED_LOG
 		irq_exit();
 		break;
 
 	case IPI_CPU_STOP:
 		irq_enter();
+	#ifdef CONFIG_REALTEK_SCHED_LOG
+		if (sched_log_flag & 0x1) {
+			spin_lock(&sched_log_lock);
+			log_intr_enter(cpu, ipinr);
+			spin_unlock(&sched_log_lock);
+		}
+	#endif // CONFIG_REALTEK_SCHED_LOG
 		ipi_cpu_stop(cpu);
+	#ifdef CONFIG_REALTEK_SCHED_LOG
+		if (sched_log_flag & 0x1) {
+			spin_lock(&sched_log_lock);
+			log_intr_exit(cpu, ipinr);
+			spin_unlock(&sched_log_lock);
+		}
+	#endif // CONFIG_REALTEK_SCHED_LOG
 		irq_exit();
 		break;
 
@@ -651,6 +752,12 @@ void handle_IPI(int ipinr, struct pt_regs *regs)
 		nmi_cpu_backtrace(regs);
 		irq_exit();
 		break;
+	case IPI_RTK_TIMER:
+//		pr_debug("handle rtk timer ipi \n");
+		irq_enter();
+		rtk_timer_handler(cpu);
+		irq_exit();
+		break;
 
 	default:
 		pr_crit("CPU%u: Unknown IPI message 0x%x\n",
@@ -667,6 +774,14 @@ void smp_send_reschedule(int cpu)
 {
 	smp_cross_call(cpumask_of(cpu), IPI_RESCHEDULE);
 }
+
+#if 1 //def CONFIG_BRINGUP_RTD288O_HACK
+void smp_send_rtk_timer(int cpu)
+{
+	pr_debug("rtk_timer %d %d\n",cpu,smp_processor_id());
+	smp_cross_call(cpumask_of(cpu), IPI_RTK_TIMER);
+}
+#endif
 
 void smp_send_stop(void)
 {

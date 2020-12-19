@@ -34,7 +34,7 @@
 #ifdef CONFIG_SND_DYNAMIC_MINORS
 #define SNDRV_CARDS CONFIG_SND_MAX_CARDS
 #else
-#define SNDRV_CARDS 8		/* don't change - minor numbers */
+#define SNDRV_CARDS 13		/* don't change - minor numbers */
 #endif
 
 #define CONFIG_SND_MAJOR	116	/* standard configuration */

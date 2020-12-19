@@ -170,6 +170,7 @@ long compat_ion_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 		struct compat_ion_custom_data __user *data32;
 		struct ion_custom_data __user *data;
 		int err;
+		int rt_custome_cmd = 0;
 
 		data32 = compat_ptr(arg);
 		data = compat_alloc_user_space(sizeof(*data));
@@ -180,8 +181,28 @@ long compat_ion_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 		if (err)
 			return err;
 
-		return filp->f_op->unlocked_ioctl(filp, ION_IOC_CUSTOM,
+		if( data->cmd == 1) {
+			rt_custome_cmd = 1;
+		}
+		ret = filp->f_op->unlocked_ioctl(filp, ION_IOC_CUSTOM,
 							(unsigned long)data);
+
+		if( rt_custome_cmd )
+		{
+			if( ret == 0 ) {
+				compat_ulong_t vv;
+				err = 0;
+				err = get_user(vv, &data->arg);
+				err |= put_user(vv, &data32->arg);
+				if( err) {
+					ret = -EFAULT;
+				}
+			}
+			else {
+				err = put_user(0, &data32->arg);
+			}
+		}
+		return ret;
 	}
 	case ION_IOC_SHARE:
 	case ION_IOC_MAP:

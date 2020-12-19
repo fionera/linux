@@ -31,7 +31,6 @@
 #include <linux/screen_info.h>
 #include <linux/init.h>
 #include <linux/kexec.h>
-#include <linux/crash_dump.h>
 #include <linux/root_dev.h>
 #include <linux/cpu.h>
 #include <linux/interrupt.h>
@@ -44,6 +43,7 @@
 #include <linux/of_platform.h>
 #include <linux/efi.h>
 #include <linux/psci.h>
+#include <linux/ekp.h>
 
 #include <asm/acpi.h>
 #include <asm/fixmap.h>
@@ -62,6 +62,8 @@
 #include <asm/memblock.h>
 #include <asm/efi.h>
 #include <asm/xen/hypervisor.h>
+
+extern const char *machine_name;
 
 phys_addr_t __fdt_pointer __initdata;
 
@@ -85,6 +87,15 @@ static struct resource mem_res[] = {
 
 #define kernel_code mem_res[0]
 #define kernel_data mem_res[1]
+
+#ifdef CONFIG_BUILD_ARM_APPENDED_DTB_IMAGE_EXT
+#ifdef CONFIG_ARM_ATAG_DTB_COMPAT_EXT
+#define __atags_pointer __fdt_pointer
+extern int atags_to_fdt(void *atag_list, void *fdt, int total_space);
+#endif
+#endif
+
+
 
 /*
  * The recorded values of x0 .. x3 upon kernel entry.
@@ -174,7 +185,6 @@ static void __init smp_build_mpidr_hash(void)
 	 */
 	if (mpidr_hash_size() > 4 * num_possible_cpus())
 		pr_warn("Large number of MPIDR hash buckets detected\n");
-	__flush_dcache_area(&mpidr_hash, sizeof(struct mpidr_hash));
 }
 
 static void __init setup_machine_fdt(phys_addr_t dt_phys)
@@ -192,6 +202,7 @@ static void __init setup_machine_fdt(phys_addr_t dt_phys)
 			cpu_relax();
 	}
 
+	machine_name = of_flat_dt_get_machine_name();
 	dump_stack_set_arch_desc("%s (DT)", of_flat_dt_get_machine_name());
 }
 
@@ -220,6 +231,12 @@ static void __init request_standard_resources(void)
 		if (kernel_data.start >= res->start &&
 		    kernel_data.end <= res->end)
 			request_resource(res, &kernel_data);
+#ifdef CONFIG_KEXEC_CORE
+		/* Userspace will find "Crash kernel" region in /proc/iomem. */
+		if (crashk_res.end && crashk_res.start >= res->start &&
+		    crashk_res.end <= res->end)
+			request_resource(res, &crashk_res);
+#endif
 	}
 }
 
@@ -288,6 +305,15 @@ static inline void __init relocate_initrd(void)
 
 u64 __cpu_logical_map[NR_CPUS] = { [0 ... NR_CPUS-1] = INVALID_HWID };
 
+
+extern void __init rtk_init_late(void);
+extern void __init rtk_init_early(void);
+#ifdef CONFIG_REALTEK_LOGBUF
+__attribute__((weak)) void rtdlog_parse_bufsize(char * str)
+{
+        return;
+}
+#endif
 void __init setup_arch(char **cmdline_p)
 {
 	pr_info("Boot CPU: AArch64 Processor [%08x]\n", read_cpuid_id());
@@ -303,10 +329,25 @@ void __init setup_arch(char **cmdline_p)
 	early_fixmap_init();
 	early_ioremap_init();
 
+#ifdef CONFIG_BUILD_ARM_APPENDED_DTB_IMAGE_EXT
+
+	if ((long)(&__dtb_end) - (long)(&__dtb_start)) 
+	{
+		#ifdef CONFIG_ARM_ATAG_DTB_COMPAT_EXT
+		atags_to_fdt(phys_to_virt(__atags_pointer), &__dtb_start, 0x4000);
+		#endif
+	
+		memcpy((void *)phys_to_virt(__fdt_pointer), (void *)&__dtb_start, (long)(&__dtb_end) - (long)(&__dtb_start));
+	}
+	
+#endif
+
 	setup_machine_fdt(__fdt_pointer);
 
 	parse_early_param();
-
+#ifdef CONFIG_REALTEK_LOGBUF
+	rtdlog_parse_bufsize(boot_command_line);
+#endif
 	/*
 	 *  Unmask asynchronous aborts after bringing up possible earlycon.
 	 * (Report possible System Errors once we can report this occurred)
@@ -315,6 +356,9 @@ void __init setup_arch(char **cmdline_p)
 
 	efi_init();
 	arm64_memblock_init();
+
+	/* Initializing EKP should be done after reserving memblock memory */
+	ekp_init();
 
 	/* Parse the ACPI tables for possible boot-time configuration */
 	acpi_boot_table_init();
@@ -353,10 +397,13 @@ void __init setup_arch(char **cmdline_p)
 			"This indicates a broken bootloader or old kernel\n",
 			boot_args[1], boot_args[2], boot_args[3]);
 	}
+	rtk_init_early();
+
 }
 
 static int __init arm64_device_init(void)
 {
+#ifndef CONFIG_ARCH_LG1K
 	if (of_have_populated_dt()) {
 		of_iommu_init();
 		of_platform_populate(NULL, of_default_bus_match_table,
@@ -364,6 +411,7 @@ static int __init arm64_device_init(void)
 	} else if (acpi_disabled) {
 		pr_crit("Device tree not populated\n");
 	}
+#endif
 	return 0;
 }
 arch_initcall_sync(arm64_device_init);
@@ -381,3 +429,11 @@ static int __init topology_init(void)
 	return 0;
 }
 subsys_initcall(topology_init);
+
+
+static int __init init_machine_late(void)
+{
+	rtk_init_late();
+	return 0;
+}
+late_initcall(init_machine_late);

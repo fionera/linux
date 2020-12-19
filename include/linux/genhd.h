@@ -139,6 +139,7 @@ struct hd_struct {
 #define GENHD_FL_NATIVE_CAPACITY		128
 #define GENHD_FL_BLOCK_EVENTS_ON_EXCL_WRITE	256
 #define GENHD_FL_NO_PART_SCAN			512
+#define GENHD_FL_FILTERED			1024
 
 enum {
 	DISK_EVENT_MEDIA_CHANGE			= 1 << 0, /* media changed */
@@ -213,6 +214,9 @@ struct gendisk {
 	struct kobject integrity_kobj;
 #endif	/* CONFIG_BLK_DEV_INTEGRITY */
 	int node_id;
+
+	int sense_debounce;               /* counter for debounce media changed sense (RTK added) */
+#define DEBOUNCE_TIMES_MEDIA_CHANGED_SENSE  3
 };
 
 static inline struct gendisk *part_to_disk(struct hd_struct *part)
@@ -742,11 +746,9 @@ static inline void part_nr_sects_write(struct hd_struct *part, sector_t size)
 #if defined(CONFIG_BLK_DEV_INTEGRITY)
 extern void blk_integrity_add(struct gendisk *);
 extern void blk_integrity_del(struct gendisk *);
-extern void blk_integrity_revalidate(struct gendisk *);
 #else	/* CONFIG_BLK_DEV_INTEGRITY */
 static inline void blk_integrity_add(struct gendisk *disk) { }
 static inline void blk_integrity_del(struct gendisk *disk) { }
-static inline void blk_integrity_revalidate(struct gendisk *disk) { }
 #endif	/* CONFIG_BLK_DEV_INTEGRITY */
 
 #else /* CONFIG_BLOCK */
@@ -764,5 +766,11 @@ static inline int blk_part_pack_uuid(const u8 *uuid_str, u8 *to)
 	return -EINVAL;
 }
 #endif /* CONFIG_BLOCK */
+
+#if defined(CONFIG_BLOCK_DUMP_MSG)
+extern void set_filtered_disk(struct gendisk *disk);
+#else
+static inline void set_filtered_disk(struct gendisk *disk) { }
+#endif
 
 #endif /* _LINUX_GENHD_H */

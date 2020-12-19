@@ -729,6 +729,537 @@ static ssize_t remove_store(struct device *dev, struct device_attribute *attr,
 static DEVICE_ATTR_IGNORE_LOCKDEP(remove, S_IWUSR, NULL, remove_store);
 
 
+
+#ifdef CONFIG_USB_HCD_TEST_MODE
+#include <linux/usb/ch11.h>
+#include <linux/slab.h>
+#include <mach/system.h>
+#include <linux/usb/hcd.h>
+#define UsbTestModeNumber 6
+#define UsbSuspendResume 1
+#define UsbGetDescriptor 3
+
+
+int usb_test_mode_suspend_flag = 0;
+EXPORT_SYMBOL(usb_test_mode_suspend_flag);
+int gUsbHubSuspendResume[4] = {-1, -1, -1, -1}; /*  0:Resume, 1:Suspend */
+EXPORT_SYMBOL(gUsbHubSuspendResume);
+
+static int gUsbHubPortSuspendResume = 0; /*  0:Resume, 1:Suspend */
+static int gUsbHubPort = 1; /* default = 1 */
+static int gUsbHubTestMode = 0;
+
+int gUsbGetDescriptor = 0;
+/*  gUsbGetDescriptor = 1 for the command phase */
+/*  gUsbGetDescriptor = 2 for the data phase */
+/*  gUsbGetDescriptor = 3 for the status phase */
+
+/*  copy from hub.c and rename */
+/*
+ * USB 2.0 spec Section 11.24.2.2
+ */
+static int hub_clear_port_feature(struct usb_device *hdev, int port1, int feature)
+{
+	return usb_control_msg(hdev, usb_sndctrlpipe(hdev, 0),
+			USB_REQ_CLEAR_FEATURE, USB_RT_PORT, feature, port1,
+			NULL, 0, 1000);
+}
+
+
+/*
+ * USB 2.0 spec Section 11.24.2.13
+ */
+static int hub_set_port_feature(struct usb_device *hdev, int port1, int feature)
+{
+	return usb_control_msg(hdev, usb_sndctrlpipe(hdev, 0),
+			USB_REQ_SET_FEATURE, USB_RT_PORT, feature, port1,
+			NULL, 0, 1000);
+}
+
+
+static unsigned int volatile regs_addr = 0;
+static ssize_t show_regs_addr(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	return sprintf(buf, "%x\n", regs_addr);
+}
+static ssize_t
+store_regs_addr(struct device *dev, struct device_attribute *attr,
+		const char *buf, size_t count)
+{
+	int			config;
+
+	if (sscanf(buf, "%x", &config) != 1)
+		return -EINVAL;
+
+	regs_addr = config;
+	pr_debug("0x%x\n", regs_addr);
+	return count;
+}
+static DEVICE_ATTR(regs_addr, S_IRUGO | S_IWUSR, show_regs_addr, store_regs_addr);
+
+static ssize_t show_regs_value(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	if (regs_addr < 0xb8000000) {
+		return 0;
+        }else{
+		return sprintf(buf, "0x%x = %x\n", regs_addr, *(unsigned int volatile*)GET_MAPPED_RBUS_ADDR(regs_addr));
+        }
+}
+static ssize_t
+store_regs_value(struct device *dev, struct device_attribute *attr,
+		const char *buf, size_t count)
+{
+	int			config;
+
+	if (sscanf(buf, "%x", &config) != 1)
+		return -EINVAL;
+
+	*(unsigned int volatile*)GET_MAPPED_RBUS_ADDR(regs_addr) = config;
+	pr_debug("0x%x = 0x%x\n", regs_addr, *(unsigned int volatile*)GET_MAPPED_RBUS_ADDR(regs_addr));
+	return count;
+}
+static DEVICE_ATTR(regs_value, S_IRUGO | S_IWUSR, show_regs_value, store_regs_value);
+
+static ssize_t  show_bPortNumber (struct device *dev, struct device_attribute *attr, char *buf)
+{
+	struct usb_device *udev;
+	struct usb_host_config *actconfig;
+
+	udev = to_usb_device (dev);
+	actconfig = udev->actconfig;
+
+	if(udev->descriptor.bDeviceClass != USB_CLASS_HUB)
+		return sprintf (buf, "%d\n", -1);
+
+	return sprintf (buf, "%d\n", gUsbHubPort);
+
+	return 0;
+}
+
+static ssize_t
+set_bPortNumber (struct device *dev, struct device_attribute *attr, const char *buf, size_t count)
+{
+	struct usb_device	*udev = to_usb_device (dev);
+	int			config, value;
+
+	if ((value = sscanf (buf, "%u", &config)) != 1 || config > udev->maxchild)
+		return -EINVAL;
+
+	if(udev->descriptor.bDeviceClass != USB_CLASS_HUB)
+		return value;
+
+	if(gUsbHubPort != config)
+	{
+		gUsbHubPort = config;
+	}
+
+	return count;
+}
+
+static DEVICE_ATTR(bPortNumber, S_IRUGO | S_IWUSR, show_bPortNumber, set_bPortNumber);
+
+static ssize_t  show_bPortDescriptor (struct device *dev, struct device_attribute *attr, char *buf)
+{
+	struct usb_device *udev;
+	struct usb_host_config *actconfig;
+
+	udev = to_usb_device (dev);
+	actconfig = udev->actconfig;
+
+	return sprintf (buf, "%d\n", gUsbGetDescriptor);
+
+	return 0;
+}
+
+extern int get_hub_descriptor_port(struct usb_device *hdev, void *data, int size, int port1);
+
+static ssize_t
+set_bPortDescriptor (struct device *dev, struct device_attribute *attr, const char *buf, size_t count)
+{
+	struct usb_device	*udev = to_usb_device (dev);
+	int			config, value;
+	unsigned char		*data;
+	int			size, i, port;
+	int					  ret;
+
+	if ((value = sscanf (buf, "%u", &config)) != 1 || config > UsbGetDescriptor)
+		return -EINVAL;
+
+	if(udev->descriptor.bDeviceClass != USB_CLASS_HUB)
+		return sprintf ((char *)buf, "%d\n", -1);
+
+	gUsbGetDescriptor = config;
+	port = gUsbHubPort - 1;
+	size=0x12;
+	data = (unsigned char*)kmalloc(size, GFP_KERNEL);
+	if (!data)
+		return -ENOMEM;
+	memset (data, 0, size);
+	ret = get_hub_descriptor_port(udev, data, size, gUsbHubPort);
+
+	pr_debug(" get device descriptor\n");
+	for( i = 0; i < size; i++)
+	{
+		pr_debug(" %.2x", data[i]);
+		if((i % 15) == 0 && (i != 0))
+			pr_debug("\n<1>");
+	}
+	pr_debug("\n");
+
+	kfree(data);
+
+	return count;
+}
+
+static DEVICE_ATTR(bPortDescriptor, S_IRUGO | S_IWUSR,
+		show_bPortDescriptor, set_bPortDescriptor);
+
+/*
+ * USB 2.0 spec Section 11.24.2.7
+ */
+static int hub_get_port_status(struct usb_device *hdev, int port1, unsigned char *buf, int length)
+{
+	return usb_control_msg(hdev, usb_rcvctrlpipe(hdev, 0),
+			USB_REQ_GET_STATUS, USB_RT_PORT | USB_DIR_IN, 0, port1,
+			buf, length, 1000);
+}
+
+static int hub_check_port_suspend_resume(struct usb_device *hdev, int port1)
+{
+	unsigned char *data;
+	int length = 4;
+	int ret = -1;
+
+	data = kmalloc(length, GFP_KERNEL);
+	if(data == NULL)
+		return ret;
+	memset(data, 0, length);
+	hub_get_port_status(hdev, port1, data, length);
+	ret = (data[0] >> 2) & 0x1; /* bit 2 */
+	kfree(data);
+
+	return ret;
+}
+
+
+static ssize_t  show_bPortSuspendResume (struct device *dev, struct device_attribute *attr, char *buf)
+{
+	struct usb_device *udev;
+	struct usb_host_config *actconfig;
+
+	udev = to_usb_device (dev);
+	actconfig = udev->actconfig;
+
+	if(udev->descriptor.bDeviceClass != USB_CLASS_HUB)
+		return sprintf (buf, "%d\n", -1);
+
+	if(udev->parent == NULL) /*  root hub */
+	{
+		return sprintf (buf, "%d %d %d %d\n", gUsbHubSuspendResume[0], \
+				gUsbHubSuspendResume[1], gUsbHubSuspendResume[2], gUsbHubSuspendResume[3]);
+	}
+	else /*  not root hub */
+	{
+		gUsbHubPortSuspendResume = hub_check_port_suspend_resume(udev, gUsbHubPort);
+		return sprintf (buf, "%d\n", gUsbHubPortSuspendResume);
+	}
+
+	return 0;
+}
+
+
+static ssize_t
+set_bPortSuspendResume (struct device *dev, struct device_attribute *attr, const char *buf, size_t count)
+{
+	struct usb_device	*udev = to_usb_device (dev);
+	struct usb_hcd		*hcd = container_of(udev->bus, struct usb_hcd, self);
+	int			config, value;
+	unsigned int		port1;
+
+	if ((value = sscanf (buf, "%u", &config)) != 1 || config > UsbSuspendResume)
+		return -EINVAL;
+
+	if(udev->descriptor.bDeviceClass != USB_CLASS_HUB)
+		return value;
+
+	if(udev->parent == NULL) /*  root hub */
+	{
+		port1 = (unsigned int) gUsbHubPort;
+		if(gUsbHubSuspendResume[port1 - 1] != config)
+		{
+			gUsbHubSuspendResume[port1 - 1] = config;
+			pr_debug("Root Hub port %d - %s\n", port1, (gUsbHubSuspendResume[port1 - 1] == 1) ? "Suspend" : "Resume");
+			if(gUsbHubSuspendResume[port1 - 1] == 1) /* Suspend */
+			{
+				usb_test_mode_suspend_flag = 1;
+
+				pr_debug("call bus_suspend() to the root hub port %d...\n", gUsbHubPort);
+				usb_lock_device (hcd->self.root_hub);
+
+				if (hcd->driver->bus_suspend) {
+					hcd->driver->bus_suspend(hcd);
+				} else {
+					pr_err("#@# %s(%d) hcd->driver->bus_suspend(hcd) is NULL!!! Need CONFIG_PM=y\n", __func__, __LINE__);
+				}
+
+				usb_unlock_device (hcd->self.root_hub);
+				pr_debug("call bus_suspend() OK !!!\n");
+
+			}
+			else /* Resume */
+			{
+				usb_test_mode_suspend_flag = 0;
+
+				pr_debug("call bus_resume() to the root hub port %d...\n", gUsbHubPort);
+				usb_lock_device (hcd->self.root_hub);
+
+				if (hcd->driver->bus_resume) {
+					hcd->driver->bus_resume(hcd);
+				} else {
+					pr_debug("#@# %s(%d) hcd->driver->bus_resume(hcd) is NULL!!! Need CONFIG_PM=y\n", __func__, __LINE__);
+				}
+
+				usb_unlock_device (hcd->self.root_hub);
+				pr_debug("call bus_resume() OK !!!\n");
+
+			}
+			msleep(1000);
+		}
+	}
+	else /*  the hub which is not root hub */
+	{
+		gUsbHubPortSuspendResume = hub_check_port_suspend_resume(udev, gUsbHubPort);
+
+		if(gUsbHubPortSuspendResume != config)
+		{
+			gUsbHubPortSuspendResume = config;
+			if(gUsbHubPortSuspendResume == 1) /* Suspend */
+			{
+				pr_debug("set USB_PORT_FEAT_SUSPEND to the port %d of the hub ...\n", gUsbHubPort);
+				hub_set_port_feature(udev, gUsbHubPort, USB_PORT_FEAT_SUSPEND);
+				pr_debug("set OK !!!\n");
+			}
+			else /* Resume */
+			{
+				pr_debug("clear USB_PORT_FEAT_SUSPEND to the port %d of the hub ...\n", gUsbHubPort);
+				hub_clear_port_feature(udev, gUsbHubPort, USB_PORT_FEAT_SUSPEND);
+				pr_debug("clear OK !!!\n");
+			}
+			msleep(1000);
+		}
+	}
+
+	return count;
+}
+
+static DEVICE_ATTR(bPortSuspendResume, S_IRUGO | S_IWUSR,
+		show_bPortSuspendResume, set_bPortSuspendResume);
+
+
+static ssize_t  show_bPortSuspendResume_ctrl (struct device *dev, struct device_attribute *attr, char *buf)
+{
+	struct usb_device *udev;
+	struct usb_host_config *actconfig;
+
+	udev = to_usb_device (dev);
+	actconfig = udev->actconfig;
+
+	if(udev->descriptor.bDeviceClass != USB_CLASS_HUB)
+		return sprintf (buf, "%d\n", -1);
+
+	if(udev->parent == NULL) /*  root hub */
+	{
+		return sprintf (buf, "%d %d %d %d\n", gUsbHubSuspendResume[0], \
+				gUsbHubSuspendResume[1], gUsbHubSuspendResume[2], gUsbHubSuspendResume[3]);
+	}
+	else /*  not root hub */
+	{
+		gUsbHubPortSuspendResume = hub_check_port_suspend_resume(udev, gUsbHubPort);
+		return sprintf (buf, "%d\n", gUsbHubPortSuspendResume);
+	}
+
+	return 0;
+}
+
+static ssize_t
+set_bPortSuspendResume_ctrl (struct device *dev, struct device_attribute *attr, const char *buf, size_t count)
+{
+	struct usb_device	*udev = to_usb_device (dev);
+	int			config, value;
+	unsigned int		port1;
+
+	if ((value = sscanf (buf, "%u", &config)) != 1 || config > UsbSuspendResume)
+		return -EINVAL;
+
+	if(udev->descriptor.bDeviceClass != USB_CLASS_HUB)
+		return value;
+
+	if(udev->parent == NULL) /*  root hub */
+	{
+		port1 = (unsigned int) gUsbHubPort;
+		/* if(gUsbHubSuspendResume[port1 - 1] != config) */
+		{
+			gUsbHubSuspendResume[port1 - 1] = config;
+			pr_debug("Root Hub port %d - %s\n", port1, (gUsbHubSuspendResume[port1 - 1] == 1) ? "Suspend" : "Resume");
+			if(gUsbHubSuspendResume[port1 - 1] == 1) /* Suspend */
+			{
+				usb_test_mode_suspend_flag = 1;
+
+				pr_debug("call bus_suspend() to the root hub port %d...\n", gUsbHubPort);
+				hub_set_port_feature(udev, gUsbHubPort, USB_PORT_FEAT_SUSPEND);
+				pr_debug("call bus_suspend() OK !!!\n");
+
+			}
+			else /* Resume */
+			{
+				usb_test_mode_suspend_flag = 0;
+
+				pr_debug("call bus_resume() to the root hub port %d...\n", gUsbHubPort);
+				hub_clear_port_feature(udev, gUsbHubPort, USB_PORT_FEAT_SUSPEND);
+				pr_debug("call bus_resume() OK !!!\n");
+
+			}
+			msleep(1000);
+		}
+	}
+	else /*  the hub which is not root hub */
+	{
+		gUsbHubPortSuspendResume = hub_check_port_suspend_resume(udev, gUsbHubPort);
+
+		/* if(gUsbHubPortSuspendResume != config) */
+		{
+			gUsbHubPortSuspendResume = config;
+			if(gUsbHubPortSuspendResume == 1) /* Suspend */
+			{
+				pr_debug("set USB_PORT_FEAT_SUSPEND to the port %d of the hub ...\n", gUsbHubPort);
+				hub_set_port_feature(udev, gUsbHubPort, USB_PORT_FEAT_SUSPEND);
+				pr_debug("set OK !!!\n");
+			}
+			else /* Resume */
+			{
+				pr_debug("clear USB_PORT_FEAT_SUSPEND to the port %d of the hub ...\n", gUsbHubPort);
+				hub_clear_port_feature(udev, gUsbHubPort, USB_PORT_FEAT_SUSPEND);
+				pr_debug("clear OK !!!\n");
+			}
+			msleep(1000);
+		}
+	}
+
+	return count;
+}
+
+static DEVICE_ATTR(bPortSuspendResume_ctrl, S_IRUGO | S_IWUSR,
+		show_bPortSuspendResume_ctrl, set_bPortSuspendResume_ctrl);
+
+
+static ssize_t  show_bPortTestMode (struct device *dev, struct device_attribute *attr, char *buf)
+{
+	struct usb_device *udev;
+	struct usb_host_config *actconfig;
+
+	udev = to_usb_device (dev);
+	actconfig = udev->actconfig;
+
+	if(udev->descriptor.bDeviceClass != USB_CLASS_HUB)
+		return sprintf (buf, "%d\n", -1);
+
+	return sprintf (buf, "%d\n", gUsbHubTestMode);
+
+	return 0;
+}
+
+static ssize_t
+set_bPortTestMode (struct device *dev, struct device_attribute *attr, const char *buf, size_t count)
+{
+	struct usb_device *udev = to_usb_device(dev);
+	struct usb_hcd *hcd;
+	int value, mode;
+
+	if ((value = sscanf(buf, "%d", &mode)) != 1)
+		return -EINVAL;
+
+	if(udev->descriptor.bDeviceClass != USB_CLASS_HUB) {
+		pr_err("device is not hub \n");
+		return value;
+	}
+
+	hcd = container_of(udev->bus, struct usb_hcd, self);
+
+	if (hcd->port_test_mode) {
+		pr_info("port_test_mode, port=%d mode=%d \n", gUsbHubPort, mode);
+		if (!hcd->port_test_mode(udev, gUsbHubPort, mode)) {
+			pr_err("port_test_mode success \n");
+		}
+	}
+
+	return count;
+}
+
+
+static DEVICE_ATTR(bPortTestMode, S_IRUGO | S_IWUSR,
+		show_bPortTestMode, set_bPortTestMode);
+
+#endif /* CONFIG_USB_HCD_TEST_MODE */
+
+/* From core/driver.c */
+extern void usb_unbind_and_rebind_marked_interfaces(struct usb_device *udev);
+static ssize_t set_bRebindStorage(struct device *dev, struct device_attribute *attr, const char *buf, size_t count)
+{
+	struct usb_device *udev = to_usb_device(dev);
+	int value = 0, n = 0;
+	int intfnum = 0;
+	struct usb_host_config *actconfig;
+	struct usb_host_interface *alt;
+
+	if ((n = sscanf(buf, "%u", &value)) != 1)
+		return -EINVAL;
+
+	actconfig = udev->actconfig;
+
+	for (intfnum = 0; intfnum < actconfig->desc.bNumInterfaces; intfnum++) {
+		alt = actconfig->interface[intfnum]->cur_altsetting;
+		if (alt->desc.bInterfaceClass == USB_CLASS_MASS_STORAGE) {
+			pr_debug("[USB] %s(%d) dev(%s) has storage interface(cfgno=%d,intfno=%d) \n",
+					__func__, __LINE__,
+					dev_name(&udev->dev),
+					actconfig->desc.bConfigurationValue, alt->desc.bInterfaceNumber);
+			actconfig->interface[intfnum]->needs_binding = 1;
+			usb_unbind_and_rebind_marked_interfaces(udev);
+		}
+	}
+	pr_debug("rebind OK !!!\n");
+
+	return count;
+}
+
+static DEVICE_ATTR(bRebindStorage, S_IWUSR,
+		NULL, set_bRebindStorage);
+
+
+
+extern int get_usb_storage_mount_path_one(char *buf, size_t size);
+static ssize_t show_storage_mounted_path(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	char *path_buf;
+	size_t size = 512;
+	int ret = 0;
+
+	path_buf = kzalloc(size, GFP_KERNEL);
+	if (!path_buf)
+		return -ENOMEM;
+
+
+	ret = get_usb_storage_mount_path_one(path_buf, size);
+	if (!ret)
+		ret = snprintf(buf, size, "%s\n", path_buf);
+	kfree(path_buf);
+
+	return ret;
+}
+static DEVICE_ATTR(storage_mounted_path, S_IRUGO, show_storage_mounted_path, NULL);
+
 static struct attribute *dev_attrs[] = {
 	/* current configuration's attributes */
 	&dev_attr_configuration.attr,
@@ -758,6 +1289,17 @@ static struct attribute *dev_attrs[] = {
 	&dev_attr_remove.attr,
 	&dev_attr_removable.attr,
 	&dev_attr_ltm_capable.attr,
+	&dev_attr_bRebindStorage.attr,
+#ifdef CONFIG_USB_HCD_TEST_MODE
+	&dev_attr_regs_addr.attr,
+	&dev_attr_regs_value.attr,
+	&dev_attr_bPortNumber.attr,
+	&dev_attr_bPortDescriptor.attr,
+	&dev_attr_bPortSuspendResume.attr,
+	&dev_attr_bPortSuspendResume_ctrl.attr,
+	&dev_attr_bPortTestMode.attr,
+#endif /* CONFIG_USB_HCD_TEST_MODE */
+	&dev_attr_storage_mounted_path.attr,
 	NULL,
 };
 static struct attribute_group dev_attr_grp = {

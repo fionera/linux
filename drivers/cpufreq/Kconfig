@@ -2,7 +2,7 @@ menu "CPU Frequency scaling"
 
 config CPU_FREQ
 	bool "CPU Frequency scaling"
-	select SRCU
+	select REALTEK_CPUFREQ
 	help
 	  CPU Frequency scaling allows you to change the clock speed of 
 	  CPUs on the fly. This is a nice method to save power, because 
@@ -78,6 +78,16 @@ config CPU_FREQ_DEFAULT_GOV_USERSPACE
 	  you to set the CPU frequency manually or when a userspace 
 	  program shall be able to set the CPU dynamically without having
 	  to enable the userspace governor manually.
+
+config CPU_FREQ_DEFAULT_GOV_INTERACTIVE
+    bool "interactive"
+    select CPU_FREQ_GOV_INTERACTIVE
+    help
+      Use the CPUFreq governor 'interactive' as default. This allows
+      you to get a full dynamic cpu frequency capable system by simply
+	  loading your cpufreq low-level hardware driver, using the
+	  'interactive' governor for latency-sensitive workloads.
+
 
 config CPU_FREQ_DEFAULT_GOV_ONDEMAND
 	bool "ondemand"
@@ -158,6 +168,22 @@ config CPU_FREQ_GOV_ONDEMAND
 	  For details, take a look at linux/Documentation/cpu-freq.
 
 	  If in doubt, say N.
+
+config CPU_FREQ_GOV_INTERACTIVE
+    tristate "'interactive' cpufreq policy governor"
+	depends on CPU_FREQ
+    help
+    'interactive' - This driver adds a dynamic cpufreq policy governor
+    designed for latency-sensitive workloads.
+    This governor attempts to reduce the latency of clock
+    increases so that the system is more responsive to
+    interactive workloads.
+    To compile this driver as a module, choose M here: the
+    module will be called cpufreq_interactive.      
+	For details, take a look at linux/Documentation/cpu-freq.
+
+	If in doubt, say N.
+
 
 config CPU_FREQ_GOV_CONSERVATIVE
 	tristate "'conservative' cpufreq governor"

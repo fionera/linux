@@ -15,7 +15,9 @@
 #include <sys/types.h>
 #include <linux/types.h>
 #endif
-
+#ifdef CONFIG_RTK_KDRV_IR
+#include "input-event-custom-codes.h"
+#endif
 #include "input-event-codes.h"
 
 /*
@@ -246,6 +248,8 @@ struct input_mask {
 #define BUS_GSC			0x1A
 #define BUS_ATARI		0x1B
 #define BUS_SPI			0x1C
+
+#define BUS_CEC			0x1E
 
 /*
  * MT_TOOL types

@@ -1261,6 +1261,9 @@ int nfs_updatepage(struct file *file, struct page *page,
 	dprintk("NFS:       nfs_updatepage(%pD2 %d@%lld)\n",
 		file, count, (long long)(page_file_offset(page) + offset));
 
+	if (!count)
+		goto out;
+
 	if (nfs_can_extend_write(file, page, inode)) {
 		count = max(count + offset, nfs_page_length(page));
 		offset = 0;
@@ -1271,7 +1274,7 @@ int nfs_updatepage(struct file *file, struct page *page,
 		nfs_set_pageerror(page);
 	else
 		__set_page_dirty_nobuffers(page);
-
+out:
 	dprintk("NFS:       nfs_updatepage returns %d (isize %lld)\n",
 			status, (long long)i_size_read(inode));
 	return status;
@@ -1957,8 +1960,38 @@ int nfs_migrate_page(struct address_space *mapping, struct page *newpage,
 	 *        that we can safely release the inode reference while holding
 	 *        the page lock.
 	 */
-	if (PagePrivate(page))
+	if (PagePrivate(page)) {
+		if (PageDirty(page)) {
+			struct writeback_control wbc = {
+				.sync_mode = WB_SYNC_NONE,
+				.nr_to_write = 1,
+				.range_start = 0,
+				.range_end = LLONG_MAX,
+				.for_reclaim = 1
+			};
+			int rc;
+
+			if (mode != MIGRATE_SYNC)
+				return -EBUSY;
+
+			if (!mapping->a_ops->writepage)
+				/* No write method for the address space */
+				return -EINVAL;
+
+			if (!clear_page_dirty_for_io(page))
+				/* Someone else already triggered a write */
+				return -EAGAIN;
+
+			rc = mapping->a_ops->writepage(page, &wbc);
+
+			if (rc != AOP_WRITEPAGE_ACTIVATE)
+				/* unlocked. Relock */
+				lock_page(page);
+
+			return (rc < 0) ? -EIO : -EAGAIN;
+		}
 		return -EBUSY;
+	}
 
 	if (!nfs_fscache_release_page(page, GFP_KERNEL))
 		return -EBUSY;

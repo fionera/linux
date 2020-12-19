@@ -1,0 +1,9 @@
+menu "LGTV driver procfs support"
+
+config LGTV_DRIVER_PROCFS_SUPPORT
+	bool "Enable LGTV Driver Procfs Support"
+	default n
+	help
+		"export driver debug information to /proc/lgtv-driver"
+		
+endmenu

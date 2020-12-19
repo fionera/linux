@@ -77,6 +77,9 @@ static inline void fat_dir_readahead(struct inode *dir, sector_t iblock,
    AV. Additionally, when we return -1 (i.e. reached the end of directory)
    AV. we make bh NULL.
  */
+#ifdef CONFIG_FAT_LOW_FREQUENCY_FOR_ERR_MSG
+static unsigned int count_dir_read_err = 0;
+#endif
 static int fat__get_entry(struct inode *dir, loff_t *pos,
 			  struct buffer_head **bh, struct msdos_dir_entry **de)
 {
@@ -99,8 +102,17 @@ next:
 
 	*bh = sb_bread(sb, phys);
 	if (*bh == NULL) {
+#ifdef CONFIG_FAT_LOW_FREQUENCY_FOR_ERR_MSG
+		count_dir_read_err++;
+		if (count_dir_read_err > 300)
+			count_dir_read_err = 0;
+		if (count_dir_read_err < 5)
+			fat_msg_ratelimit(sb, KERN_ERR,
+				"Directory bread(block %llu) failed", (llu)phys);
+#else
 		fat_msg_ratelimit(sb, KERN_ERR,
 			"Directory bread(block %llu) failed", (llu)phys);
+#endif
 		/* skip this block */
 		*pos = (iblock + 1) << sb->s_blocksize_bits;
 		goto next;
@@ -110,6 +122,9 @@ next:
 	*pos += sizeof(struct msdos_dir_entry);
 	*de = (struct msdos_dir_entry *)((*bh)->b_data + offset);
 
+#ifdef CONFIG_FAT_LOW_FREQUENCY_FOR_ERR_MSG
+	count_dir_read_err = 0;
+#endif
 	return 0;
 }
 

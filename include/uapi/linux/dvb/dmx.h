@@ -51,7 +51,6 @@ typedef enum dmx_input
 	DMX_IN_DVR       /* Input from the logical DVR device.  */
 } dmx_input_t;
 
-
 typedef enum dmx_ts_pes
 {
 	DMX_PES_AUDIO0,
@@ -78,7 +77,8 @@ typedef enum dmx_ts_pes
 	DMX_PES_SUBTITLE3,
 	DMX_PES_PCR3,
 
-	DMX_PES_OTHER
+	DMX_PES_OTHER,
+
 } dmx_pes_type_t;
 
 #define DMX_PES_AUDIO    DMX_PES_AUDIO0
@@ -151,5 +151,6 @@ struct dmx_stc {
 #define DMX_GET_STC              _IOWR('o', 50, struct dmx_stc)
 #define DMX_ADD_PID              _IOW('o', 51, __u16)
 #define DMX_REMOVE_PID           _IOW('o', 52, __u16)
+
 
 #endif /* _UAPI_DVBDMX_H_ */

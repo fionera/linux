@@ -255,6 +255,19 @@ static struct sysrq_key_op sysrq_showallcpus_op = {
 };
 #endif
 
+// RTK_patch: add dump stack api
+#ifdef CONFIG_SMP
+void dump_stacks (void)
+{
+    sysrq_handle_showallcpus(0);
+}
+#else
+void dump_stacks (void)
+{
+    dump_stack();
+}
+#endif
+
 static void sysrq_handle_showregs(int key)
 {
 	struct pt_regs *regs = get_irq_regs();
@@ -530,7 +543,11 @@ void __handle_sysrq(int key, bool check_mask)
 	 * routing in the consumers of /proc/kmsg.
 	 */
 	orig_log_level = console_loglevel;
-	console_loglevel = CONSOLE_LOGLEVEL_DEFAULT;
+	/*
+	 * Do not change the loglevel for 'u' option.
+	 */
+	if (key != 'u')
+		console_loglevel = CONSOLE_LOGLEVEL_DEFAULT;
 	pr_info("SysRq : ");
 
         op_p = __sysrq_get_key_op(key);
@@ -939,8 +956,8 @@ static const struct input_device_id sysrq_ids[] = {
 	{
 		.flags = INPUT_DEVICE_ID_MATCH_EVBIT |
 				INPUT_DEVICE_ID_MATCH_KEYBIT,
-		.evbit = { BIT_MASK(EV_KEY) },
-		.keybit = { BIT_MASK(KEY_LEFTALT) },
+		.evbit = { [BIT_WORD(EV_KEY)] = BIT_MASK(EV_KEY) },
+		.keybit = { [BIT_WORD(KEY_LEFTALT)] = BIT_MASK(KEY_LEFTALT) },
 	},
 	{ },
 };

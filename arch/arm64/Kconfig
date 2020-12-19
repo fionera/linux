@@ -84,7 +84,6 @@ config ARM64
 	select NO_BOOTMEM
 	select OF
 	select OF_EARLY_FLATTREE
-	select OF_RESERVED_MEM
 	select PERF_USE_VMALLOC
 	select POWER_RESET
 	select POWER_SUPPLY
@@ -92,6 +91,7 @@ config ARM64
 	select SPARSE_IRQ
 	select SYSCTL_EXCEPTION_TRACE
 	select HAVE_CONTEXT_TRACKING
+	select HAVE_ARM_SMCCC
 	help
 	  ARM 64-bit (AArch64) Linux support.
 
@@ -184,6 +184,25 @@ source "init/Kconfig"
 source "kernel/Kconfig.freezer"
 
 source "arch/arm64/Kconfig.platforms"
+source "arch/arm64/mach-rtd287o/Kconfig"
+
+menu "Customer"
+choice
+        prompt "Customer Build"
+        default CUSTOMER_TV001
+
+config CUSTOMER_TV001
+        bool "tv001"
+        help
+          build for tv001.
+
+config CUSTOMER_TV006
+        bool "tv006"
+        help
+          build for tv006.
+
+endchoice
+endmenu
 
 menu "Bus support"
 
@@ -391,6 +410,15 @@ config CAVIUM_ERRATUM_22375
 
 	  If unsure, say Y.
 
+config CAVIUM_ERRATUM_23144
+	bool "Cavium erratum 23144: ITS SYNC hang on dual socket system"
+	depends on NUMA
+	default y
+	help
+	  ITS SYNC command hang for cross node io and collections/cpu mapping.
+
+	  If unsure, say Y.
+
 config CAVIUM_ERRATUM_23154
 	bool "Cavium erratum 23154: Access to ICC_IAR1_EL1 is not sync'ed"
 	default y
@@ -398,6 +426,17 @@ config CAVIUM_ERRATUM_23154
 	  The gicv3 of ThunderX requires a modified version for
 	  reading the IAR status to ensure data synchronization
 	  (access to icc_iar1_el1 is not sync'ed before and after).
+
+	  If unsure, say Y.
+
+config CAVIUM_ERRATUM_27456
+	bool "Cavium erratum 27456: Broadcast TLBI instructions may cause icache corruption"
+	default y
+	help
+	  On ThunderX T88 pass 1.x through 2.1 parts, broadcast TLBI
+	  instructions may cause the icache to become corrupted if it
+	  contains data for a non-current ASID.  The fix is to
+	  invalidate the icache when changing the mm context.
 
 	  If unsure, say Y.
 
@@ -471,6 +510,31 @@ config ARM64_VA_BITS
 	default 47 if ARM64_VA_BITS_47
 	default 48 if ARM64_VA_BITS_48
 
+choice
+	prompt "Section size bits for sparse memory"
+	default ARM64_SECTION_BITS_30
+	depends on SPARSEMEM
+	help
+	  The number of physical address bits to cover the maximum amount of memory in a section
+	  for sparse memomory model.
+
+config ARM64_SECTION_BITS_30
+	bool "30-bit"
+
+config ARM64_SECTION_BITS_28
+	bool "28-bit"
+
+config ARM64_SECTION_BITS_27
+	bool "27-bit"
+
+endchoice
+
+config ARM64_SECTION_BITS
+	int
+	default 30 if ARM64_SECTION_BITS_30
+	default 28 if ARM64_SECTION_BITS_28
+	default 27 if ARM64_SECTION_BITS_27
+
 config CPU_BIG_ENDIAN
        bool "Build big-endian kernel"
        help
@@ -541,6 +605,11 @@ config HAVE_ARCH_TRANSPARENT_HUGEPAGE
 config ARCH_HAS_CACHE_LINE_SIZE
 	def_bool y
 
+config ARM_TIMER_SP804
+	bool
+	select CLKSRC_MMIO
+	select CLKSRC_OF if OF
+
 source "mm/Kconfig"
 
 config SECCOMP
@@ -555,6 +624,27 @@ config SECCOMP
 	  enabled via prctl(PR_SET_SECCOMP), it cannot be disabled
 	  and the task is only allowed to execute a few safe syscalls
 	  defined by each seccomp mode.
+
+config KEXEC
+	depends on PM_SLEEP_SMP
+	select KEXEC_CORE
+	bool "kexec system call"
+	---help---
+	  kexec is a system call that implements the ability to shutdown your
+	  current kernel, and to start another kernel.  It is like a reboot
+	  but it is independent of the system firmware.   And like a reboot
+	  you can start any kernel with it, not just Linux.
+
+config CRASH_DUMP
+	bool "Build kdump crash kernel"
+	help
+	  Generate crash dump after being started by kexec. This should
+	  be normally only set in special crash dump kernels which are
+	  loaded in the main kernel with kexec-tools into a specially
+	  reserved region and then later executed after a crash by
+	  kdump/kexec.
+
+	  For more details see Documentation/kdump/kdump.txt
 
 config XEN_DOM0
 	def_bool y
@@ -589,6 +679,14 @@ config FORCE_MAX_ZONEORDER
 
 	  However for 4K, we choose a higher default value, 11 as opposed to 10, giving us
 	  4M allocations matching the default size used by generic code.
+
+config HANDLE_RO_INVAL
+	bool "Handle permission fault caused by cache invalidation"
+	help
+	  DC IVAC requires write permission or else Permission fault
+	  is generated. This enables the fault-handling to remap the
+	  memory writable and to retry faulted cache invalidation if
+	  the memory is intended to be mapped writable.
 
 menuconfig ARMV8_DEPRECATED
 	bool "Emulate deprecated/obsolete ARMv8 instructions"
@@ -708,6 +806,34 @@ endmenu
 
 menu "Boot options"
 
+config BUILD_ARM_APPENDED_DTB_IMAGE_EXT
+        bool "Build a concatenated zImage/dtb by default"
+        depends on OF
+        help
+          Enabling this option will cause a concatenated zImage and list of
+          DTBs to be built by default (instead of a standalone zImage.)
+          The image will built in arch/arm/boot/zImage-dtb
+
+config BUILD_ARM_APPENDED_DTB_IMAGE_NAMES_EXT
+        string "Default dtb names"
+        depends on BUILD_ARM_APPENDED_DTB_IMAGE_EXT
+        help
+          Space separated list of names of dtbs to append when
+          building a concatenated zImage-dtb.
+
+config ARM_ATAG_DTB_COMPAT_EXT
+   bool "Supplement the appended DTB with traditional ATAG information"
+   depends on BUILD_ARM_APPENDED_DTB_IMAGE_EXT
+        select LIBFDT
+   help
+     Some old bootloaders can't be updated to a DTB capable one, yet
+     they provide ATAGs with memory configuration, the ramdisk address,
+     the kernel cmdline string, etc.  Such information is dynamically
+     provided by the bootloader and can't always be stored in a static
+     DTB.  To allow a device tree enabled kernel to be used with such
+     bootloaders, this option allows zImage to extract the information
+     from the ATAG list and store it at run time into the appended DTB.
+
 config CMDLINE
 	string "Default kernel command string"
 	default ""
@@ -761,6 +887,9 @@ menu "Userspace binary formats"
 
 source "fs/Kconfig.binfmt"
 
+config OPTEE
+	def_bool y
+
 config COMPAT
 	bool "Kernel support for 32-bit EL0"
 	depends on ARM64_4K_PAGES || EXPERT
@@ -780,15 +909,75 @@ config COMPAT
 
 	  If you want to execute 32-bit userspace applications, say Y.
 
+config KUSER_HELPERS
+	bool "Enable the kuser helpers page in 32-bit processes"
+	depends on COMPAT
+	default y
+	help
+	  Warning: disabling this option may break 32-bit applications.
+
+	  Provide kuser helpers in a special purpose fixed-address page. The
+	  kernel provides helper code to userspace in read-only form at a fixed
+	  location to allow userspace to be independent of the CPU type fitted
+	  to the system. This permits 32-bit binaries to be run on ARMv4 through
+	  to ARMv8 without modification.
+
+	  See Documentation/arm/kernel_user_helpers.txt for details.
+
+	  However, the fixed-address nature of these helpers can be used by ROP
+	  (return-orientated programming) authors when creating exploits.
+
+	  If all of the 32-bit binaries and libraries which run on your platform
+	  are built specifically for your platform, and make no use of these
+	  helpers, then you can turn this option off to hinder such exploits.
+	  However, in that case, if a binary or library relying on those helpers
+	  is run, it will receive a SIGSEGV signal, which will terminate the
+	  program. Typically, binaries compiled for ARMv7 or later do not use
+	  the kuser helpers.
+
+	  Say N here only if you are absolutely certain that you do not need
+	  these helpers; otherwise, the safe option is to say Y.
+
 config SYSVIPC_COMPAT
 	def_bool y
 	depends on COMPAT && SYSVIPC
+
+config COMPAT_VDSO
+	bool "32-bit vDSO"
+	depends on COMPAT
+	default n
+	help
+	  Warning: a 32-bit toolchain is necessary to build the vDSO. You
+	  must explicitly define which toolchain should be used by setting
+	  CROSS_COMPILE_ARM32 to the prefix of the 32-bit toolchain (same format
+	  as CROSS_COMPILE). If a 32-bit compiler cannot be found, a warning
+	  will be printed and the kernel will be built as if COMPAT_VDSO had not
+	  been set.
+
+	  Provide a vDSO to 32-bit processes. It includes the symbols provided
+	  by the vDSO from the 32-bit kernel, so that a 32-bit libc can use
+	  the compat vDSO without modification. It also provides sigreturn
+	  trampolines, replacing the sigreturn page.
+
+config CROSS_COMPILE_ARM32
+	string "32-bit toolchain prefix"
+	help
+	  Same as setting CROSS_COMPILE_ARM32 in the environment, but saved for
+	  future builds. The environment variable overrides this config option.
 
 endmenu
 
 menu "Power management options"
 
 source "kernel/power/Kconfig"
+
+config ARCH_HIBERNATION_POSSIBLE
+	def_bool y
+	depends on CPU_PM
+
+config ARCH_HIBERNATION_HEADER
+	def_bool y
+	depends on HIBERNATION && !LG_SNAPSHOT_BOOT
 
 config ARCH_SUSPEND_POSSIBLE
 	def_bool y

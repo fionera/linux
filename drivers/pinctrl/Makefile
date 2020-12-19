@@ -44,6 +44,7 @@ obj-$(CONFIG_ARCH_BCM)		+= bcm/
 obj-$(CONFIG_ARCH_BERLIN)	+= berlin/
 obj-y				+= freescale/
 obj-$(CONFIG_X86)		+= intel/
+obj-$(CONFIG_ARCH_LG1K)		+= lg1k/
 obj-$(CONFIG_PLAT_ORION)        += mvebu/
 obj-y				+= nomadik/
 obj-$(CONFIG_ARCH_QCOM)		+= qcom/

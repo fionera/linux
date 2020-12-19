@@ -4,6 +4,12 @@
 struct usb_hub_descriptor;
 struct usb_dev_state;
 
+/* extra variable */
+extern int usb3_device_plugin;
+extern int usb3_device_resume;
+extern int port_check_count;
+extern int bdevice;
+extern int U3PortCnt;
 /* Functions local to drivers/usb/core/ */
 
 extern int usb_create_sysfs_dev_files(struct usb_device *dev);
@@ -45,7 +51,7 @@ static inline unsigned usb_get_max_power(struct usb_device *udev,
 		struct usb_host_config *c)
 {
 	/* SuperSpeed power is in 8 mA units; others are in 2 mA units */
-	unsigned mul = (udev->speed == USB_SPEED_SUPER ? 8 : 2);
+	unsigned mul = (udev->speed >= USB_SPEED_SUPER ? 8 : 2);
 
 	return c->desc.bMaxPower * mul;
 }

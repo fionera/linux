@@ -17,6 +17,7 @@
 
 #include <linux/mm.h>
 #include <linux/suspend.h>
+#include <linux/slab.h>
 #include <asm/system_misc.h>
 #include <asm/idmap.h>
 #include <asm/suspend.h>
@@ -40,6 +41,11 @@ void notrace save_processor_state(void)
 
 void notrace restore_processor_state(void)
 {
+#ifdef CONFIG_LG_SNAPSHOT_BOOT
+	extern int in_suspend;
+	if(!in_suspend)
+		outer_resume();
+#endif
 	local_fiq_enable();
 }
 
@@ -74,6 +80,33 @@ int notrace swsusp_arch_suspend(void)
 	return cpu_suspend(0, arch_save_image);
 }
 
+#ifdef CONFIG_LG_SNAPSHOT_BOOT
+extern unsigned long  __nosave_backup_phys, __nosave_begin_phys, __nosave_end_phys;
+
+static int __init swsusp_arch_init(void)
+{
+	char *backup;
+	size_t len;
+
+	len = &__nosave_end - &__nosave_begin;
+	if(!len)
+		return 0;
+
+	backup = kmalloc(len, GFP_KERNEL);
+	if(!backup) {
+		printk("%s %d kmalloc fail, can't save nosave data!\n", __func__, __LINE__);
+		return -1;
+	}
+	memcpy(backup, &__nosave_begin, len);
+
+	__nosave_backup_phys = virt_to_phys(backup);
+	__nosave_begin_phys = virt_to_phys(&__nosave_begin);
+	__nosave_end_phys = virt_to_phys(&__nosave_end);
+
+	return 0;
+}
+late_initcall(swsusp_arch_init);
+#else	// CONFIG_LG_SNAPSHOT_BOOT
 /*
  * Restore page contents for physical pages that were in use during loading
  * hibernation image.  Switch to idmap_pgd so the physical page tables
@@ -104,3 +137,4 @@ int swsusp_arch_resume(void)
 		resume_stack + ARRAY_SIZE(resume_stack));
 	return 0;
 }
+#endif	// CONFIG_LG_SNAPSHOT_BOOT

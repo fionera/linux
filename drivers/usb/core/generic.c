@@ -175,6 +175,12 @@ static int generic_probe(struct usb_device *udev)
 					c, err);
 				/* This need not be fatal.  The user can try to
 				 * set other configurations. */
+				// work around
+				if (err == -ETIMEDOUT) {
+					pr_warn("usb sw workaround: set device to notattached\n");
+					usb_set_device_state(udev, USB_STATE_NOTATTACHED);
+					return err;
+				}
 			}
 		}
 	}

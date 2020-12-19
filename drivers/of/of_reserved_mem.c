@@ -22,7 +22,7 @@
 #include <linux/of_reserved_mem.h>
 #include <linux/sort.h>
 
-#define MAX_RESERVED_REGIONS	16
+#define MAX_RESERVED_REGIONS	20
 static struct reserved_mem reserved_mem[MAX_RESERVED_REGIONS];
 static int reserved_mem_count;
 
@@ -32,11 +32,13 @@ int __init __weak early_init_dt_alloc_reserved_memory_arch(phys_addr_t size,
 	phys_addr_t align, phys_addr_t start, phys_addr_t end, bool nomap,
 	phys_addr_t *res_base)
 {
+	phys_addr_t base;
 	/*
 	 * We use __memblock_alloc_base() because memblock_alloc_base()
 	 * panic()s on allocation failure.
 	 */
-	phys_addr_t base = __memblock_alloc_base(size, align, end);
+	end = !end ? MEMBLOCK_ALLOC_ANYWHERE : end;
+	base = __memblock_alloc_base(size, align, end);
 	if (!base)
 		return -ENOMEM;
 
@@ -86,6 +88,27 @@ void __init fdt_reserved_mem_save_node(unsigned long node, const char *uname,
 	return;
 }
 
+void __init fdt_reserved_mem_save_node_ext(unsigned long node, const char *uname,
+				      phys_addr_t base, phys_addr_t size, int is_sub_region)
+{
+	struct reserved_mem *rmem = &reserved_mem[reserved_mem_count];
+
+	if (reserved_mem_count == ARRAY_SIZE(reserved_mem)) {
+		pr_err("Reserved memory: not enough space all defined regions.\n");
+		return;
+	}
+
+	rmem->fdt_node = node;
+	rmem->name = uname;
+	rmem->base = base;
+	rmem->size = size;
+	rmem->is_sub_region = is_sub_region;
+
+	reserved_mem_count++;
+	return;
+}
+
+
 /**
  * res_mem_alloc_size() - allocate reserved memory described by 'size', 'align'
  *			  and 'alloc-ranges' properties
@@ -125,8 +148,12 @@ static int __init __reserved_mem_alloc_size(unsigned long node,
 	}
 
 	/* Need adjust the alignment to satisfy the CMA requirement */
-	if (IS_ENABLED(CONFIG_CMA) && of_flat_dt_is_compatible(node, "shared-dma-pool"))
-		align = max(align, (phys_addr_t)PAGE_SIZE << max(MAX_ORDER - 1, pageblock_order));
+	if (IS_ENABLED(CONFIG_CMA) && of_flat_dt_is_compatible(node, "shared-dma-pool")) {
+		unsigned long order =
+			max_t(unsigned long, MAX_ORDER - 1, pageblock_order);
+
+		align = max(align, (phys_addr_t)PAGE_SIZE << order);
+	}
 
 	prop = of_get_flat_dt_prop(node, "alloc-ranges", &len);
 	if (prop) {
@@ -229,6 +256,10 @@ static void __init __rmem_check_for_overlap(void)
 
 		this = &reserved_mem[i];
 		next = &reserved_mem[i + 1];
+		if (this->is_sub_region || next->is_sub_region) {
+			pr_info("[MM] %s or %s is SUB Region, No need to check for overlap\n", this->name, next->name);
+			continue;
+		}
 		if (!(this->base && next->base))
 			continue;
 		if (this->base + this->size > next->base) {
@@ -241,6 +272,69 @@ static void __init __rmem_check_for_overlap(void)
 			       next->name, &next->base, &next_end);
 		}
 	}
+}
+
+/**
+ * fdt_get_carvedout_mem_size_in_highmem - get total reserved memory regions size in HighMem
+ */
+unsigned long __init fdt_get_carvedout_mem_size_in_highmem(unsigned long high_start, unsigned long high_end)
+{
+	int i;
+	unsigned long carvedout_high = 0;
+
+	for (i = 0; i < reserved_mem_count; i++) {
+		struct reserved_mem *rmem = &reserved_mem[i];
+		if (rmem->is_sub_region) {
+			continue;
+		}
+		if (rmem->base < high_start) {
+			continue;
+		}
+		if (rmem->base + rmem->size > high_end) {
+			pr_err("Reserved memory [%s] (0x%llx ~ 0x%llx) has over HighMem range (0x%lx ~ 0x%lx)\n", rmem->name, rmem->base, rmem->base + rmem->size, high_start, high_end);
+			continue;
+		}
+
+		pr_info("Reserved memory [%s] (0x%llx ~ 0x%llx) in HighMem range\n", rmem->name, rmem->base, rmem->base + rmem->size);
+
+		carvedout_high += rmem->size;
+	}
+	return carvedout_high;
+}
+
+/**
+ * fdt_get_carvedout_mem_info - get address and size of specific reserved memory region
+ */
+unsigned long fdt_get_carvedout_mem_info(const char *reserved_mem_name, void **addr)
+{
+	void *address;
+	unsigned long size = 0;
+	int i;
+
+	if (!reserved_mem_name) {
+		pr_err("NULL mem name for fdt_get_carvedout_mem_info, ERROR!\n");
+		goto err;
+	}
+
+	for (i = 0; i < reserved_mem_count; i++) {
+		struct reserved_mem *rmem = &reserved_mem[i];
+		if (!strncmp(rmem->name, reserved_mem_name, strlen(reserved_mem_name))) {
+			size = rmem->size;
+			address = (void *)(unsigned long)rmem->base;
+			pr_info("[%s] is reserved at (0x%llx ~ 0x%llx), size = 0x%llx\n", reserved_mem_name, rmem->base, rmem->base + rmem->size, rmem->size);
+			if (addr)
+				*addr = address;
+			return size;
+		}
+	}
+
+	pr_err("No reserved mem for [%s]\n", reserved_mem_name);
+	goto err;
+
+err:
+	if (addr)
+		*addr = 0;
+	return 0;
 }
 
 /**

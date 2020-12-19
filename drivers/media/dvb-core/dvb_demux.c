@@ -781,6 +781,30 @@ static int dmx_ts_feed_stop_filtering(struct dmx_ts_feed *ts_feed)
 	return ret;
 }
 
+static int dmx_ts_feed_control (struct dmx_ts_feed *ts_feed, __u32 cmd, void *parg)
+{
+	struct dvb_demux_feed *feed = (struct dvb_demux_feed *)ts_feed;
+	struct dvb_demux *demux = feed->demux;
+	int ret;
+
+	mutex_lock(&demux->mutex);
+
+	if (feed->state < DMX_STATE_GO) {
+		mutex_unlock(&demux->mutex);
+		return -EINVAL;
+	}
+	if (!demux->ts_control) {
+		mutex_unlock(&demux->mutex);
+		return -ENODEV;
+	}
+
+	ret = demux->ts_control(feed, cmd, parg);
+	mutex_unlock(&demux->mutex);
+
+	return ret;
+
+}
+
 static int dvbdmx_allocate_ts_feed(struct dmx_demux *dmx,
 				   struct dmx_ts_feed **ts_feed,
 				   dmx_ts_cb callback)
@@ -810,6 +834,8 @@ static int dvbdmx_allocate_ts_feed(struct dmx_demux *dmx,
 	(*ts_feed)->start_filtering = dmx_ts_feed_start_filtering;
 	(*ts_feed)->stop_filtering = dmx_ts_feed_stop_filtering;
 	(*ts_feed)->set = dmx_ts_feed_set;
+
+	(*ts_feed)->control = dmx_ts_feed_control;
 
 	if (!(feed->filter = dvb_dmx_filter_alloc(demux))) {
 		feed->state = DMX_STATE_FREE;
@@ -1123,6 +1149,164 @@ static int dvbdmx_release_section_feed(struct dmx_demux *demux,
 }
 
 /******************************************************************************
+ * dmx_temi_feed API calls
+ ******************************************************************************/
+
+
+static int dmx_temi_feed_set(struct dmx_temi_feed *feed,
+								u16 pid, u8 timeline_id)
+{
+	struct dvb_demux_feed *dvbdmxfeed = (struct dvb_demux_feed *)feed;
+	struct dvb_demux *dvbdmx = dvbdmxfeed->demux;
+
+	if (pid > 0x1fff)
+		return -EINVAL;
+
+	if (mutex_lock_interruptible(&dvbdmx->mutex))
+		return -ERESTARTSYS;
+
+	dvb_demux_feed_add(dvbdmxfeed);
+
+	dvbdmxfeed->pid = pid;
+	feed->timeline_id = timeline_id;
+
+
+	dvbdmxfeed->state = DMX_STATE_READY;
+	mutex_unlock(&dvbdmx->mutex);
+	return 0;
+}
+
+
+
+static int dmx_temi_feed_start_filtering(struct dmx_temi_feed *feed)
+{
+	struct dvb_demux_feed *dvbdmxfeed = (struct dvb_demux_feed *)feed;
+	struct dvb_demux *dvbdmx = dvbdmxfeed->demux;
+	int ret;
+
+	if (mutex_lock_interruptible(&dvbdmx->mutex))
+		return -ERESTARTSYS;
+
+	if (feed->is_filtering)	{
+		mutex_unlock(&dvbdmx->mutex);
+		return -EBUSY;
+	}
+
+	if (!dvbdmxfeed->filter) {
+		mutex_unlock(&dvbdmx->mutex);
+		return -EINVAL;
+	}
+
+	if (!dvbdmx->start_feed) {
+		mutex_unlock(&dvbdmx->mutex);
+		return -ENODEV;
+	}
+
+
+	if ((ret = dvbdmx->start_feed(dvbdmxfeed)) < 0) {
+		mutex_unlock(&dvbdmx->mutex);
+		return ret;
+	}
+
+	spin_lock_irq(&dvbdmx->lock);
+	feed->is_filtering = 1;
+	dvbdmxfeed->state = DMX_STATE_GO;
+	spin_unlock_irq(&dvbdmx->lock);
+
+	mutex_unlock(&dvbdmx->mutex);
+	return 0;
+}
+
+static int dmx_temi_feed_stop_filtering(struct dmx_temi_feed *feed)
+{
+	struct dvb_demux_feed *dvbdmxfeed = (struct dvb_demux_feed *)feed;
+	struct dvb_demux *dvbdmx = dvbdmxfeed->demux;
+	int ret;
+
+	mutex_lock(&dvbdmx->mutex);
+
+	if (!dvbdmx->stop_feed) {
+		mutex_unlock(&dvbdmx->mutex);
+		return -ENODEV;
+	}
+
+	ret = dvbdmx->stop_feed(dvbdmxfeed);
+
+	spin_lock_irq(&dvbdmx->lock);
+	dvbdmxfeed->state = DMX_STATE_READY;
+	feed->is_filtering = 0;
+	spin_unlock_irq(&dvbdmx->lock);
+
+	mutex_unlock(&dvbdmx->mutex);
+	return ret;
+}
+
+static int dvbdmx_allocate_temi_feed(struct dmx_demux *demux,
+										struct dmx_temi_feed **feed,
+										dmx_temi_cb callback)
+{
+	struct dvb_demux *dvbdmx = (struct dvb_demux *)demux;
+	struct dvb_demux_feed *dvbdmxfeed;
+
+	if (mutex_lock_interruptible(&dvbdmx->mutex))
+		return -ERESTARTSYS;
+
+	if (!(dvbdmxfeed = dvb_dmx_feed_alloc(dvbdmx))) {
+		mutex_unlock(&dvbdmx->mutex);
+		return -EBUSY;
+	}
+
+	dvbdmxfeed->type = DMX_TYPE_TEMI;
+	dvbdmxfeed->cb.temi = callback;
+	dvbdmxfeed->demux = dvbdmx;
+	dvbdmxfeed->pid = 0xffff;
+	dvbdmxfeed->filter = NULL;
+	dvbdmxfeed->buffer = NULL;
+
+	(*feed) = &dvbdmxfeed->feed.temi;
+	(*feed)->is_filtering = 0;
+	(*feed)->parent = demux;
+	(*feed)->priv = NULL;
+
+	(*feed)->set = dmx_temi_feed_set;
+	(*feed)->start_filtering = dmx_temi_feed_start_filtering;
+	(*feed)->stop_filtering = dmx_temi_feed_stop_filtering;
+
+	if (!(dvbdmxfeed->filter = dvb_dmx_filter_alloc(dvbdmx))) {
+		dvbdmxfeed->state = DMX_STATE_FREE;
+		mutex_unlock(&dvbdmx->mutex);
+		return -EBUSY;
+	}
+
+	dvbdmxfeed->filter->type = DMX_TYPE_TEMI;
+	dvbdmxfeed->filter->feed = dvbdmxfeed;
+	dvbdmxfeed->filter->state = DMX_STATE_READY;
+	mutex_unlock(&dvbdmx->mutex);
+	return 0;
+}
+
+static int dvbdmx_release_temi_feed(struct dmx_demux *demux,
+									   struct dmx_temi_feed *feed)
+{
+	struct dvb_demux_feed *dvbdmxfeed = (struct dvb_demux_feed *)feed;
+	struct dvb_demux *dvbdmx = (struct dvb_demux *)demux;
+
+	mutex_lock(&dvbdmx->mutex);
+
+	if (dvbdmxfeed->state == DMX_STATE_FREE) {
+		mutex_unlock(&dvbdmx->mutex);
+		return -EINVAL;
+	}
+
+	dvbdmxfeed->state = DMX_STATE_FREE;
+	dvb_demux_feed_del(dvbdmxfeed);
+	dvbdmxfeed->pid = 0xffff;
+
+	mutex_unlock(&dvbdmx->mutex);
+	return 0;
+}
+
+/******************************************************************************
  * dvb_demux kernel data API calls
  ******************************************************************************/
 
@@ -1303,6 +1487,8 @@ int dvb_dmx_init(struct dvb_demux *dvbdemux)
 	dmx->release_ts_feed = dvbdmx_release_ts_feed;
 	dmx->allocate_section_feed = dvbdmx_allocate_section_feed;
 	dmx->release_section_feed = dvbdmx_release_section_feed;
+	dmx->allocate_temi_feed = dvbdmx_allocate_temi_feed;
+	dmx->release_temi_feed = dvbdmx_release_temi_feed;
 
 	dmx->add_frontend = dvbdmx_add_frontend;
 	dmx->remove_frontend = dvbdmx_remove_frontend;

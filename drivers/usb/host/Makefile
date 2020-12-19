@@ -1,6 +1,11 @@
-#
+
 # Makefile for USB Host Controller Drivers
 #
+
+ifdef CONFIG_RTK_KDRIVER_SUPPORT
+KBUILD_CPPFLAGS += -Idrivers/rtk_kdriver/include/
+KBUILD_CPPFLAGS += -Idrivers/rtk_kdriver/include/rtk_kdriver
+endif
 
 # tell define_trace.h where to find the xhci trace header
 CFLAGS_xhci-trace.o := -I$(src)
@@ -14,7 +19,13 @@ xhci-hcd-y := xhci.o xhci-mem.o
 xhci-hcd-y += xhci-ring.o xhci-hub.o xhci-dbg.o
 xhci-hcd-y += xhci-trace.o
 
+
+ifdef CONFIG_ARCH_RTK289X
+xhci-plat-hcd-y := xhci-plat-rtd289x.o
+else
 xhci-plat-hcd-y := xhci-plat.o
+endif
+
 ifneq ($(CONFIG_USB_XHCI_MVEBU), )
 	xhci-plat-hcd-y		+= xhci-mvebu.o
 endif

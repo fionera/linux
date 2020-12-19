@@ -40,6 +40,8 @@
 
 /*-------------------------------------------------------------------------*/
 
+#define DEBUG_MEMORY_TRASH 1
+
 /* fill a qtd, returning how much of the buffer we were able to queue up */
 
 static int
@@ -566,6 +568,56 @@ static void qtd_list_free (
 	}
 }
 
+#ifdef DEBUG_MEMORY_TRASH
+#include <linux/printk.h>
+extern unsigned int gdma_dev_addr; // physical address..
+extern size_t gdma_dcmt_monitor_end;
+
+static void mem_trash_buf_monitor(struct ehci_hcd *ehci, struct ehci_qtd *qtd, dma_addr_t buf, int len) {
+	unsigned long start = 0;
+	size_t end = 0;
+	int loglevel_tmp = 0;
+
+	if (!gdma_dev_addr || !gdma_dcmt_monitor_end) {
+		ehci_err(ehci, "%s(%d) GDMA module not init yet.... \n", __func__, __LINE__);
+		return;
+	}
+
+	if (buf == 0 || (len <= 0)) {
+		return;
+	}
+
+	start = gdma_dev_addr;
+	end = gdma_dcmt_monitor_end - 1;
+
+	pr_err_once("[ehci] %s(%d) protected mem range (0x%08lx ~ 0x%08x) \n",
+			__func__, __LINE__,
+			start, end);
+
+	if ((buf <= start && ((buf + len - 1) >= end)) ||            // buffer include the protected range.
+		((start <= buf) && (buf <= end)) ||                      // buf start address inside the protected range.
+		(start <= (buf + len - 1) && (buf + len - 1) <= end)) {  // buf end address inside the protected range.
+		int x = 0;
+
+		loglevel_tmp = console_loglevel;
+		console_loglevel = 8;
+
+		ehci_err(ehci, "%s(%d) touch protected mem range(0x%08lx ~ 0x%08x). start(0x%08x) end(0x%08x). len(%d)\n",
+				__func__, __LINE__,
+				start, end, buf, buf + len - 1, len);
+
+		for (x = 0; x < 5; x++) {
+			ehci_err(ehci, "%s(%d) qtd->hw_buf[%d](0x%08x) qtd->hw_buf_hi[%d](0x%08x) \n",
+					__func__, __LINE__,
+					x, qtd->hw_buf[x],
+					x, qtd->hw_buf_hi[x]);
+		}
+		WARN_ON(1);
+		console_loglevel = loglevel_tmp;
+	}
+}
+
+#endif
 /*
  * create a list of filled qtds for this URB; won't link into qh.
  */
@@ -600,11 +652,16 @@ qh_urb_transaction (
 	len = urb->transfer_buffer_length;
 	is_input = usb_pipein (urb->pipe);
 	if (usb_pipecontrol (urb->pipe)) {
+		int qtd_buf_len = 0;
+
 		/* SETUP pid */
-		qtd_fill(ehci, qtd, urb->setup_dma,
+		qtd_buf_len = qtd_fill(ehci, qtd, urb->setup_dma,
 				sizeof (struct usb_ctrlrequest),
 				token | (2 /* "setup" */ << 8), 8);
 
+#ifdef DEBUG_MEMORY_TRASH
+		mem_trash_buf_monitor(ehci, qtd, urb->setup_dma, qtd_buf_len);  // should only 8 byte
+#endif
 		/* ... and always at least one more pid */
 		token ^= QTD_TOGGLE;
 		qtd_prev = qtd;
@@ -654,6 +711,9 @@ qh_urb_transaction (
 
 		this_qtd_len = qtd_fill(ehci, qtd, buf, this_sg_len, token,
 				maxpacket);
+#ifdef DEBUG_MEMORY_TRASH
+		mem_trash_buf_monitor(ehci, qtd, buf, this_qtd_len);
+#endif
 		this_sg_len -= this_qtd_len;
 		len -= this_qtd_len;
 		buf += this_qtd_len;

@@ -1418,8 +1418,10 @@ static int sixaxis_set_operational_usb(struct hid_device *hdev)
 	}
 
 	ret = hid_hw_output_report(hdev, buf, 1);
-	if (ret < 0)
-		hid_err(hdev, "can't set operational mode: step 3\n");
+	if (ret < 0) {
+		hid_info(hdev, "can't set operational mode: step 3, ignoring\n");
+		ret = 0;
+	}
 
 out:
 	kfree(buf);
@@ -2453,11 +2455,13 @@ static const struct hid_device_id sony_devices[] = {
 	/* SMK-Link PS3 BD Remote Control */
 	{ HID_BLUETOOTH_DEVICE(USB_VENDOR_ID_SMK, USB_DEVICE_ID_SMK_PS3_BDREMOTE),
 		.driver_data = PS3REMOTE },
+#ifndef CONFIG_SONY_DUALSHOCK_4_USER_DRIVER
 	/* Sony Dualshock 4 controllers for PS4 */
 	{ HID_USB_DEVICE(USB_VENDOR_ID_SONY, USB_DEVICE_ID_SONY_PS4_CONTROLLER),
 		.driver_data = DUALSHOCK4_CONTROLLER_USB },
 	{ HID_BLUETOOTH_DEVICE(USB_VENDOR_ID_SONY, USB_DEVICE_ID_SONY_PS4_CONTROLLER),
 		.driver_data = DUALSHOCK4_CONTROLLER_BT },
+#endif
 	{ }
 };
 MODULE_DEVICE_TABLE(hid, sony_devices);

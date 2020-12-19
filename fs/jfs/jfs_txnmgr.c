@@ -511,6 +511,13 @@ void txEnd(tid_t tid)
 	 */
 	TXN_WAKEUP(&tblk->waitor);
 
+#ifdef CONFIG_LG_JFS_USB_PULLOUT
+ 	if (!tblk->sb || !JFS_SBI(tblk->sb) || !JFS_SBI(tblk->sb)->ipimap) {
+ 		jfs_info("\n\n\nsb is NULL %s %d\n\n\n\n", __func__, __LINE__);
+ 		TXN_UNLOCK();
+ 		return;
+ 	}
+#endif
 	log = JFS_SBI(tblk->sb)->log;
 
 	/*
@@ -939,6 +946,10 @@ static void txUnlock(struct tblock * tblk)
 			assert(mp->nohomeok > 0);
 			_metapage_homeok(mp);
 
+#ifdef CONFIG_LG_JFS_USB_PULLOUT
+ 			if (!tblk->sb || !JFS_SBI(tblk->sb) || !JFS_SBI(tblk->sb)->ipimap) {
+ 				jfs_info("\n\n\nsb is NULL %s %d\n\n\n\n", __func__, __LINE__);
+ 			} else {
 			/* inherit younger/larger clsn */
 			LOGSYNC_LOCK(log, flags);
 			if (mp->clsn) {
@@ -949,6 +960,20 @@ static void txUnlock(struct tblock * tblk)
 			} else
 				mp->clsn = tblk->clsn;
 			LOGSYNC_UNLOCK(log, flags);
+ 			}
+#else
+			/* inherit younger/larger clsn */
+			LOGSYNC_LOCK(log, flags);
+			if (mp->clsn) {
+				logdiff(difft, tblk->clsn, log);
+				logdiff(diffp, mp->clsn, log);
+				if (difft > diffp)
+					mp->clsn = tblk->clsn;
+			} else
+				mp->clsn = tblk->clsn;
+			LOGSYNC_UNLOCK(log, flags);
+#endif
+
 
 			assert(!(tlck->flag & tlckFREEPAGE));
 
@@ -978,7 +1003,12 @@ static void txUnlock(struct tblock * tblk)
 	 * (allocation map pages inherited lsn of tblk and
 	 * has been inserted in logsync list at txUpdateMap())
 	 */
+
+#ifdef CONFIG_LG_JFS_USB_PULLOUT
+	if (tblk->lsn && log ) {
+#else
 	if (tblk->lsn) {
+#endif
 		LOGSYNC_LOCK(log, flags);
 		log->count--;
 		list_del(&tblk->synclist);
@@ -2302,6 +2332,12 @@ static void txUpdateMap(struct tblock * tblk)
 	int k, nlock;
 	struct metapage *mp = NULL;
 
+#ifdef CONFIG_LG_JFS_USB_PULLOUT
+ 	if (!tblk->sb || !JFS_SBI(tblk->sb) || !JFS_SBI(tblk->sb)->ipimap) {
+ 		jfs_info("\n\n\nsb is NULL %s %d\n\n\n", __func__, __LINE__);
+ 		return;
+ 	}
+#endif
 	ipimap = JFS_SBI(tblk->sb)->ipimap;
 
 	maptype = (tblk->xflag & COMMIT_PMAP) ? COMMIT_PMAP : COMMIT_PWMAP;
@@ -2439,7 +2475,11 @@ static void txUpdateMap(struct tblock * tblk)
 static void txAllocPMap(struct inode *ip, struct maplock * maplock,
 			struct tblock * tblk)
 {
+#ifdef CONFIG_LG_JFS_USB_PULLOUT
+ 	struct inode *ipbmap;
+#else
 	struct inode *ipbmap = JFS_SBI(ip->i_sb)->ipbmap;
+#endif
 	struct xdlistlock *xadlistlock;
 	xad_t *xad;
 	s64 xaddr;
@@ -2449,6 +2489,13 @@ static void txAllocPMap(struct inode *ip, struct maplock * maplock,
 	pxd_t *pxd;
 	int n;
 
+#ifdef CONFIG_LG_JFS_USB_PULLOUT
+ 	if (!ip || !ip->i_sb || !JFS_SBI(ip->i_sb)) {
+ 		jfs_info("\n\n\nsb is NULL %s %d\n\n\n", __func__, __LINE__);
+ 		return;
+ 	}
+ 	ipbmap = JFS_SBI(ip->i_sb)->ipbmap;
+#endif
 	/*
 	 * allocate from persistent map;
 	 */
@@ -2497,7 +2544,11 @@ static void txAllocPMap(struct inode *ip, struct maplock * maplock,
 void txFreeMap(struct inode *ip,
 	       struct maplock * maplock, struct tblock * tblk, int maptype)
 {
+#ifdef CONFIG_LG_JFS_USB_PULLOUT
+	struct inode *ipbmap;
+#else
 	struct inode *ipbmap = JFS_SBI(ip->i_sb)->ipbmap;
+#endif
 	struct xdlistlock *xadlistlock;
 	xad_t *xad;
 	s64 xaddr;
@@ -2510,6 +2561,13 @@ void txFreeMap(struct inode *ip,
 	jfs_info("txFreeMap: tblk:0x%p maplock:0x%p maptype:0x%x",
 		 tblk, maplock, maptype);
 
+#ifdef CONFIG_LG_JFS_USB_PULLOUT
+ 	if (!ip || !ip->i_sb || !JFS_SBI(ip->i_sb)) {
+ 		jfs_info("\n\n\nsb is NULL %s %d\n\n\n", __func__, __LINE__);
+ 		return;
+ 	}
+ 	ipbmap = JFS_SBI(ip->i_sb)->ipbmap;
+#endif
 	/*
 	 * free from persistent map;
 	 */
@@ -2708,9 +2766,26 @@ static void txLazyCommit(struct tblock * tblk)
 		yield();
 	}
 
+#ifdef CONFIG_LG_JFS_USB_PULLOUT
+ 	log = (struct jfs_log *) JFS_SBI(tblk->sb)->log;
+ 	if (log && test_bit(log_INVALID, &log->flag)) {
+ 		tblk->sb->s_flags |= MS_RDONLY;
+ 		jfs_info("\n\n\nlog has IO Error %s %d\n\n\n\n", __func__, __LINE__);
+ 	}
+#endif
 	jfs_info("txLazyCommit: processing tblk 0x%p", tblk);
 
 	txUpdateMap(tblk);
+
+#ifdef CONFIG_LG_JFS_USB_PULLOUT
+ 	if (!tblk->sb || !JFS_SBI(tblk->sb) || !JFS_SBI(tblk->sb)->ipimap) {
+ 		jfs_info("\n\n\nsb is NULL %s %d\n\n\n\n", __func__, __LINE__);
+ 		tblk->flag |= tblkGC_COMMITTED;
+ 		wake_up_all(&tblk->gcwait);	// LOGGC_WAKEUP
+ 		jfs_info("txLazyCommit: done: tblk = 0x%p", tblk);
+ 		return;
+ 	}
+#endif
 
 	log = (struct jfs_log *) JFS_SBI(tblk->sb)->log;
 
@@ -2726,6 +2801,14 @@ static void txLazyCommit(struct tblock * tblk)
 	/*
 	 * Can't release log->gclock until we've tested tblk->flag
 	 */
+
+#ifdef CONFIG_LG_JFS_USB_PULLOUT
+ 	if (!tblk->sb || !JFS_SBI(tblk->sb) || !JFS_SBI(tblk->sb)->ipimap) {
+ 		jfs_warn("\n\n\nsb is NULL %s %d\n\n\n\n", __func__, __LINE__);
+ 		jfs_info("txLazyCommit: done: tblk = 0x%p", tblk);
+ 		return;
+ 	}
+#endif
 	if (tblk->flag & tblkGC_LAZY) {
 		spin_unlock_irq(&log->gclock);	// LOGGC_UNLOCK
 		txUnlock(tblk);
@@ -2760,6 +2843,16 @@ int jfs_lazycommit(void *arg)
 					    cqueue) {
 
 				sbi = JFS_SBI(tblk->sb);
+#ifdef CONFIG_LG_JFS_USB_PULLOUT
+ 				if (!tblk->sb || !sbi) {
+ 					jfs_info("\n\n\nsb is NULL %s %d\n\n\n", __func__, __LINE__);
+ 					if (sbi->commit_state & IN_LAZYCOMMIT)
+ 						continue;
+ 					list_del(&tblk->cqueue);
+ 					WorkDone = 1;
+ 					continue;
+ 				}
+#endif
 				/*
 				 * For each volume, the transactions must be
 				 * handled in order.  If another commit thread

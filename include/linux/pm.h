@@ -573,6 +573,7 @@ struct dev_pm_info {
 	struct wakeup_source	*wakeup;
 	bool			wakeup_path:1;
 	bool			syscore:1;
+	bool			is_userresume:1;
 #else
 	unsigned int		should_wakeup:1;
 #endif
@@ -692,6 +693,8 @@ extern void dpm_resume_end(pm_message_t state);
 extern void dpm_resume_noirq(pm_message_t state);
 extern void dpm_resume_early(pm_message_t state);
 extern void dpm_resume(pm_message_t state);
+extern void dpm_resume_user(pm_message_t state);
+extern int dpm_show_userresume_list(char *buf);
 extern void dpm_complete(pm_message_t state);
 
 extern void device_pm_unlock(void);

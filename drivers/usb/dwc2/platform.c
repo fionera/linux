@@ -54,6 +54,37 @@
 
 static const char dwc2_driver_name[] = "dwc2";
 
+static const struct dwc2_core_params params_lg1313 = {
+	.otg_cap			= 2,	/* non-HNP/non-SRP */
+	.otg_ver			= 0,	/* 1.3 */
+	.dma_enable			= 1,
+	.dma_desc_enable		= 0,
+	.speed				= 0,	/* High Speed */
+	.enable_dynamic_fifo		= 1,
+	.en_multiple_tx_fifo		= 0,
+	.host_rx_fifo_size		= -1,	/* 520 DWORDs */
+	.host_nperio_tx_fifo_size	= -1,	/* 256 DWORDs */
+	.host_perio_tx_fifo_size	= -1,	/* 768 DWORDs */
+	.max_transfer_size		= 65535,
+	.max_packet_count		= 1023,
+	.host_channels			= 4,
+	.phy_type			= 1,	/* UTMI */
+	.phy_utmi_width			= 16,	/* 16 bits */
+	.phy_ulpi_ddr			= 0,	/* Single */
+	.phy_ulpi_ext_vbus		= 0,
+	.i2c_enable			= 0,
+	.ulpi_fs_ls			= 0,
+	.host_support_fs_ls_low_power	= 0,
+	.host_ls_low_power_phy_clk	= 0,	/* 48 MHz */
+	.ts_dline			= 0,
+	.reload_ctl			= 1,
+	.ahbcfg				= GAHBCFG_HBSTLEN_INCR4 <<
+					  GAHBCFG_HBSTLEN_SHIFT,
+	.uframe_sched			= 1,
+	.external_id_pin_ctl		= 1,	/* 1 to disable CONIDSTSCHNG */
+	.hibernation			= 0,	/* 1 to enable suspend/resume*/
+};
+
 static const struct dwc2_core_params params_bcm2835 = {
 	.otg_cap			= 0,	/* HNP/SRP capable */
 	.otg_ver			= 0,	/* 1.3 */
@@ -309,6 +340,7 @@ static int dwc2_driver_remove(struct platform_device *dev)
 static const struct of_device_id dwc2_of_match_table[] = {
 	{ .compatible = "brcm,bcm2835-usb", .data = &params_bcm2835 },
 	{ .compatible = "rockchip,rk3066-usb", .data = &params_rk3066 },
+	{ .compatible = "lge,lg115x-drd2", .data = &params_lg1313 },
 	{ .compatible = "snps,dwc2", .data = NULL },
 	{ .compatible = "samsung,s3c6400-hsotg", .data = NULL},
 	{},
@@ -419,6 +451,12 @@ static int dwc2_driver_probe(struct platform_device *dev)
 	if (retval)
 		return retval;
 
+	/*
+	 * Reset before dwc2_get_hwparams() then it could get power-on real
+	 * reset value form registers.
+	 */
+	dwc2_core_reset(hsotg);
+
 	/* Detect config values from hardware */
 	retval = dwc2_get_hwparams(hsotg);
 	if (retval)
@@ -466,6 +504,8 @@ static int __maybe_unused dwc2_suspend(struct device *dev)
 
 	if (dwc2_is_device_mode(dwc2))
 		dwc2_hsotg_suspend(dwc2);
+	else
+		dwc2_hcd_suspend(dwc2);
 
 	if (dwc2->ll_hw_enabled)
 		ret = __dwc2_lowlevel_hw_disable(dwc2);
@@ -486,6 +526,8 @@ static int __maybe_unused dwc2_resume(struct device *dev)
 
 	if (dwc2_is_device_mode(dwc2))
 		ret = dwc2_hsotg_resume(dwc2);
+	else
+		ret = dwc2_hcd_resume(dwc2);
 
 	return ret;
 }

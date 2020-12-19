@@ -1,0 +1,129 @@
+<root>
+
+<options>
+
+	<option>
+		<name>input</name>
+		<ctype>char*</ctype>
+		<has_arg>required_argument</has_arg>
+		<usage>-i, --input file</usage>
+		<desc>input file (Elementary Stream)</desc>
+	</option>
+
+	<option>
+		<name>source</name>
+		<ctype>char*</ctype>
+		<has_arg>required_argument</has_arg>
+		<usage>-s, --source type</usage>
+		<desc>source type (mpeg2, avc, hevc, avs, avs2)</desc>
+		<default>avc</default>
+	</option>
+
+	<option>
+		<name>test</name>
+		<ctype>char*</ctype>
+		<has_arg>required_argument</has_arg>
+		<usage>-t, --test IDs</usage>
+		<desc>test IDs</desc>
+		<default>1</default>
+	</option>
+
+	<option>
+		<name>list_tests</name>
+		<ctype>char</ctype>
+		<has_arg>no_argument</has_arg>
+		<usage>--list_tests</usage>
+		<desc>list tests</desc>
+	</option>
+
+	<option>
+		<name>width</name>
+		<ctype>int</ctype>
+		<has_arg>required_argument</has_arg>
+		<usage>-w, --width number</usage>
+		<desc>width</desc>
+		<default>1920</default>
+	</option>
+
+	<option>
+		<name>height</name>
+		<ctype>int</ctype>
+		<has_arg>required_argument</has_arg>
+		<usage>-h, --height number</usage>
+		<desc>height</desc>
+		<default>1088</default>
+	</option>
+
+	<option>
+		<name>bufcnt</name>
+		<ctype>int</ctype>
+		<has_arg>required_argument</has_arg>
+		<usage>--bufcnt number</usage>
+		<desc>bufcnt</desc>
+		<default>8</default>
+	</option>
+
+	<option>
+		<name>vcap_port</name>
+		<ctype>int</ctype>
+		<has_arg>required_argument</has_arg>
+		<usage>--vcap_port number</usage>
+		<desc>vcap port</desc>
+		<default>0</default>
+	</option>
+
+	<option>
+		<name>bs_buf_addr</name>
+		<ctype>int</ctype>
+		<has_arg>required_argument</has_arg>
+		<usage>--bs_buf_addr number</usage>
+		<desc>the address of bitstream buffer</desc>
+		<default>0</default>
+	</option>
+
+	<option>
+		<name>bs_buf_size</name>
+		<ctype>int</ctype>
+		<has_arg>required_argument</has_arg>
+		<usage>--bs_buf_size number</usage>
+		<desc>the size of bitstream buffer</desc>
+		<default>0x200000</default>
+	</option>
+
+	<option>
+		<name>ib_buf_addr</name>
+		<ctype>int</ctype>
+		<has_arg>required_argument</has_arg>
+		<usage>--ib_buf_addr number</usage>
+		<desc>the address of inband command buffer</desc>
+		<default>0</default>
+	</option>
+
+	<option>
+		<name>ib_buf_size</name>
+		<ctype>int</ctype>
+		<has_arg>required_argument</has_arg>
+		<usage>--ib_buf_size number</usage>
+		<desc>the size of inband command buffer</desc>
+		<default>0x40000</default>
+	</option>
+
+	<option>
+		<name>verbose</name>
+		<ctype>char</ctype>
+		<has_arg>no_argument</has_arg>
+		<usage>-v, --verbose</usage>
+		<desc>enable verbose log</desc>
+	</option>
+
+	<option>
+		<name>import_dmabuf</name>
+		<ctype>char</ctype>
+		<has_arg>no_argument</has_arg>
+		<usage>--import_dmabuf</usage>
+		<desc>import dmabuf</desc>
+	</option>
+
+</options>
+
+</root>

@@ -569,6 +569,7 @@ static int check_reset_complete (
 
 	/* if reset finished and it's still not enabled -- handoff */
 	if (!(port_status & PORT_PE)) {
+		struct device_node *of_node;
 
 		/* with integrated TT, there's nobody to hand it to! */
 		if (ehci_is_TDI(ehci)) {
@@ -576,6 +577,21 @@ static int check_reset_complete (
 				"Failed to enable port %d on root hub TT\n",
 				index+1);
 			return port_status;
+		}
+
+		of_node = ehci_to_hcd(ehci)->self.controller->of_node;
+		if (of_node &&
+			of_device_is_compatible(of_node, "lge,lg115x-ehci")) {
+
+			mdelay(5);
+			port_status = ehci_readl(ehci, status_reg);
+
+			/* handoff only if it's still connected after a delay */
+			if (!(port_status & PORT_CONNECT)) {
+				ehci_info (ehci, "%s, discon'ed, status %06x\n",
+					__func__, port_status);
+				return port_status;
+			}
 		}
 
 		ehci_dbg (ehci, "port %d full speed --> companion\n",
@@ -868,13 +884,21 @@ int ehci_hub_control(
 ) {
 	struct ehci_hcd	*ehci = hcd_to_ehci (hcd);
 	int		ports = HCS_N_PORTS (ehci->hcs_params);
-	u32 __iomem	*status_reg = &ehci->regs->port_status[
-				(wIndex & 0xff) - 1];
-	u32 __iomem	*hostpc_reg = &ehci->regs->hostpc[(wIndex & 0xff) - 1];
+	u32 __iomem	*status_reg, *hostpc_reg;
 	u32		temp, temp1, status;
 	unsigned long	flags;
 	int		retval = 0;
 	unsigned	selector;
+
+	/*
+	 * Avoid underflow while calculating (wIndex & 0xff) - 1.
+	 * The compiler might deduce that wIndex can never be 0 and then
+	 * optimize away the tests for !wIndex below.
+	 */
+	temp = wIndex & 0xff;
+	temp -= (temp > 0);
+	status_reg = &ehci->regs->port_status[temp];
+	hostpc_reg = &ehci->regs->hostpc[temp];
 
 	/*
 	 * FIXME:  support SetPortFeatures USB_PORT_FEAT_INDICATOR.

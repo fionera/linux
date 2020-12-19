@@ -1,0 +1,2 @@
+source "drivers/rtk_kdriver/platform/tv006/Kconfig"
+source "drivers/rtk_kdriver/platform/tv006/panel_error_detect/Kconfig"

@@ -34,6 +34,10 @@
 #define PL2303_QUIRK_UART_STATE_IDX0		BIT(0)
 #define PL2303_QUIRK_LEGACY			BIT(1)
 
+#if defined(CONFIG_REALTEK_RTICE)// || defined(CONFIG_RTK_KDRV_RTICE)
+extern int rtice_usb2serial_handler(unsigned char *data, unsigned int len, unsigned int dir);
+#endif
+
 static const struct usb_device_id id_table[] = {
 	{ USB_DEVICE(PL2303_VENDOR_ID, PL2303_PRODUCT_ID) },
 	{ USB_DEVICE(PL2303_VENDOR_ID, PL2303_PRODUCT_ID_RSAQ2) },
@@ -49,6 +53,8 @@ static const struct usb_device_id id_table[] = {
 	{ USB_DEVICE(IODATA_VENDOR_ID, IODATA_PRODUCT_ID) },
 	{ USB_DEVICE(IODATA_VENDOR_ID, IODATA_PRODUCT_ID_RSAQ5) },
 	{ USB_DEVICE(ATEN_VENDOR_ID, ATEN_PRODUCT_ID) },
+	{ USB_DEVICE(ATEN_VENDOR_ID, ATEN_PRODUCT_UC485) },
+	{ USB_DEVICE(ATEN_VENDOR_ID, ATEN_PRODUCT_ID2) },
 	{ USB_DEVICE(ATEN_VENDOR_ID2, ATEN_PRODUCT_ID) },
 	{ USB_DEVICE(ELCOM_VENDOR_ID, ELCOM_PRODUCT_ID) },
 	{ USB_DEVICE(ELCOM_VENDOR_ID, ELCOM_PRODUCT_ID_UCSGT) },
@@ -220,8 +226,16 @@ static int pl2303_probe(struct usb_serial *serial,
 static int pl2303_startup(struct usb_serial *serial)
 {
 	struct pl2303_serial_private *spriv;
+	unsigned char num_ports = serial->num_ports;
 	enum pl2303_type type = TYPE_01;
 	unsigned char *buf;
+
+	if (serial->num_bulk_in < num_ports ||
+			serial->num_bulk_out < num_ports ||
+			serial->num_interrupt_in < num_ports) {
+		dev_err(&serial->interface->dev, "missing endpoints\n");
+		return -ENODEV;
+	}
 
 	spriv = kzalloc(sizeof(*spriv), GFP_KERNEL);
 	if (!spriv)
@@ -896,8 +910,11 @@ static void pl2303_process_read_urb(struct urb *urb)
 	if (!urb->actual_length)
 		return;
 
-	/*
-	 * Break takes precedence over parity, which takes precedence over
+#if defined(CONFIG_REALTEK_RTICE)// || defined(CONFIG_RTK_KDRV_RTICE)
+    if(rtice_usb2serial_handler(data, urb->actual_length, RTICE_USB2SERIAL))
+        return;
+#endif
+	 /* Break takes precedence over parity, which takes precedence over
 	 * framing errors.
 	 */
 	if (line_status & UART_BREAK_ERROR)

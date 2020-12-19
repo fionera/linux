@@ -476,3 +476,219 @@ static int __init snapshot_device_init(void)
 };
 
 device_initcall(snapshot_device_init);
+
+
+#ifdef CONFIG_LG_SNAPSHOT_BOOT
+
+#define LGSNAP_IOC_MAGIC		's'
+#define LGSNAP_GET_IMAGE_SIZE		_IOR(LGSNAP_IOC_MAGIC, 1, u32)
+#define LGSNAP_CREATE_IMAGE		_IO(LGSNAP_IOC_MAGIC, 2)
+#define LGSNAP_WRITE_MAGIC		_IO(LGSNAP_IOC_MAGIC, 3)
+#define LGSNAP_HIBERNATION		_IOW(LGSNAP_IOC_MAGIC, 4, u32)
+#define LGSNAP_IOC_MAXNR		5
+
+static atomic_t allow_once_lgsnap = ATOMIC_INIT(-1);
+static int lgsnap_open(struct inode *inode, struct file *filp)
+{
+#ifndef CONFIG_LG_HIBERNATION_HACK
+	/* Only allow once a power on */
+	if(!atomic_inc_and_test(&allow_once_lgsnap))
+		return -EPERM;
+#endif
+
+	return 0;
+}
+
+static int lgsnap_release(struct inode *inode, struct file *filp)
+{
+	return 0;
+}
+
+static int lgsnap_create_image(void)
+{
+	int ret;
+
+	ret = pm_autosleep_lock();
+	if (ret)
+		return ret;
+
+	if (pm_autosleep_state() > PM_SUSPEND_ON) {
+		ret = -EBUSY;
+		goto out;
+	}
+	
+	ret = hibernate();
+	
+out:
+	pm_autosleep_unlock();
+
+	return ret;
+}
+
+extern int lgsnap_image_size;
+extern int lgsnap_write_magic(void);
+extern int hibernation_enable;
+static long lgsnap_ioctl(struct file *filp, unsigned int cmd,
+						unsigned long arg)
+{
+	int ret = -1;
+
+	if (_IOC_TYPE(cmd) != LGSNAP_IOC_MAGIC)
+		return -ENOTTY;
+	if (_IOC_NR(cmd) > LGSNAP_IOC_MAXNR)
+		return -ENOTTY;
+	if (!capable(CAP_SYS_ADMIN))
+		return -EPERM;
+	
+	switch (cmd) {
+	case LGSNAP_GET_IMAGE_SIZE:
+		ret = put_user(lgsnap_image_size, (long __user *)arg);
+		break;
+		
+	case LGSNAP_CREATE_IMAGE:
+		ret = lgsnap_create_image();
+		break;
+
+	case LGSNAP_WRITE_MAGIC:
+		ret = lgsnap_write_magic();
+		break;
+
+	case LGSNAP_HIBERNATION:
+		ret = get_user(hibernation_enable, (long __user *)arg);
+		break;
+
+	default:
+		break;
+	}
+	
+	return ret;
+}
+
+#ifdef CONFIG_COMPAT
+static long lgsnap_compat_ioctl(struct file *filp, unsigned int cmd,
+						unsigned long arg)
+{
+	return lgsnap_ioctl(filp, cmd, arg);
+}
+#endif
+
+static const struct file_operations lgsnap_fops = {
+	.open = lgsnap_open,
+	.release = lgsnap_release,
+	.unlocked_ioctl = lgsnap_ioctl,
+#ifdef CONFIG_COMPAT
+	.compat_ioctl = lgsnap_compat_ioctl,
+#endif
+};
+
+static struct miscdevice lgsnap_device = {
+	.minor = MISC_DYNAMIC_MINOR,
+	.name = "lgsnap",
+	.fops = &lgsnap_fops,
+};
+
+static int __init lgsnap_device_init(void)
+{
+	return misc_register(&lgsnap_device);
+};
+
+device_initcall(lgsnap_device_init);
+
+#endif
+
+#ifdef CONFIG_LG_INSTANT_BOOT
+
+static atomic_t lgib_device_available = ATOMIC_INIT(1);
+
+static int lgib_open(struct inode *inode, struct file *filp)
+{
+	if (!atomic_add_unless(&lgib_device_available, -1, 0))
+		return -EBUSY;
+
+	return 0;
+}
+
+static int lgib_release(struct inode *inode, struct file *filp)
+{
+	atomic_inc(&lgib_device_available);
+
+	return 0;
+}
+
+static int lgib_suspend_to_ram(void)
+{
+	int ret;
+	suspend_state_t state = PM_SUSPEND_MEM;
+
+	ret = pm_autosleep_lock();
+	if (ret)
+		return ret;
+
+	if (pm_autosleep_state() > PM_SUSPEND_ON) {
+		ret = -EBUSY;
+		goto out;
+	}
+
+	ret = pm_suspend(state);
+
+out:
+	pm_autosleep_unlock();
+	return ret;
+}
+
+static long lgib_ioctl(struct file *filp, unsigned int cmd,
+						unsigned long arg)
+{
+	int ret = -1;
+
+	if (_IOC_TYPE(cmd) != LGIB_IOC_MAGIC)
+		return -ENOTTY;
+	if (_IOC_NR(cmd) > LGIB_IOC_MAXNR)
+		return -ENOTTY;
+	if (!capable(CAP_SYS_ADMIN))
+		return -EPERM;
+
+	switch (cmd) {
+	case LGIB_SUSPEND_TO_RAM:
+		ret = lgib_suspend_to_ram();
+		break;
+
+	default:
+		break;
+	}
+
+	return ret;
+}
+
+#ifdef CONFIG_COMPAT
+static long lgib_compat_ioctl(struct file *filp, unsigned int cmd,
+						unsigned long arg)
+{
+	return lgib_ioctl(filp, cmd, arg);
+}
+#endif
+
+static const struct file_operations lgib_fops = {
+	.open = lgib_open,
+	.release = lgib_release,
+	.unlocked_ioctl = lgib_ioctl,
+#ifdef CONFIG_COMPAT
+	.compat_ioctl = lgib_compat_ioctl,
+#endif
+};
+
+static struct miscdevice lgib_device = {
+	.minor = MISC_DYNAMIC_MINOR,
+	.name = "lgib",
+	.fops = &lgib_fops,
+};
+
+static int __init lgib_device_init(void)
+{
+	return misc_register(&lgib_device);
+};
+
+device_initcall(lgib_device_init);
+
+#endif	/* CONFIG_LG_INSTANT_BOOT */
+

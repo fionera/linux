@@ -57,6 +57,13 @@ config USB_XHCI_RCAR
 	  Say 'Y' to enable the support for the xHCI host controller
 	  found in Renesas R-Car ARM SoCs.
 
+config USB_TYPE_C
+	bool "Enable USB Type c support"
+	select USB_XHCI_PLATFORM
+	default n
+	---help---
+	  Say 'Y' to enable the support for the type c functionality.
+
 endif # USB_XHCI_HCD
 
 config USB_EHCI_HCD

@@ -1,0 +1,20 @@
+/*
+ * Copyright (c) 2018 Jias Huang <jias_huang@realtek.com>
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ */
+
+#ifndef __VDEC_OUT_H__
+#define __VDEC_OUT_H__
+
+const vcodec_pixfmt_t* vdec_getOutPixelFormat(u32 pixelformat);
+const vcodec_pixfmt_t* vdec_getOutPixelFormatByIndex(int index);
+
+#endif

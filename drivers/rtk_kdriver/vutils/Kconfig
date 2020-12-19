@@ -1,0 +1,3 @@
+config RTK_KDRV_VUTILS
+	depends on RTK_KDRV_RPC
+	tristate

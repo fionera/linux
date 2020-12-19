@@ -38,6 +38,7 @@
 
 struct mtd_partition {
 	const char *name;		/* identifier string */
+	char *part_type;		/* type string */ //Add by andyteng 0921-2012
 	uint64_t size;			/* partition size */
 	uint64_t offset;		/* offset within the master MTD space */
 	uint32_t mask_flags;		/* master MTD flags to mask out for this partition */

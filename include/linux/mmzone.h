@@ -41,33 +41,11 @@ enum {
 	MIGRATE_RECLAIMABLE,
 	MIGRATE_PCPTYPES,	/* the number of types on the pcp lists */
 	MIGRATE_HIGHATOMIC = MIGRATE_PCPTYPES,
-#ifdef CONFIG_CMA
-	/*
-	 * MIGRATE_CMA migration type is designed to mimic the way
-	 * ZONE_MOVABLE works.  Only movable pages can be allocated
-	 * from MIGRATE_CMA pageblocks and page allocator never
-	 * implicitly change migration type of MIGRATE_CMA pageblock.
-	 *
-	 * The way to use it is to change migratetype of a range of
-	 * pageblocks to MIGRATE_CMA which can be done by
-	 * __free_pageblock_cma() function.  What is important though
-	 * is that a range of pageblocks must be aligned to
-	 * MAX_ORDER_NR_PAGES should biggest page be bigger then
-	 * a single pageblock.
-	 */
-	MIGRATE_CMA,
-#endif
 #ifdef CONFIG_MEMORY_ISOLATION
 	MIGRATE_ISOLATE,	/* can't allocate from here */
 #endif
 	MIGRATE_TYPES
 };
-
-#ifdef CONFIG_CMA
-#  define is_migrate_cma(migratetype) unlikely((migratetype) == MIGRATE_CMA)
-#else
-#  define is_migrate_cma(migratetype) false
-#endif
 
 #define for_each_migratetype_order(order, type) \
 	for (order = 0; order < MAX_ORDER; order++) \
@@ -144,6 +122,9 @@ enum zone_stat_item {
 	NR_DIRTIED,		/* page dirtyings since bootup */
 	NR_WRITTEN,		/* page writings since bootup */
 	NR_PAGES_SCANNED,	/* pages scanned since last reclaim */
+#if IS_ENABLED(CONFIG_ZSMALLOC)
+	NR_ZSPAGES,		/* allocated in zsmalloc */
+#endif
 #ifdef CONFIG_NUMA
 	NUMA_HIT,		/* allocated in intended node */
 	NUMA_MISS,		/* allocated in non intended node */
@@ -154,9 +135,9 @@ enum zone_stat_item {
 #endif
 	WORKINGSET_REFAULT,
 	WORKINGSET_ACTIVATE,
+	WORKINGSET_RESTORE,
 	WORKINGSET_NODERECLAIM,
 	NR_ANON_TRANSPARENT_HUGEPAGES,
-	NR_FREE_CMA_PAGES,
 	NR_VM_ZONE_STAT_ITEMS };
 
 /*
@@ -214,10 +195,12 @@ struct zone_reclaim_stat {
 };
 
 struct lruvec {
-	struct list_head lists[NR_LRU_LISTS];
-	struct zone_reclaim_stat reclaim_stat;
+	struct list_head		lists[NR_LRU_LISTS];
+	struct zone_reclaim_stat	reclaim_stat;
+	/* Evictions & activations on the inactive file list */
+	atomic_long_t			inactive_age;
 #ifdef CONFIG_MEMCG
-	struct zone *zone;
+	struct zone			*zone;
 #endif
 };
 
@@ -272,6 +255,9 @@ struct per_cpu_pageset {
 #endif /* !__GENERATING_BOUNDS.H */
 
 enum zone_type {
+#if defined(CONFIG_ZONE_ZRAM) && !defined(CONFIG_ZONE_ZRAM_DISABLE_FALLBACK)
+	ZONE_ZRAM,
+#endif
 #ifdef CONFIG_ZONE_DMA
 	/*
 	 * ZONE_DMA is used when there are devices that are not able
@@ -319,6 +305,15 @@ enum zone_type {
 	ZONE_HIGHMEM,
 #endif
 	ZONE_MOVABLE,
+#ifdef CONFIG_CMA
+	ZONE_CMA_LOWMEM,
+#ifdef CONFIG_HIGHMEM
+	ZONE_CMA_HIGHMEM,
+#endif
+#endif
+#if defined(CONFIG_ZONE_ZRAM) && defined(CONFIG_ZONE_ZRAM_DISABLE_FALLBACK)
+	ZONE_ZRAM,
+#endif
 #ifdef CONFIG_ZONE_DEVICE
 	ZONE_DEVICE,
 #endif
@@ -492,9 +487,6 @@ struct zone {
 	spinlock_t		lru_lock;
 	struct lruvec		lruvec;
 
-	/* Evictions & activations on the inactive file list */
-	atomic_long_t		inactive_age;
-
 	/*
 	 * When free pages are below this point, additional steps are taken
 	 * when reading the number of free pages to avoid per-cpu counter
@@ -544,6 +536,7 @@ enum zone_flags {
 					 * many pages under writeback
 					 */
 	ZONE_FAIR_DEPLETED,		/* fair zone policy batch depleted */
+	ZONE_ALLOC_LOCKED,		/* exclusive access while migrating */
 };
 
 static inline unsigned long zone_end_pfn(const struct zone *zone)
@@ -688,6 +681,7 @@ typedef struct pglist_data {
 	 * is the first PFN that needs to be initialised.
 	 */
 	unsigned long first_deferred_pfn;
+	unsigned long static_init_size;
 #endif /* CONFIG_DEFERRED_STRUCT_PAGE_INIT */
 } pg_data_t;
 
@@ -759,6 +753,8 @@ static inline struct zone *lruvec_zone(struct lruvec *lruvec)
 #endif
 }
 
+extern unsigned long lruvec_lru_size(struct lruvec *lruvec, enum lru_list lru);
+
 #ifdef CONFIG_HAVE_MEMORY_PRESENT
 void memory_present(int nid, unsigned long start, unsigned long end);
 #else
@@ -798,11 +794,75 @@ static inline int zone_movable_is_highmem(void)
 }
 #endif
 
+#ifdef CONFIG_ZONE_ZRAM
+static inline int is_zone_zram_idx(enum zone_type idx)
+{
+	if (idx == ZONE_ZRAM)
+		return 1;
+
+	return 0;
+}
+
+static inline int is_zone_zram(struct zone *zone)
+{
+	int zone_idx = zone_idx(zone);
+
+	return is_zone_zram_idx(zone_idx);
+}
+
+static inline int zone_zram_is_highmem(enum zone_type idx)
+{
+#ifdef CONFIG_HAVE_MEMBLOCK_NODE_MAP
+	return TRUE;
+#else
+  #ifdef CONFIG_ZONE_ZRAM
+    return idx == ZONE_ZRAM;
+  #else
+    return 0;
+  #endif
+#endif
+}
+#endif
+
+static inline int is_zone_cma_idx(enum zone_type idx)
+{
+#ifdef CONFIG_CMA
+	if (idx == ZONE_CMA_LOWMEM)
+		return 1;
+#ifdef CONFIG_HIGHMEM
+	if (idx == ZONE_CMA_HIGHMEM)
+		return 1;
+#endif
+#endif
+
+	return 0;
+}
+
+static inline int is_zone_cma(struct zone *zone)
+{
+	int zone_idx = zone_idx(zone);
+
+	return is_zone_cma_idx(zone_idx);
+}
+
+static inline int zone_cma_is_highmem(enum zone_type idx)
+{
+#if defined(CONFIG_CMA) && defined(CONFIG_HIGHMEM)
+	return idx == ZONE_CMA_HIGHMEM;
+#endif
+	return 0;
+}
+
 static inline int is_highmem_idx(enum zone_type idx)
 {
 #ifdef CONFIG_HIGHMEM
 	return (idx == ZONE_HIGHMEM ||
-		(idx == ZONE_MOVABLE && zone_movable_is_highmem()));
+		(idx == ZONE_MOVABLE && zone_movable_is_highmem()) ||
+		(is_zone_cma_idx(idx) && zone_cma_is_highmem(idx))
+		#ifdef CONFIG_ZONE_ZRAM
+		|| (idx == ZONE_ZRAM && zone_zram_is_highmem(idx))
+		#endif
+        );
 #else
 	return 0;
 #endif
@@ -817,10 +877,7 @@ static inline int is_highmem_idx(enum zone_type idx)
 static inline int is_highmem(struct zone *zone)
 {
 #ifdef CONFIG_HIGHMEM
-	int zone_off = (char *)zone - (char *)zone->zone_pgdat->node_zones;
-	return zone_off == ZONE_HIGHMEM * sizeof(*zone) ||
-	       (zone_off == ZONE_MOVABLE * sizeof(*zone) &&
-		zone_movable_is_highmem());
+	return is_highmem_idx(zone_idx(zone));
 #else
 	return 0;
 #endif
@@ -831,6 +888,11 @@ struct ctl_table;
 int min_free_kbytes_sysctl_handler(struct ctl_table *, int,
 					void __user *, size_t *, loff_t *);
 extern int sysctl_lowmem_reserve_ratio[MAX_NR_ZONES-1];
+#ifdef CONFIG_ZONE_ZRAM
+extern int sysctl_lowmem_reserve_ratio_has_zone_zram[MAX_NR_ZONES-1];
+int min_zone_zram_kbytes_sysctl_handler(struct ctl_table *, int,
+					void __user *, size_t *, loff_t *);
+#endif
 int lowmem_reserve_ratio_sysctl_handler(struct ctl_table *, int,
 					void __user *, size_t *, loff_t *);
 int percpu_pagelist_fraction_sysctl_handler(struct ctl_table *, int,

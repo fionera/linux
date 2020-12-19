@@ -1612,6 +1612,13 @@ config RTC_DRV_XGENE
 	  This driver can also be built as a module, if so, the module
 	  will be called "rtc-xgene".
 
+config RTC_DRV_RTK
+	tristate "Realtek RTC driver support"
+	depends on HAS_IOMEM
+	depends on OF
+	help
+	   Realtek RTC driver support
+
 comment "HID Sensor RTC drivers"
 
 config RTC_DRV_HID_SENSOR_TIME

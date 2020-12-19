@@ -112,6 +112,10 @@ ENDPROC(cpu_resume_mmu)
 	.popsection
 cpu_resume_after_mmu:
 	bl	cpu_init		@ restore the und/abt/irq banked regs
+#ifdef CONFIG_KASAN
+	mov	r0, sp
+	bl	kasan_unpoison_remaining_stack
+#endif
 	mov	r0, #0			@ return zero on success
 	ldmfd	sp!, {r4 - r11, pc}
 ENDPROC(cpu_resume_after_mmu)
@@ -174,3 +178,32 @@ mpidr_hash_ptr:
 	.type	sleep_save_sp, #object
 ENTRY(sleep_save_sp)
 	.space	SLEEP_SAVE_SP_SZ		@ struct sleep_save_sp
+
+#ifdef CONFIG_HIBERNATION
+ENTRY(swsusp_arch_resume)
+	b	cpu_resume
+ENDPROC(swsusp_arch_resume)
+#endif
+
+#ifdef CONFIG_LG_SNAPSHOT_BOOT
+ENTRY(swsusp_arch_resume_restore_nosave)
+	ldr r0, __nosave_backup_phys
+	ldr r1, __nosave_begin_phys
+	ldr r2, __nosave_end_phys
+1:	ldmia r0!, {r3-r10}
+	stmia r1!, {r3-r10}
+	cmp r1, r2
+	bne 1b
+	b swsusp_arch_resume
+ENDPROC(swsusp_arch_resume_restore_nosave)
+
+	.globl	__nosave_backup_phys
+	.globl	__nosave_begin_phys
+	.globl	__nosave_end_phys
+__nosave_backup_phys:
+	.space	4
+__nosave_begin_phys:
+	.space	4
+__nosave_end_phys:
+	.space	4
+#endif

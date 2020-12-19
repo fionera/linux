@@ -56,6 +56,10 @@ static bool has_ossr;
 /* Maximum supported watchpoint length. */
 static u8 max_watchpoint_len;
 
+#if defined(CONFIG_REALTEK_WATCHPOINT) || defined(CONFIG_RTK_KDRV_WATCHPOINT)
+static struct arch_hw_breakpoint ginfo[1];
+#endif
+
 #define READ_WB_REG_CASE(OP2, M, VAL)			\
 	case ((OP2 << 4) + M):				\
 		ARM_DBG_READ(c0, c ## M, OP2, VAL);	\
@@ -136,7 +140,7 @@ static void write_wb_reg(int n, u32 val)
 /* Determine debug architecture. */
 static u8 get_debug_arch(void)
 {
-	u32 didr;
+	u32 didr, ver;
 
 	/* Do we implement the extended CPUID interface? */
 	if (((read_cpuid_id() >> 16) & 0xf) != 0xf) {
@@ -146,6 +150,11 @@ static u8 get_debug_arch(void)
 	}
 
 	ARM_DBG_READ(c0, c0, 0, didr);
+
+    ver = (didr >> 16) & 0xf;
+    if (ver >= ARM_DEBUG_ARCH_V8)
+        return ARM_DEBUG_ARCH_V8;
+
 	return (didr >> 16) & 0xf;
 }
 
@@ -387,6 +396,56 @@ int arch_install_hw_breakpoint(struct perf_event *bp)
 	return 0;
 }
 
+#if defined(CONFIG_REALTEK_WATCHPOINT) || defined(CONFIG_RTK_KDRV_WATCHPOINT)
+int arch_install_hw_breakpoint1(struct arch_hw_breakpoint *info)
+{
+	int val_base, ctrl_base, ret = 0;
+	u32 addr, ctrl;
+	
+	/* Ensure that we are in monitor mode and halting mode is disabled. */
+	ret = enable_monitor_mode();
+
+	if (ret)
+		goto out;
+
+	addr = info->address;
+	ctrl = encode_ctrl_reg(info->ctrl) | 0x1;
+
+	if (info->ctrl.type == ARM_BREAKPOINT_EXECUTE) {
+		/* Breakpoint */
+		/* to be implement */
+		pr_err("install breakpoint execute, to be implement\n");
+		ret = -EINVAL;
+		goto out;
+	} else {
+		/* Watchpoint */
+		ctrl_base = ARM_BASE_WCR;
+		val_base = ARM_BASE_WVR;
+		pr_debug("install watchpoint\n");
+	}
+
+	/* Override the breakpoint data with the step data. */
+	if (info->step_ctrl.enabled) {
+		addr = info->trigger & ~0x3;
+		ctrl = encode_ctrl_reg(info->step_ctrl);
+		if (info->ctrl.type != ARM_BREAKPOINT_EXECUTE) {
+			ctrl_base = ARM_BASE_BCR + core_num_brps;
+			val_base = ARM_BASE_BVR + core_num_brps;
+			pr_debug("install single step breakpoint, addr=%x, ctrl=%x, num=%d\n", addr, ctrl, core_num_brps);
+		}
+	}
+
+	/* Setup the address register. */
+	write_wb_reg(val_base, addr);
+
+	/* Setup the control register. */
+	write_wb_reg(ctrl_base, ctrl);
+
+out:
+	return ret;
+}
+#endif
+
 void arch_uninstall_hw_breakpoint(struct perf_event *bp)
 {
 	struct arch_hw_breakpoint *info = counter_arch_bp(bp);
@@ -430,6 +489,34 @@ void arch_uninstall_hw_breakpoint(struct perf_event *bp)
 	/* Reset the control register. */
 	write_wb_reg(base + i, 0);
 }
+
+#if defined(CONFIG_REALTEK_WATCHPOINT) || defined(CONFIG_RTK_KDRV_WATCHPOINT)
+void arch_uninstall_hw_breakpoint1(struct arch_hw_breakpoint *info)
+{
+	int base;
+
+	if (info->ctrl.type == ARM_BREAKPOINT_EXECUTE) {
+		/* Breakpoint */
+		/* to be implement */
+		pr_err("uninstall breakpoint execute, to be implement\n");
+		return;
+	} else {
+		/* Watchpoint */
+		base = ARM_BASE_WCR;
+		pr_debug("uninsatll watchpoint\n");
+	}
+
+	/* Ensure that we disable the mismatch breakpoint. */
+	if (info->ctrl.type != ARM_BREAKPOINT_EXECUTE &&
+	    info->step_ctrl.enabled) {
+		base = ARM_BASE_BCR + core_num_brps;
+		pr_debug("uninstall single step breakpoint\n");
+	}
+
+	/* Reset the control register. */
+	write_wb_reg(base, 0);
+}
+#endif
 
 static int get_hbp_len(u8 hbp_len)
 {
@@ -664,6 +751,45 @@ out:
 	return ret;
 }
 
+#if defined(CONFIG_REALTEK_WATCHPOINT) || defined(CONFIG_RTK_KDRV_WATCHPOINT)
+static void watchpoint_handler1(unsigned long addr, unsigned int fsr,
+			       struct pt_regs *regs)
+{
+	struct task_struct *tsk = current;
+	struct arch_hw_breakpoint info[1];
+	u32 ctrl_reg;
+
+	memset(info, 0, sizeof(struct arch_hw_breakpoint));
+
+	rcu_read_lock();
+
+	info->address = read_wb_reg(ARM_BASE_WVR);
+	ctrl_reg = read_wb_reg(ARM_BASE_WCR);
+	decode_ctrl_reg(ctrl_reg, &info->ctrl);
+
+	// backup
+	ginfo->address = info->address;
+	decode_ctrl_reg(ctrl_reg, &ginfo->ctrl);
+
+	pr_debug("watchpoint fired: address = 0x%x\n", info->address);
+
+	/* enable single step */
+	arch_uninstall_hw_breakpoint1(info);
+
+	info->step_ctrl.mismatch = 0;
+	info->step_ctrl.len = ARM_BREAKPOINT_LEN_4;
+	info->step_ctrl.type = ARM_BREAKPOINT_EXECUTE;
+	info->step_ctrl.privilege = info->ctrl.privilege;
+	info->step_ctrl.enabled = 1;
+	info->trigger = instruction_pointer(regs) + 4;
+	
+	arch_install_hw_breakpoint1(info);
+
+	dump_info(regs, tsk);
+	
+	rcu_read_unlock();
+}
+#else
 /*
  * Enable/disable single-stepping over the breakpoint bp at address addr.
  */
@@ -761,7 +887,45 @@ unlock:
 		rcu_read_unlock();
 	}
 }
+#endif
 
+#if defined(CONFIG_REALTEK_WATCHPOINT) || defined(CONFIG_RTK_KDRV_WATCHPOINT)
+/* used for single step */
+static void breakpoint_handler1(unsigned long unknown, struct pt_regs *regs)
+{
+	struct arch_hw_breakpoint info[1];
+	u32 step_ctrl_reg, addr;
+
+	memset(info, 0, sizeof(struct arch_hw_breakpoint));
+
+	rcu_read_lock();
+
+	addr = regs->ARM_pc;
+
+	info->address = read_wb_reg(ARM_BASE_BVR + core_num_brps);
+	if (info->address != (addr & ~0x3))
+		goto mismatch;
+
+	step_ctrl_reg = read_wb_reg(ARM_BASE_BCR + core_num_brps);
+	decode_ctrl_reg(step_ctrl_reg, &info->step_ctrl);
+	info->ctrl.type = ARM_BREAKPOINT_LOAD | ARM_BREAKPOINT_STORE;
+	if ((1 << (addr & 0x3)) & info->step_ctrl.len) {
+		info->trigger = addr;
+		pr_debug("breakpoint fired: address = 0x%x\n", addr);
+	}
+
+	// restore
+	arch_install_hw_breakpoint1(ginfo);
+
+mismatch:
+	if (true/*info->step_ctrl.enabled*/) {
+		arch_uninstall_hw_breakpoint1(info);
+		//info->step_ctrl.enabled = 0;
+	}
+
+	rcu_read_unlock();
+}
+#else
 static void watchpoint_single_step_handler(unsigned long pc)
 {
 	int i;
@@ -846,6 +1010,7 @@ unlock:
 	/* Handle any pending watchpoint single-step breakpoints. */
 	watchpoint_single_step_handler(addr);
 }
+#endif
 
 /*
  * Called from either the Data Abort Handler [watchpoint] or the
@@ -868,12 +1033,20 @@ static int hw_breakpoint_pending(unsigned long addr, unsigned int fsr,
 	/* Perform perf callbacks. */
 	switch (ARM_DSCR_MOE(dscr)) {
 	case ARM_ENTRY_BREAKPOINT:
+#if defined(CONFIG_REALTEK_WATCHPOINT) || defined(CONFIG_RTK_KDRV_WATCHPOINT)
+		breakpoint_handler1(addr, regs);
+#else
 		breakpoint_handler(addr, regs);
+#endif
 		break;
 	case ARM_ENTRY_ASYNC_WATCHPOINT:
 		WARN(1, "Asynchronous watchpoint exception taken. Debugging results may be unreliable\n");
 	case ARM_ENTRY_SYNC_WATCHPOINT:
+#if defined(CONFIG_REALTEK_WATCHPOINT) || defined(CONFIG_RTK_KDRV_WATCHPOINT)
+		watchpoint_handler1(addr, fsr, regs);
+#else
 		watchpoint_handler(addr, fsr, regs);
+#endif
 		break;
 	default:
 		ret = 1; /* Unhandled fault. */
@@ -1066,6 +1239,22 @@ static int __init arch_hw_breakpoint_init(void)
 		return 0;
 	}
 
+	/*
+	 * Scorpion CPUs (at least those in APQ8060) seem to set DBGPRSR.SPD
+	 * whenever a WFI is issued, even if the core is not powered down, in
+	 * violation of the architecture.  When DBGPRSR.SPD is set, accesses to
+	 * breakpoint and watchpoint registers are treated as undefined, so
+	 * this results in boot time and runtime failures when these are
+	 * accessed and we unexpectedly take a trap.
+	 *
+	 * It's not clear if/how this can be worked around, so we blacklist
+	 * Scorpion CPUs to avoid these issues.
+	*/
+	if (read_cpuid_part() == ARM_CPU_PART_SCORPION) {
+		pr_info("Scorpion CPU detected. Hardware breakpoints and watchpoints disabled\n");
+		return 0;
+	}
+
 	has_ossr = core_has_os_save_restore();
 
 	/* Determine how many BRPs/WRPs are available. */
@@ -1097,6 +1286,11 @@ static int __init arch_hw_breakpoint_init(void)
 	pr_info("found %d " "%s" "breakpoint and %d watchpoint registers.\n",
 		core_num_brps, core_has_mismatch_brps() ? "(+1 reserved) " :
 		"", core_num_wrps);
+
+#if defined(CONFIG_REALTEK_WATCHPOINT) || defined(CONFIG_RTK_KDRV_WATCHPOINT)
+//	rtd_outl(0xb805b824, 0xf); // dbgen, niden, spiden, spniden
+	memset(ginfo, 0, sizeof(struct arch_hw_breakpoint));
+#endif
 
 	/* Work out the maximum supported watchpoint length. */
 	max_watchpoint_len = get_max_wp_len();

@@ -329,7 +329,7 @@ static noinline int i2cdev_ioctl_smbus(struct i2c_client *client,
 		unsigned long arg)
 {
 	struct i2c_smbus_ioctl_data data_arg;
-	union i2c_smbus_data temp;
+	union i2c_smbus_data temp = {};
 	int datasize, res;
 
 	if (copy_from_user(&data_arg,
@@ -663,5 +663,5 @@ MODULE_AUTHOR("Frodo Looijaard <frodol@dds.nl> and "
 MODULE_DESCRIPTION("I2C /dev entries driver");
 MODULE_LICENSE("GPL");
 
-module_init(i2c_dev_init);
+subsys_initcall(i2c_dev_init);
 module_exit(i2c_dev_exit);

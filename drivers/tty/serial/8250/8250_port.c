@@ -42,6 +42,9 @@
 #include <asm/irq.h>
 
 #include "8250.h"
+#ifdef CONFIG_ARCH_RTK289X 
+#include <rbus/iso_misc_off_uart_reg.h>
+#endif
 
 /*
  * Debugging.
@@ -53,6 +56,36 @@
 #endif
 
 #define BOTH_EMPTY 	(UART_LSR_TEMT | UART_LSR_THRE)
+
+#if defined(CONFIG_REALTEK_RTICE) || defined(CONFIG_RTK_KDRV_RTICE)
+
+#define UART_NR	CONFIG_SERIAL_8250_NR_UARTS
+
+	extern int rtice_port ;
+	extern int rtice_enable;
+	extern int rtice_early_disable_tx_int;
+
+	extern struct uart_8250_port serial8250_ports[UART_NR];
+
+	extern int rtice_uart_handler(unsigned char SBUF, unsigned int dir);
+
+//int rtice_enable=1;
+//extern int rtice_early_disable_tx_int_flag;
+//extern void serial8250_uart_write_wakeup(struct uart_8250_port* up, int delay);
+
+static void delayed_uart_write_wakeup_fn(struct work_struct *work)
+{
+    struct uart_8250_port *up = (struct uart_8250_port*) container_of(work, struct uart_8250_port, dwork.work);
+    uart_write_wakeup(&up->port);
+}
+
+void serial8250_uart_write_wakeup(struct uart_8250_port* up, int delay)
+{
+    schedule_delayed_work(&up->dwork, delay);
+}
+
+#endif
+
 
 /*
  * Here we define the default xmit fifo size used for each type of UART.
@@ -713,22 +746,16 @@ static int size_fifo(struct uart_8250_port *up)
  */
 static unsigned int autoconfig_read_divisor_id(struct uart_8250_port *p)
 {
-	unsigned char old_dll, old_dlm, old_lcr;
-	unsigned int id;
+	unsigned char old_lcr;
+	unsigned int id, old_dl;
 
 	old_lcr = serial_in(p, UART_LCR);
 	serial_out(p, UART_LCR, UART_LCR_CONF_MODE_A);
+	old_dl = serial_dl_read(p);
+	serial_dl_write(p, 0);
+	id = serial_dl_read(p);
+	serial_dl_write(p, old_dl);
 
-	old_dll = serial_in(p, UART_DLL);
-	old_dlm = serial_in(p, UART_DLM);
-
-	serial_out(p, UART_DLL, 0);
-	serial_out(p, UART_DLM, 0);
-
-	id = serial_in(p, UART_DLL) | serial_in(p, UART_DLM) << 8;
-
-	serial_out(p, UART_DLL, old_dll);
-	serial_out(p, UART_DLM, old_dlm);
 	serial_out(p, UART_LCR, old_lcr);
 
 	return id;
@@ -1084,6 +1111,25 @@ static void autoconfig(struct uart_8250_port *up)
 	 */
 	spin_lock_irqsave(&port->lock, flags);
 
+
+#ifndef CONFIG_REALTEK_FPGA
+#if defined(CONFIG_ARCH_RTKS2B)
+	if (port->membase == (unsigned char *)GET_MAPPED_RBUS_ADDR(U0RBR_THR_DLL_reg))
+		rtd_clearbits(INTERRUPT_INT_CTRL_SCPU_VADDR, BIT(8)); //iso_misc_off_int_scpu_routing _en
+	else if(port->membase == (unsigned char *)GET_MAPPED_RBUS_ADDR(U1RBR_THR_DLL_reg))
+		rtd_clearbits(INTERRUPT_INT_CTRL_SCPU_VADDR, BIT(6));  //iso_misc_int_scpu_routing _en
+#elif defined(CONFIG_ARCH_RTK299S)
+	if (port->membase == (unsigned char *)GET_MAPPED_RBUS_ADDR(U0RBR_THR_DLL_reg)) {
+      rtd_clearbits(0xb8000290, BIT(25)); //iso_misc_off_int_scpu_routing disable
+	}
+#elif defined(CONFIG_ARCH_RTK299O)
+	if (port->membase == (unsigned char *)GET_MAPPED_RBUS_ADDR(U0RBR_THR_DLL_reg)) {
+      rtd_clearbits(0xb8000290, BIT(25)); //iso_misc_off_int_scpu_routing disable
+	}
+#endif
+#endif	//!CONFIG_REALTEK_FPGA
+
+
 	up->capabilities = 0;
 	up->bugs = 0;
 
@@ -1318,6 +1364,13 @@ static void serial8250_start_tx(struct uart_port *port)
 
 	serial8250_rpm_get_tx(up);
 
+#ifdef CONFIG_REALTEK_UART_DMA
+	if(up->rtk_dma) {
+		rtk_serial8250_tx_dma(up);
+		return;
+	}
+#endif
+
 	if (up->dma && !up->dma->tx_dma(up))
 		return;
 
@@ -1329,8 +1382,16 @@ static void serial8250_start_tx(struct uart_port *port)
 			unsigned char lsr;
 			lsr = serial_in(up, UART_LSR);
 			up->lsr_saved_flags |= lsr & LSR_SAVE_FLAGS;
-			if (lsr & UART_LSR_THRE)
+			if (lsr & UART_LSR_THRE){
+
+#if defined(CONFIG_REALTEK_RTICE) || defined(CONFIG_RTK_KDRV_RTICE)
+				if(rtice_early_disable_tx_int == 0)
+					serial8250_tx_chars(up);
+#else
+
 				serial8250_tx_chars(up);
+#endif
+			}
 		}
 	}
 
@@ -1408,9 +1469,16 @@ serial8250_rx_chars(struct uart_8250_port *up, unsigned char lsr)
 	char flag;
 
 	do {
-		if (likely(lsr & UART_LSR_DR))
+		if (likely(lsr & UART_LSR_DR)){
 			ch = serial_in(up, UART_RX);
-		else
+#if defined(CONFIG_REALTEK_RTICE) || defined(CONFIG_RTK_KDRV_RTICE)
+			if (up->port.line == rtice_port && rtice_enable){
+				if (rtice_uart_handler(ch, RTICE_UART))
+					goto ignore_char;
+			}
+#endif
+
+		} else {
 			/*
 			 * Intel 82571 has a Serial Over Lan device that will
 			 * set UART_LSR_BI without setting UART_LSR_DR when
@@ -1419,6 +1487,7 @@ serial8250_rx_chars(struct uart_8250_port *up, unsigned char lsr)
 			 * just force the read character to be 0
 			 */
 			ch = 0;
+		}
 
 		flag = TTY_NORMAL;
 		port->icount.rx++;
@@ -1479,6 +1548,13 @@ void serial8250_tx_chars(struct uart_8250_port *up)
 	struct circ_buf *xmit = &port->state->xmit;
 	int count;
 
+
+#if defined(CONFIG_REALTEK_RTICE) || defined(CONFIG_RTK_KDRV_RTICE)
+	if (up->disable_printk)
+		goto proc_disable_print;
+#endif
+
+
 	if (port->x_char) {
 		serial_out(up, UART_TX, port->x_char);
 		port->icount.tx++;
@@ -1520,6 +1596,17 @@ void serial8250_tx_chars(struct uart_8250_port *up)
 	 */
 	if (uart_circ_empty(xmit) && !(up->capabilities & UART_CAP_RPM))
 		__stop_tx(up);
+
+	return;
+
+#if defined(CONFIG_REALTEK_RTICE) || defined(CONFIG_RTK_KDRV_RTICE)
+proc_disable_print:
+    xmit->tail = xmit->head;        // ignore add data...
+    serial8250_uart_write_wakeup(up, 1);    // wait up tty after 1 jiffies
+    serial8250_stop_tx(&up->port);
+#endif
+
+
 }
 EXPORT_SYMBOL_GPL(serial8250_tx_chars);
 
@@ -1559,8 +1646,24 @@ int serial8250_handle_irq(struct uart_port *port, unsigned int iir)
 	struct uart_8250_port *up = up_to_u8250p(port);
 	int dma_err = 0;
 
+#ifdef CONFIG_REALTEK_UART_DMA
+	unsigned char dma_status = 0;
+	if(up->rtk_dma)
+		dma_status = serial_port_in(port,
+			up->rtk_dma_config.dma_membase_ofst + UART_DMA_INT);
+	if ((iir & UART_IIR_NO_INT)
+		&& (dma_status & UR1_UR_TX_THD) == 0)
+		return 0;
+	if(dma_status & UR1_UR_TX_THD) {
+		serial_port_out(port,
+			up->rtk_dma_config.dma_membase_ofst + UART_DMA_INT,
+				UR1_UR_TX_THD);
+		}
+	
+#else
 	if (iir & UART_IIR_NO_INT)
 		return 0;
+#endif
 
 	spin_lock_irqsave(&port->lock, flags);
 
@@ -1576,10 +1679,35 @@ int serial8250_handle_irq(struct uart_port *port, unsigned int iir)
 			status = serial8250_rx_chars(up, status);
 	}
 	serial8250_modem_status(up);
+#ifdef CONFIG_REALTEK_UART_DMA	
+	if (!up->rtk_dma && (!up->dma || (up->dma && up->dma->tx_err)) &&
+	    (status & UART_LSR_THRE))
+#else
 	if ((!up->dma || (up->dma && up->dma->tx_err)) &&
 	    (status & UART_LSR_THRE))
-		serial8250_tx_chars(up);
+#endif
+	    {
 
+#if defined(CONFIG_REALTEK_RTICE) || defined(CONFIG_RTK_KDRV_RTICE)
+		if(rtice_early_disable_tx_int == 0)
+			serial8250_tx_chars(up);
+#else
+		serial8250_tx_chars(up);
+#endif
+
+	}
+
+#ifdef CONFIG_REALTEK_UART_DMA
+	if((dma_status & UR1_UR_TX_THD) == UR1_UR_TX_THD) {
+#if defined(CONFIG_REALTEK_RTICE) || defined(CONFIG_RTK_KDRV_RTICE)
+	   if(rtice_early_disable_tx_int == 0 && up->rtk_dma)
+		rtk_serial8250_tx_dma(up);
+#else
+		if(up->rtk_dma)
+			rtk_serial8250_tx_dma(up);
+#endif	   
+	}
+#endif
 	spin_unlock_irqrestore(&port->lock, flags);
 	return 1;
 }
@@ -1714,7 +1842,8 @@ static void serial8250_break_ctl(struct uart_port *port, int break_state)
 /*
  *	Wait for transmitter & holding register to empty
  */
-static void wait_for_xmitr(struct uart_8250_port *up, int bits)
+//static
+void wait_for_xmitr(struct uart_8250_port *up, int bits)
 {
 	unsigned int status, tmout = 10000;
 
@@ -1820,6 +1949,12 @@ int serial8250_do_startup(struct uart_port *port)
 	if (!up->capabilities)
 		up->capabilities = uart_config[port->type].flags;
 	up->mcr = 0;
+
+#if defined(CONFIG_REALTEK_RTICE) || defined(CONFIG_RTK_KDRV_RTICE)
+	up->disable_printk = 0;
+	INIT_DELAYED_WORK(&up->dwork, delayed_uart_write_wakeup_fn);
+#endif
+
 
 	if (port->iotype != up->cur_iotype)
 		set_io_from_upio(port);
@@ -2027,6 +2162,17 @@ dont_test_tx_en:
 		}
 	}
 
+#ifdef CONFIG_REALTEK_UART_DMA
+	if(up->rtk_dma_config.dma_membase != NULL) {
+		retval = rtk_serial8250_request_dma(up);
+		if (retval) {
+			pr_warn_ratelimited("ttyS%d - failed to request RTK DMA\n",
+					    serial_index(port));
+			up->rtk_dma = NULL;
+		}
+	}
+#endif
+
 	/*
 	 * Set the IER shadow for rx interrupts but defer actual interrupt
 	 * enable until after the FIFOs are enabled; otherwise, an already-
@@ -2044,6 +2190,33 @@ dont_test_tx_en:
 		inb_p(icp);
 	}
 	retval = 0;
+
+/**initial complete section**/
+#ifndef CONFIG_REALTEK_FPGA
+	#if defined(CONFIG_ARCH_RTKS2B)
+		if (port->membase == (unsigned char *)GET_MAPPED_RBUS_ADDR(U0RBR_THR_DLL_reg))
+			rtd_setbits(INTERRUPT_INT_CTRL_SCPU_VADDR, BIT(8)); //iso_misc_off_int_scpu_routing _en
+		else if(port->membase == (unsigned char *)GET_MAPPED_RBUS_ADDR(U1RBR_THR_DLL_reg))
+			rtd_setbits(INTERRUPT_INT_CTRL_SCPU_VADDR, BIT(6));    //iso_misc_int_scpu_routing _en
+	#elif defined(CONFIG_ARCH_RTK299S)
+		if (port->membase == (unsigned char *)GET_MAPPED_RBUS_ADDR(U0RBR_THR_DLL_reg)) {
+			rtd_clearbits(0xb800029C, BIT(25));  //iso_misc_off_int_kcpu_routing disable
+			rtd_setbits(0xb8000290, BIT(25)); //iso_misc_off_int_scpu_routing enable
+		}
+	#elif defined(CONFIG_ARCH_RTK299O)
+		if (port->membase == (unsigned char *)GET_MAPPED_RBUS_ADDR(U0RBR_THR_DLL_reg)) {
+			rtd_clearbits(0xb800029C, BIT(25));  //iso_misc_off_int_kcpu_routing disable
+			rtd_setbits(0xb8000290, BIT(25)); //iso_misc_off_int_scpu_routing enable
+		}
+	#elif defined(CONFIG_ARCH_RTK289X)
+		if (port->membase == (unsigned char *)GET_MAPPED_RBUS_ADDR(ISO_MISC_OFF_UART_U0RBR_THR_DLL_reg)) {
+         rtd_clearbits(0xb800029C, BIT(25));  //iso_misc_off_int_kcpu_routing disable
+         rtd_setbits(0xb8000290, BIT(25)); //iso_misc_off_int_scpu_routing enable
+      }
+	#endif
+#endif	//!CONFIG_REALTEK_FPGA
+/**initial complete section**/
+
 out:
 	serial8250_rpm_put(up);
 	return retval;
@@ -2069,8 +2242,37 @@ void serial8250_do_shutdown(struct uart_port *port)
 	up->ier = 0;
 	serial_port_out(port, UART_IER, 0);
 
+
+#ifndef CONFIG_REALTEK_FPGA
+	#if defined(CONFIG_ARCH_RTKS2B)
+		if (port->membase == (unsigned char *)GET_MAPPED_RBUS_ADDR(U0RBR_THR_DLL_reg))
+			rtd_clearbits(INTERRUPT_INT_CTRL_SCPU_VADDR, BIT(8)); //iso_misc_off_int_scpu_routing _en
+		else if(port->membase == (unsigned char *)GET_MAPPED_RBUS_ADDR(U1RBR_THR_DLL_reg))
+			rtd_clearbits(INTERRUPT_INT_CTRL_SCPU_VADDR, BIT(6));  //iso_misc_int_scpu_routing _en
+	#elif defined(CONFIG_ARCH_RTK299S)
+		if (port->membase == (unsigned char *)GET_MAPPED_RBUS_ADDR(U0RBR_THR_DLL_reg)) {
+			rtd_clearbits(0xb8000290, BIT(25)); //iso_misc_off_int_scpu_routing disable
+		}
+	#elif defined(CONFIG_ARCH_RTK299O)
+		if (port->membase == (unsigned char *)GET_MAPPED_RBUS_ADDR(U0RBR_THR_DLL_reg)) {
+			rtd_clearbits(0xb8000290, BIT(25)); //iso_misc_off_int_scpu_routing disable
+		}
+	#elif defined(CONFIG_ARCH_RTK289X)
+		if (port->membase == (unsigned char *)GET_MAPPED_RBUS_ADDR(ISO_MISC_OFF_UART_U0RBR_THR_DLL_reg)) {
+         rtd_clearbits(0xb8000290, BIT(25)); //iso_misc_off_int_scpu_routing disable
+      }
+	#endif
+#endif	//!CONFIG_REALTEK_FPGA
+
+
 	if (up->dma)
 		serial8250_release_dma(up);
+
+#ifdef CONFIG_REALTEK_UART_DMA
+	if(up->rtk_dma) {
+		rtk_serial8250_release_dma(up);
+	}
+#endif	
 
 	spin_lock_irqsave(&port->lock, flags);
 	if (port->flags & UPF_FOURPORT) {
@@ -2734,7 +2936,14 @@ serial8250_type(struct uart_port *port)
 		type = 0;
 	return uart_config[type].name;
 }
-
+#ifdef CONFIG_REALTEK_UART_DMA
+void	serial8250_flush_buffer(struct uart_port *port)
+{
+	struct uart_8250_port *up = up_to_u8250p(port);
+	if(up->rtk_dma)
+		rtk_serial8250_dma_flush_buffer(up);
+}
+#endif
 static const struct uart_ops serial8250_pops = {
 	.tx_empty	= serial8250_tx_empty,
 	.set_mctrl	= serial8250_set_mctrl,
@@ -2760,6 +2969,9 @@ static const struct uart_ops serial8250_pops = {
 	.poll_get_char = serial8250_get_poll_char,
 	.poll_put_char = serial8250_put_poll_char,
 #endif
+#ifdef CONFIG_REALTEK_UART_DMA
+	.flush_buffer = serial8250_flush_buffer,
+#endif	
 };
 
 void serial8250_init_port(struct uart_8250_port *up)
@@ -2806,8 +3018,22 @@ static void serial8250_console_putchar(struct uart_port *port, int ch)
 {
 	struct uart_8250_port *up = up_to_u8250p(port);
 
+#if !(defined(CONFIG_REALTEK_RTICE) || defined(CONFIG_RTK_KDRV_RTICE))
+
 	wait_for_xmitr(up, UART_LSR_THRE);
 	serial_port_out(port, UART_TX, ch);
+#else
+	struct circ_buf *xmit = &port->state->xmit;
+	if(up->disable_printk != 1){
+		wait_for_xmitr(up, UART_LSR_THRE);
+		serial_port_out(port, UART_TX, ch);
+	}else{
+		xmit->tail = xmit->head;		// ignore add data...
+		serial8250_uart_write_wakeup(up, 1);	// wait up tty after 1 jiffies
+		serial8250_stop_tx(&up->port);
+	}
+#endif
+
 }
 
 /*
@@ -2871,9 +3097,17 @@ void serial8250_console_write(struct uart_8250_port *up, const char *s,
 		serial8250_console_restore(up);
 		up->canary = 0;
 	}
-
-	uart_console_write(port, s, count, serial8250_console_putchar);
-
+	
+#ifdef CONFIG_REALTEK_UART_DMA
+	if(up->rtk_dma) {
+		rtk_serial8250_dma_console_write(port, s, count);
+	} else {
+		uart_console_write(port, s, count, serial8250_console_putchar);
+	}
+	
+#else
+	uart_console_write(port, s, count, serial8250_console_putchar);	
+#endif
 	/*
 	 *	Finally, wait for transmitter to become empty
 	 *	and restore the IER

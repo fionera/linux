@@ -78,6 +78,39 @@
 
 	__HEAD
 ENTRY(stext)
+#if  defined(CONFIG_RTK_ATF_BOOTING)
+#define MAGIC_TAG1     0x504
+#define MAGIC_TAG2     0x508
+#define MAGIC_TAG3     0x50c
+#define UBOOT_SYNC_TAG 0x528
+
+        mrc   p15, 0, r4, c0, c0, 5
+        lsr   r4, r4, #8
+        and   r4, r4, #3
+        cmp   r4, #1
+        ldr   r5, =#MAGIC_TAG1
+        beq   secondary_core
+        ldr   r5, =#MAGIC_TAG2
+        cmp   r4, #2
+        beq   secondary_core
+        ldr   r5, =#MAGIC_TAG3
+        cmp   r4, #3
+        beq   secondary_core
+        b     master_core
+secondary_core:
+        mov  r4, #0
+        str  r4, [r5]
+secondary_core_loop1:
+        ldr   r4,[r5]
+        cmp   r4,#0
+        beq   secondary_core_loop1
+        mov   pc,r4
+master_core:
+	ldr   r4, =#UBOOT_SYNC_TAG
+	mov   r5, #0
+	str   r5, [r4]
+#endif
+
  ARM_BE8(setend	be )			@ ensure we are in BE8 mode
 
  THUMB(	badr	r9, 1f		)	@ Kernel is always entered in ARM.

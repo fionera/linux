@@ -24,6 +24,8 @@
 #include <linux/swap.h>
 #include "ion_priv.h"
 
+#define DEBUG_NO_USE_PAGEPOOL
+
 static void *ion_page_pool_alloc_pages(struct ion_page_pool *pool)
 {
 	struct page *page = alloc_pages(pool->gfp_mask, pool->order);
@@ -41,6 +43,7 @@ static void ion_page_pool_free_pages(struct ion_page_pool *pool,
 	__free_pages(page, pool->order);
 }
 
+#ifndef DEBUG_NO_USE_PAGEPOOL
 static int ion_page_pool_add(struct ion_page_pool *pool, struct page *page)
 {
 	mutex_lock(&pool->mutex);
@@ -54,6 +57,7 @@ static int ion_page_pool_add(struct ion_page_pool *pool, struct page *page)
 	mutex_unlock(&pool->mutex);
 	return 0;
 }
+#endif
 
 static struct page *ion_page_pool_remove(struct ion_page_pool *pool, bool high)
 {
@@ -79,6 +83,7 @@ struct page *ion_page_pool_alloc(struct ion_page_pool *pool)
 
 	BUG_ON(!pool);
 
+#ifndef DEBUG_NO_USE_PAGEPOOL
 	mutex_lock(&pool->mutex);
 	if (pool->high_count)
 		page = ion_page_pool_remove(pool, true);
@@ -87,6 +92,7 @@ struct page *ion_page_pool_alloc(struct ion_page_pool *pool)
 	mutex_unlock(&pool->mutex);
 
 	if (!page)
+#endif
 		page = ion_page_pool_alloc_pages(pool);
 
 	return page;
@@ -94,12 +100,16 @@ struct page *ion_page_pool_alloc(struct ion_page_pool *pool)
 
 void ion_page_pool_free(struct ion_page_pool *pool, struct page *page)
 {
+#ifndef DEBUG_NO_USE_PAGEPOOL
 	int ret;
+#endif
 
 	BUG_ON(pool->order != compound_order(page));
 
+#ifndef DEBUG_NO_USE_PAGEPOOL
 	ret = ion_page_pool_add(pool, page);
 	if (ret)
+#endif
 		ion_page_pool_free_pages(pool, page);
 }
 

@@ -1601,7 +1601,11 @@ void jfs_flush_journal(struct jfs_log *log, int wait)
 	 */
 	if ((!list_empty(&log->cqueue)) || !list_empty(&log->synclist)) {
 		for (i = 0; i < 200; i++) {	/* Too much? */
+#ifdef CONFIG_LG_JFS_USB_PULLOUT
+			msleep(10);
+#else
 			msleep(250);
+#endif
 			write_special_inodes(log, filemap_fdatawrite);
 			if (list_empty(&log->cqueue) &&
 			    list_empty(&log->synclist))
@@ -2196,6 +2200,9 @@ static void lbmIODone(struct bio *bio)
 	struct lbuf *nextbp, *tail;
 	struct jfs_log *log;
 	unsigned long flags;
+#ifdef CONFIG_LG_JFS_USB_PULLOUT
+ 	struct jfs_sb_info *sbi;
+#endif
 
 	/*
 	 * get back jfs buffer bound to the i/o buffer
@@ -2205,11 +2212,22 @@ static void lbmIODone(struct bio *bio)
 	LCACHE_LOCK(flags);		/* disable+lock */
 
 	bp->l_flag |= lbmDONE;
+#ifdef CONFIG_LG_JFS_USB_PULLOUT
+ 	log = bp->l_log;
+#endif
 
 	if (bio->bi_error) {
 		bp->l_flag |= lbmERROR;
 
 		jfs_err("lbmIODone: I/O error in JFS log");
+#ifdef CONFIG_LG_JFS_USB_PULLOUT
+ 		set_bit(log_INVALID, &log->flag);
+ 		list_for_each_entry(sbi, &log->sb_list, log_list) {
+ 			if (sbi && sbi->sb) {
+ 				sbi->sb->s_flags |= MS_RDONLY;
+ 			}
+ 		}
+ #endif
 	}
 
 	bio_put(bio);
@@ -2244,7 +2262,9 @@ static void lbmIODone(struct bio *bio)
 	INCREMENT(lmStat.pagedone);
 
 	/* update committed lsn */
+#ifndef CONFIG_LG_JFS_USB_PULLOUT
 	log = bp->l_log;
+#endif
 	log->clsn = (bp->l_pn << L2LOGPSIZE) + bp->l_ceor;
 
 	if (bp->l_flag & lbmDIRECT) {

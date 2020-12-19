@@ -37,8 +37,12 @@
  * TASK_SIZE - the maximum size of a user space task.
  * TASK_UNMAPPED_BASE - the lower boundary of the mmap VM area
  */
+#ifndef CONFIG_KASAN
 #define TASK_SIZE		(UL(CONFIG_PAGE_OFFSET) - UL(SZ_16M))
-#define TASK_UNMAPPED_BASE	ALIGN(TASK_SIZE / 3, SZ_16M)
+#else
+#define TASK_SIZE		(UL(CONFIG_PAGE_OFFSET) - UL(SZ_16M) - UL(SZ_512M))
+#endif
+#define TASK_UNMAPPED_BASE	(ALIGN(TASK_SIZE / 3, SZ_16M) + UL(0x01000000))
 
 /*
  * The maximum size of a 26-bit user space task.
@@ -271,6 +275,7 @@ static inline void *phys_to_virt(phys_addr_t x)
  */
 #define __pa(x)			__virt_to_phys((unsigned long)(x))
 #define __va(x)			((void *)__phys_to_virt((phys_addr_t)(x)))
+#define __pa_symbol(x)		__pa(RELOC_HIDE((unsigned long)(x), 0))
 #define pfn_to_kaddr(pfn)	__va((phys_addr_t)(pfn) << PAGE_SHIFT)
 
 extern phys_addr_t (*arch_virt_to_idmap)(unsigned long x);

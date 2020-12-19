@@ -376,16 +376,41 @@ int __handle_domain_irq(struct irq_domain *domain, unsigned int hwirq,
 		irq = irq_find_mapping(domain, hwirq);
 #endif
 
+#ifdef CONFIG_REALTEK_SCHED_LOG
+	if (sched_log_flag & 0x1) {
+		int cpu;
+		extern spinlock_t sched_log_lock;
+
+		cpu = smp_processor_id();
+		spin_lock(&sched_log_lock);
+		log_intr_enter(cpu, irq);
+		spin_unlock(&sched_log_lock);
+	}
+#endif // CONFIG_REALTEK_SCHED_LOG
+
 	/*
 	 * Some hardware gives randomly wrong interrupts.  Rather
 	 * than crashing, do something sensible.
 	 */
 	if (unlikely(!irq || irq >= nr_irqs)) {
+		printk(KERN_ERR "ack bad irq/hwirq :%d/%d\n", irq, hwirq);
 		ack_bad_irq(irq);
 		ret = -EINVAL;
 	} else {
 		generic_handle_irq(irq);
 	}
+
+#ifdef CONFIG_REALTEK_SCHED_LOG
+	if (sched_log_flag & 0x1) {
+		int cpu;
+		extern spinlock_t sched_log_lock;
+
+		cpu = smp_processor_id();
+		spin_lock(&sched_log_lock);
+		log_intr_exit(cpu, irq);
+		spin_unlock(&sched_log_lock);
+	}
+#endif // CONFIG_REALTEK_SCHED_LOG
 
 	irq_exit();
 	set_irq_regs(old_regs);

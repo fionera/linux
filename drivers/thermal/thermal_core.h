@@ -41,6 +41,7 @@ struct thermal_instance {
 	struct thermal_zone_device *tz;
 	struct thermal_cooling_device *cdev;
 	int trip;
+	bool initialized;
 	unsigned long upper;	/* Highest cooling state for this trip point */
 	unsigned long lower;	/* Lowest cooling state for this trip point */
 	unsigned long target;	/* expected cooling state */
@@ -63,6 +64,15 @@ void thermal_gov_step_wise_unregister(void);
 static inline int thermal_gov_step_wise_register(void) { return 0; }
 static inline void thermal_gov_step_wise_unregister(void) {}
 #endif /* CONFIG_THERMAL_GOV_STEP_WISE */
+
+#ifdef CONFIG_RTK_KDRV_THERMAL_GOV_RTK_THERMAL_THROTTLE
+int thermal_gov_rtk_thermal_register(void);
+void thermal_gov_rtk_thermal_unregister(void);
+#else
+static inline int thermal_gov_rtk_thermal_register(void) { return 0; }
+static inline void thermal_gov_rtk_thermal_unregister(void) {}
+#endif /* CONFIG_THERMAL_GOV_STEP_WISE */
+
 
 #ifdef CONFIG_THERMAL_GOV_FAIR_SHARE
 int thermal_gov_fair_share_register(void);

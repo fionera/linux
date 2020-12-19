@@ -19,6 +19,7 @@
 
 #include <linux/gfp.h>
 #include <linux/acpi.h>
+#include <linux/bootmem.h>
 #include <linux/export.h>
 #include <linux/slab.h>
 #include <linux/genalloc.h>
@@ -26,8 +27,13 @@
 #include <linux/dma-contiguous.h>
 #include <linux/vmalloc.h>
 #include <linux/swiotlb.h>
+#ifdef CONFIG_CMA_RTK_ALLOCATOR
+#include <linux/rtkrecord.h>
+#endif
 
 #include <asm/cacheflush.h>
+
+static int swiotlb __read_mostly;
 
 static pgprot_t __get_dma_pgprot(struct dma_attrs *attrs, pgprot_t prot,
 				 bool coherent)
@@ -90,12 +96,14 @@ static void *__dma_alloc_coherent(struct device *dev, size_t size,
 				  dma_addr_t *dma_handle, gfp_t flags,
 				  struct dma_attrs *attrs)
 {
+#ifndef CONFIG_CMA_RTK_ALLOCATOR
 	if (dev == NULL) {
 		WARN_ONCE(1, "Use an actual device structure for DMA allocation\n");
 		return NULL;
 	}
+#endif
 
-	if (IS_ENABLED(CONFIG_ZONE_DMA) &&
+	if (IS_ENABLED(CONFIG_ZONE_DMA) && dev &&
 	    dev->coherent_dma_mask <= DMA_BIT_MASK(32))
 		flags |= GFP_DMA;
 	if (dev_get_cma_area(dev) && gfpflags_allow_blocking(flags)) {
@@ -106,6 +114,15 @@ static void *__dma_alloc_coherent(struct device *dev, size_t size,
 							get_order(size));
 		if (!page)
 			return NULL;
+
+#ifdef CONFIG_CMA_RTK_ALLOCATOR
+		if (rtk_record_insert(page_to_pfn(page) << PAGE_SHIFT,
+							  RTK_SIGNATURE | DRIVER_ID | (size >> PAGE_SHIFT), 0,
+							  __builtin_return_address(0))) {
+			dma_release_from_contiguous(dev, page, size >> PAGE_SHIFT);
+			return NULL;
+		}
+#endif
 
 		*dma_handle = phys_to_dma(dev, page_to_phys(page));
 		addr = page_address(page);
@@ -123,11 +140,25 @@ static void __dma_free_coherent(struct device *dev, size_t size,
 	bool freed;
 	phys_addr_t paddr = dma_to_phys(dev, dma_handle);
 
+#ifndef CONFIG_CMA_RTK_ALLOCATOR
 	if (dev == NULL) {
 		WARN_ONCE(1, "Use an actual device structure for DMA allocation\n");
 		return;
 	}
+#endif
 
+#ifdef CONFIG_CMA_RTK_ALLOCATOR
+	int value;
+
+	value = rtk_record_lookup(paddr, NULL);
+	if ((value & 0xf0000000) != RTK_SIGNATURE) {
+		pr_err("remap: free memory (%llx) signature error...\n", paddr);
+		BUG();
+	}
+	rtk_record_delete(paddr);
+#endif
+
+	size = PAGE_ALIGN(size);
 	freed = dma_release_from_contiguous(dev,
 					phys_to_page(paddr),
 					size >> PAGE_SHIFT);
@@ -341,6 +372,13 @@ static int __swiotlb_get_sgtable(struct device *dev, struct sg_table *sgt,
 	return ret;
 }
 
+static int __swiotlb_dma_supported(struct device *hwdev, u64 mask)
+{
+	if (swiotlb)
+		return swiotlb_dma_supported(hwdev, mask);
+	return 1;
+}
+
 static struct dma_map_ops swiotlb_dma_ops = {
 	.alloc = __dma_alloc,
 	.free = __dma_free,
@@ -354,7 +392,7 @@ static struct dma_map_ops swiotlb_dma_ops = {
 	.sync_single_for_device = __swiotlb_sync_single_for_device,
 	.sync_sg_for_cpu = __swiotlb_sync_sg_for_cpu,
 	.sync_sg_for_device = __swiotlb_sync_sg_for_device,
-	.dma_supported = swiotlb_dma_supported,
+	.dma_supported = __swiotlb_dma_supported,
 	.mapping_error = swiotlb_dma_mapping_error,
 };
 
@@ -366,10 +404,20 @@ static int __init atomic_pool_init(void)
 	void *addr;
 	unsigned int pool_size_order = get_order(atomic_pool_size);
 
-	if (dev_get_cma_area(NULL))
+	if (dev_get_cma_area(NULL)) {
 		page = dma_alloc_from_contiguous(NULL, nr_pages,
 							pool_size_order);
-	else
+#ifdef CONFIG_CMA_RTK_ALLOCATOR
+		if (page) {
+			if (rtk_record_insert(page_to_pfn(page) << PAGE_SHIFT,
+								  RTK_SIGNATURE | DRIVER_ID | nr_pages, 0,
+								  __builtin_return_address(0))) {
+				dma_release_from_contiguous(NULL, page, nr_pages);
+				goto out;
+			}
+		}
+#endif
+	} else
 		page = alloc_pages(GFP_DMA, pool_size_order);
 
 	if (page) {
@@ -513,6 +561,9 @@ EXPORT_SYMBOL(dummy_dma_ops);
 
 static int __init arm64_dma_init(void)
 {
+	if (swiotlb_force || max_pfn > (arm64_dma_phys_limit >> PAGE_SHIFT))
+		swiotlb = 1;
+
 	return atomic_pool_init();
 }
 arch_initcall(arm64_dma_init);

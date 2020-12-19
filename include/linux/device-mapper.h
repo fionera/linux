@@ -109,6 +109,7 @@ typedef int (*dm_iterate_devices_fn) (struct dm_target *ti,
 typedef void (*dm_io_hints_fn) (struct dm_target *ti,
 				struct queue_limits *limits);
 
+typedef void (*dm_slot_free_notify_fn) (void *private, unsigned long index);
 /*
  * Returns:
  *    0: The target can handle the next I/O immediately.
@@ -123,6 +124,8 @@ struct dm_dev {
 	fmode_t mode;
 	char name[16];
 };
+
+dev_t dm_get_dev_t(const char *path);
 
 /*
  * Constructors should call these functions to ensure destination devices
@@ -160,6 +163,7 @@ struct target_type {
 	dm_busy_fn busy;
 	dm_iterate_devices_fn iterate_devices;
 	dm_io_hints_fn io_hints;
+	dm_slot_free_notify_fn slot_free_notify;
 
 	/* For internal device-mapper use. */
 	struct list_head list;

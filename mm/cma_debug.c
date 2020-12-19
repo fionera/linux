@@ -10,9 +10,21 @@
 #include <linux/list.h>
 #include <linux/kernel.h>
 #include <linux/slab.h>
+#include <linux/fs.h>
+#include <linux/sched.h>
+#include <linux/sort.h>
 #include <linux/mm_types.h>
-
+#include <asm/uaccess.h>
 #include "cma.h"
+
+#ifdef CONFIG_CMA_RTK_ALLOCATOR
+#include <linux/rtkrecord.h>
+#include <linux/rtkblueprint.h>
+#include <linux/pageremap.h>
+#include <linux/auth.h>
+
+void *dma_get_allocator(struct device *dev);
+#endif
 
 struct cma_mem {
 	struct hlist_node node;
@@ -21,6 +33,10 @@ struct cma_mem {
 };
 
 static struct dentry *cma_debugfs_root;
+
+static void *va, *uva;
+static void *va1, *uva1;
+static int cnt = 0;
 
 static int cma_debugfs_get(void *data, u64 *val)
 {
@@ -161,6 +177,255 @@ static int cma_alloc_write(void *data, u64 val)
 }
 DEFINE_SIMPLE_ATTRIBUTE(cma_alloc_fops, NULL, cma_alloc_write, "%llu\n");
 
+static ssize_t dvr_cma_read(struct file *file, char __user *buf, size_t len, loff_t *ppos)
+{
+    return 0;
+}
+
+static ssize_t dvr_cma_alloc_write(struct file *file, const char __user *buf, size_t len, loff_t *ppos)
+{
+    char info[64];
+	unsigned long start = 0, size = 0, flag = 0;
+
+    pr_info("davidwang++, write len=%d\n", len);
+
+	if(len > 63){
+		pr_err("function name too long\n");
+		return -EFBIG;
+	}
+
+    if (buf) {
+        if (copy_from_user(info,buf,len))
+            return -EFAULT;
+
+        sscanf(info, "%x", (unsigned int *)&size);
+//        pr_info("dvr_malloc_uncached_specific %lx\n", size);
+        pr_info("pli_malloc %lx\n", size);
+
+        if (cnt == 0) {
+//            va = dvr_malloc_uncached_specific((unsigned int)size, GFP_DCU3, &uva);
+            va = pli_malloc((unsigned int)size, GFP_DCU3);
+            cnt++;
+            pr_info("cma3 alloc: va=%x, uva=%x\n", va, uva);
+        } else if (cnt > 0) {
+//            va1 = dvr_malloc_uncached_specific((unsigned int)size, GFP_DCU3, &uva1);
+            va1 = pli_malloc((unsigned int)size, GFP_DCU3);
+            cnt++;
+            pr_info("cma3 alloc: va1=%x, uva1=%x\n", va1, uva1);
+        }
+    }
+
+	return len;
+}
+
+static ssize_t dvr_cma_free_write(struct file *file, const char __user *buf, size_t len, loff_t *ppos)
+{
+    char info[64];
+	unsigned int tmp_va;
+
+    pr_info("davidwang++, write len=%d\n", len);
+
+	if(len > 63){
+		pr_err("function name too long\n");
+		return -EFBIG;
+	}
+
+    if (buf) {
+        if (copy_from_user(info,buf,len))
+            return -EFAULT;
+
+        sscanf(info, "%x", (unsigned int *)&tmp_va);
+//        pr_info("dvr_free %x\n", tmp_va);
+        pr_info("pli_free %x\n", tmp_va);
+
+        if ((unsigned int) va == tmp_va) {
+//            dvr_free(va);
+            pli_free(va);
+            cnt--;
+            va = NULL; uva = NULL;
+            pr_info("cma3 free : va=%x, uva=%x, cnt=%d\n", va, uva, cnt);
+        } else if ((unsigned int) va1 == tmp_va) {
+//            dvr_free(va1);
+            pli_free(va1);
+            cnt--;
+            va1 = NULL; uva1 = NULL;
+            pr_info("cma3 free : va1=%x, uva1=%x, cnt=%d\n", va1, uva1, cnt);
+        }
+    }
+
+	return len;
+}
+
+static const struct file_operations dvr_cma_alloc_fops = {
+    .read       = dvr_cma_read,
+    .write  = dvr_cma_alloc_write,
+};
+
+static const struct file_operations dvr_cma_free_fops = {
+    .read       = dvr_cma_read,
+    .write  = dvr_cma_free_write,
+};
+
+#ifdef CONFIG_CMA_RTK_ALLOCATOR
+static ssize_t
+cma_addr_read(struct file *file, char __user *buf, size_t len, loff_t *ppos)
+{
+	pr_info("\n\tshow list by address ascending order:\n");
+	list_all_rtk_memory_allocation_sort(list_addr_mem,cmp_addr_ascending_order,NULL);
+	return 0;
+}
+
+static ssize_t cma_addr_write(struct file *file, const char __user *buf, size_t len, loff_t *ppos)
+{
+	char info[64];
+
+	pr_info("\n\tshow list by address range:\n");
+	memset(info,0,sizeof(info));
+	if(len > 63){
+		pr_err("function name too long\n");
+		return -EFBIG;
+	}
+
+	if (copy_from_user(info,buf,len))
+		return -EFAULT;
+
+	list_all_rtk_memory_allocation_sort(list_addr_mem,cmp_addr_ascending_order,info);
+
+	return len;
+
+}
+
+static const struct file_operations cma_addr_fops = {
+	.read		= cma_addr_read,
+	.write	= cma_addr_write,
+};
+
+
+static ssize_t
+cma_caller_read(struct file *file, char __user *buf, size_t len, loff_t *ppos)
+{
+	pr_info("\n\tshow list sort by function caller:\n");
+	list_all_rtk_memory_allocation_sort(list_func_mem,cmp_caller_ascending_order,NULL);
+	return 0;
+}
+
+static ssize_t cma_caller_write(struct file *file, const char __user *buf, size_t len, loff_t *ppos)
+{
+	char info[128];
+
+	pr_info("\n\tshow list by function name key word:\n");
+	memset(info,0,sizeof(info));
+	if(len > 127){
+		pr_err("function name too long\n");
+		return -EFBIG;
+	}
+
+	if (copy_from_user(info,buf,len))
+		return -EFAULT;
+
+	list_all_rtk_memory_allocation_sort(list_func_mem,cmp_caller_ascending_order,info);
+
+	return len;
+}
+
+static const struct file_operations cma_caller_fops = {
+	.read	= cma_caller_read,
+	.write	= cma_caller_write,
+};
+
+static ssize_t
+cma_pid_read(struct file *file, char __user *buf, size_t len, loff_t *ppos)
+{
+	pr_info("\n\tshow list sort by pid:\n");
+	list_all_rtk_memory_allocation_sort(list_pid_mem,cmp_pid_ascending_order,NULL);
+	return 0;
+}
+
+static ssize_t cma_pid_write(struct file *file, const char __user *buf, size_t len, loff_t *ppos)
+{
+	char info[16];
+
+	pr_info("\n\tshow list by pid:\n");
+	memset(info,0,sizeof(info));
+	if(len > 15){
+		pr_err("function name too long\n");
+		return -EFBIG;
+	}
+
+	if (copy_from_user(info,buf,len))
+		return -EFAULT;
+
+	list_all_rtk_memory_allocation_sort(list_pid_mem,cmp_pid_ascending_order,info);
+
+	return len;
+}
+
+static const struct file_operations cma_pid_fops = {
+	.read		= cma_pid_read,
+	.write	= cma_pid_write,
+};
+
+static ssize_t
+cma_size_read(struct file *file, char __user *buf, size_t len, loff_t *ppos)
+{
+	pr_info("\n\tshow list by size descending order:\n");
+	list_all_rtk_memory_allocation_sort(list_mem_size_descending_order,cmp_size_descending_order,NULL);
+	return 0;
+}
+
+static ssize_t cma_size_write(struct file *file, const char __user *buf, size_t len, loff_t *ppos)
+{
+	char info[64];
+
+	pr_info("\n\tshow list by size range:\n");
+	memset(info,0,sizeof(info));
+	if(len > 63){
+		pr_err("function name too long\n");
+		return -EFBIG;
+	}
+
+	if (copy_from_user(info,buf,len))
+		return -EFAULT;
+
+	list_all_rtk_memory_allocation_sort(list_mem_size_descending_order,cmp_size_descending_order,info);
+
+	return len;
+
+}
+
+static const struct file_operations cma_size_fops = {
+	.read		= cma_size_read,
+	.write	= cma_size_write,
+};
+
+static ssize_t
+cma_free_area_read(struct file *file, char __user *buf, size_t len, loff_t *ppos)
+{
+	pr_err("\n\tshow cma free area:\n");
+	pr_err("\n\tDCU1: cache(%08lx)\n", get_page_cache_addr_specific(GFP_DCU1));
+	show_rtkbp((struct mem_bp *)dma_get_allocator(NULL));
+	pr_err("\n\tDCU2: cache(%08lx)\n", get_page_cache_addr_specific(GFP_DCU2));
+	show_rtkbp((struct mem_bp *)dma_get_allocator(auth_dev));
+	return 0;
+}
+
+static const struct file_operations cma_free_area_fops = {
+	.read		= cma_free_area_read,
+};
+
+static void cma_debugfs_add_record(void)
+{
+	struct dentry *tmp;
+
+	tmp = debugfs_create_dir("record", cma_debugfs_root);	
+	debugfs_create_file("list_by_address", S_IRWXUGO, tmp, NULL,&cma_addr_fops);
+	debugfs_create_file("list_by_caller", S_IRWXUGO, tmp, NULL,&cma_caller_fops);
+	debugfs_create_file("list_by_pid", S_IRWXUGO, tmp, NULL,&cma_pid_fops);
+	debugfs_create_file("list_by_size", S_IRWXUGO, tmp, NULL,&cma_size_fops);
+	debugfs_create_file("free_area", S_IRUGO, tmp, NULL,&cma_free_area_fops);
+}
+#endif
+
 static void cma_debugfs_add_one(struct cma *cma, int idx)
 {
 	struct dentry *tmp;
@@ -188,6 +453,9 @@ static void cma_debugfs_add_one(struct cma *cma, int idx)
 
 	u32s = DIV_ROUND_UP(cma_bitmap_maxno(cma), BITS_PER_BYTE * sizeof(u32));
 	debugfs_create_u32_array("bitmap", S_IRUGO, tmp, (u32*)cma->bitmap, u32s);
+
+	debugfs_create_file("cma3_alloc", S_IRWXUGO, tmp, NULL,&dvr_cma_alloc_fops);
+	debugfs_create_file("cma3_free", S_IRWXUGO, tmp, NULL,&dvr_cma_free_fops);
 }
 
 static int __init cma_debugfs_init(void)
@@ -200,6 +468,8 @@ static int __init cma_debugfs_init(void)
 
 	for (i = 0; i < cma_area_count; i++)
 		cma_debugfs_add_one(&cma_areas[i], i);
+
+	cma_debugfs_add_record();
 
 	return 0;
 }

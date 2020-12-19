@@ -29,11 +29,16 @@
 #include <linux/gfp.h>
 #include <linux/memblock.h>
 #include <linux/sort.h>
+#include <linux/of.h>
 #include <linux/of_fdt.h>
 #include <linux/dma-mapping.h>
 #include <linux/dma-contiguous.h>
+#include <linux/pageremap.h>
 #include <linux/efi.h>
 #include <linux/swiotlb.h>
+#include <linux/kexec.h>
+#include <linux/crash_dump.h>
+#include <linux/ekp.h>
 
 #include <asm/fixmap.h>
 #include <asm/memory.h>
@@ -45,8 +50,19 @@
 
 #include "mm.h"
 
+unsigned long cma_high_start = 0;
+unsigned long cma_high_size = 0;
+
+#define MB     (1024*1024)
+#if defined(CONFIG_ZRAM) || defined(CONFIG_DM_CRYPT)
+#define ZRAM_RESERVED_SIZE  128*MB
+#else
+#define ZRAM_RESERVED_SIZE  0
+#endif
+
 phys_addr_t memstart_addr __read_mostly = 0;
 phys_addr_t arm64_dma_phys_limit __read_mostly;
+struct meminfo meminfo;
 
 #ifdef CONFIG_BLK_DEV_INITRD
 static int __init early_initrd(char *p)
@@ -66,6 +82,116 @@ static int __init early_initrd(char *p)
 early_param("initrd", early_initrd);
 #endif
 
+#ifdef CONFIG_KEXEC_CORE
+/*
+ * reserve_crashkernel() - reserves memory for crash kernel
+ *
+ * This function reserves memory area given in "crashkernel=" kernel command
+ * line parameter. The memory reserved is used by dump capture kernel when
+ * primary kernel is crashing.
+ */
+static void __init reserve_crashkernel(void)
+{
+	unsigned long long crash_base, crash_size;
+	int ret;
+
+	ret = parse_crashkernel(boot_command_line, memblock_phys_mem_size(),
+				&crash_size, &crash_base);
+	/* no crashkernel= or invalid value specified */
+	if (ret || !crash_size)
+		return;
+
+	crash_size = PAGE_ALIGN(crash_size);
+
+	if (crash_base == 0) {
+		/* Current arm64 boot protocol requires 2MB alignment */
+		crash_base = memblock_find_in_range(0, ARCH_LOW_ADDRESS_LIMIT,
+				crash_size, SZ_2M);
+		if (crash_base == 0) {
+			pr_warn("cannot allocate crashkernel (size:0x%llx)\n",
+				crash_size);
+			return;
+		}
+	} else {
+		/* User specifies base address explicitly. */
+		if (!memblock_is_region_memory(crash_base, crash_size)) {
+			pr_warn("cannot reserve crashkernel: region is not memory\n");
+			return;
+		}
+
+		if (memblock_is_region_reserved(crash_base, crash_size)) {
+			pr_warn("cannot reserve crashkernel: region overlaps reserved memory\n");
+			return;
+		}
+
+		if (!IS_ALIGNED(crash_base, SZ_2M)) {
+			pr_warn("cannot reserve crashkernel: base address is not 2MB aligned\n");
+			return;
+		}
+	}
+	memblock_reserve(crash_base, crash_size);
+
+	pr_info("crashkernel reserved: 0x%016llx - 0x%016llx (%lld MB)\n",
+		crash_base, crash_base + crash_size, crash_size >> 20);
+
+	crashk_res.start = crash_base;
+	crashk_res.end = crash_base + crash_size - 1;
+}
+#else
+static void __init reserve_crashkernel(void)
+{
+}
+#endif /* CONFIG_KEXEC_CORE */
+
+#ifdef CONFIG_CRASH_DUMP
+static int __init early_init_dt_scan_elfcorehdr(unsigned long node,
+		const char *uname, int depth, void *data)
+{
+	const __be32 *reg;
+	int len;
+
+	if (depth != 1 || strcmp(uname, "chosen") != 0)
+		return 0;
+
+	reg = of_get_flat_dt_prop(node, "linux,elfcorehdr", &len);
+	if (!reg || (len < (dt_root_addr_cells + dt_root_size_cells)))
+		return 1;
+
+	elfcorehdr_addr = dt_mem_next_cell(dt_root_addr_cells, &reg);
+	elfcorehdr_size = dt_mem_next_cell(dt_root_size_cells, &reg);
+
+	return 1;
+}
+/*
+ * reserve_elfcorehdr() - reserves memory for elf core header
+ *
+ * This function reserves the memory occupied by an elf core header
+ * described in the device tree. This region contains all the
+ * information about primary kernel's core image and is used by a dump
+ * capture kernel to access the system memory on primary kernel.
+ */
+static void __init reserve_elfcorehdr(void)
+{
+	of_scan_flat_dt(early_init_dt_scan_elfcorehdr, NULL);
+
+	if (!elfcorehdr_size)
+		return;
+
+	if (memblock_is_region_reserved(elfcorehdr_addr, elfcorehdr_size)) {
+		pr_warn("elfcorehdr is overlapped\n");
+		return;
+	}
+
+	memblock_reserve(elfcorehdr_addr, elfcorehdr_size);
+
+	pr_info("Reserving %lldKB of memory at 0x%llx for elfcorehdr\n",
+		elfcorehdr_size >> 10, elfcorehdr_addr);
+}
+#else
+static void __init reserve_elfcorehdr(void)
+{
+}
+#endif /* CONFIG_CRASH_DUMP */
 /*
  * Return the maximum physical address for ZONE_DMA (DMA_BIT_MASK(32)). It
  * currently assumes that for memory starting above 4G, 32-bit devices will
@@ -73,8 +199,13 @@ early_param("initrd", early_initrd);
  */
 static phys_addr_t max_zone_dma_phys(void)
 {
+#ifdef CONFIG_CMA_RTK_ALLOCATOR
+	phys_addr_t offset = memblock_start_of_DRAM() & GENMASK_ULL(63, 29);
+	return min(offset + (1ULL << 29), memblock_end_of_DRAM());
+#else
 	phys_addr_t offset = memblock_start_of_DRAM() & GENMASK_ULL(63, 32);
 	return min(offset + (1ULL << 32), memblock_end_of_DRAM());
+#endif
 }
 
 static void __init zone_sizes_init(unsigned long min, unsigned long max)
@@ -91,6 +222,14 @@ static void __init zone_sizes_init(unsigned long min, unsigned long max)
 	zone_size[ZONE_DMA] = max_dma - min;
 #endif
 	zone_size[ZONE_NORMAL] = max - max_dma;
+
+#ifdef CONFIG_CMA_RTK_ALLOCATOR
+    if (get_memory_size(GFP_DCU1) >= 0x20000000) {
+		unsigned int platIdx = (get_platform() - PLATFORM_KXLP) + 2; // 0: KxLP, 1: KxL. (2 is base offset)
+        dma_declare_contiguous(NULL, 224*MB - carvedout_buf[CARVEDOUT_CMA_LOW][platIdx], 0x02800000, max_dma);
+    } else
+        dma_declare_contiguous(NULL, get_memory_size(GFP_DCU1) - 72*MB, 0x02000000, max_dma);
+#endif
 
 	memcpy(zhole_size, zone_size, sizeof(zhole_size));
 
@@ -113,6 +252,44 @@ static void __init zone_sizes_init(unsigned long min, unsigned long max)
 			zhole_size[ZONE_NORMAL] -= normal_end - normal_start;
 		}
 	}
+
+#if 0//def CONFIG_CMA_RTK_ALLOCATOR  //deprecated, due to apply zone_cma
+    if (get_memory_size(GFP_DCU2)) {
+        unsigned int platIdx = (get_platform() - PLATFORM_KXLP) + 2; // 0: KxLP, 1: KxL. (2 is base offset)
+        unsigned long high_carvedout_size = carvedout_buf[CARVEDOUT_CMA_HIGH][platIdx];
+
+        if ((zone_size[ZONE_NORMAL] - zhole_size[ZONE_NORMAL]) == (get_memory_size(GFP_DCU2) >> PAGE_SHIFT)) {
+            if (get_memory_size(GFP_DCU2) < (high_carvedout_size + ZRAM_RESERVED_SIZE)) {
+                zone_size[ZONE_MOVABLE] = (get_memory_size(GFP_DCU2) - high_carvedout_size) >> PAGE_SHIFT;
+            } else {
+                zone_size[ZONE_MOVABLE] = (get_memory_size(GFP_DCU2) - (high_carvedout_size + ZRAM_RESERVED_SIZE)) >> PAGE_SHIFT;
+            }
+        } else {
+            zone_size[ZONE_MOVABLE] = (get_memory_size(GFP_DCU2) - high_carvedout_size) >> PAGE_SHIFT;
+        }
+        zone_size[ZONE_NORMAL] = zone_size[ZONE_NORMAL] - zone_size[ZONE_MOVABLE];
+
+        if (zone_size[ZONE_MOVABLE]) {
+           if ( ((zone_size[ZONE_DMA] + zone_size[ZONE_NORMAL]) << PAGE_SHIFT) != cma_high_start ||
+                ((zone_size[ZONE_DMA] + zone_size[ZONE_NORMAL] + zone_size[ZONE_MOVABLE]) << PAGE_SHIFT) != (cma_high_start + cma_high_size) ) {
+               pr_err("not match to cma_high_start (%lx/%lx)\n", cma_high_start, cma_high_start + cma_high_size);
+               BUG();
+           }
+           pr_info("### normal %lx %lx movable %lx %lx ###\n",
+                   zone_size[ZONE_NORMAL], zhole_size[ZONE_NORMAL],
+                   zone_size[ZONE_MOVABLE], zhole_size[ZONE_MOVABLE]);
+        }
+    }
+#else
+    {
+        unsigned int platIdx = (get_platform() - PLATFORM_KXLP) + 2; // 0: KxLP, 1: KxL. (2 is base offset)
+        unsigned long high_carvedout_size = carvedout_buf[CARVEDOUT_CMA_HIGH][platIdx];
+
+        pr_info("### normal %lx %lx movable %lx %lx carvedout %lx ###\n",
+                zone_size[ZONE_NORMAL], zhole_size[ZONE_NORMAL],
+                zone_size[ZONE_MOVABLE], zhole_size[ZONE_MOVABLE], high_carvedout_size);
+    }
+#endif
 
 	free_area_init_node(0, zone_size, min, zhole_size);
 }
@@ -157,6 +334,50 @@ static int __init early_mem(char *p)
 }
 early_param("mem", early_mem);
 
+static void __init parse_memmap_one(char *p)
+{
+	char *oldp;
+	unsigned long start_at, mem_size;
+
+	if (!p)
+		return;
+
+	oldp = p;
+	mem_size = memparse(p, &p);
+	if (p == oldp)
+		return;
+
+	switch (*p) {
+	case '@':
+		start_at = memparse(p + 1, &p);
+		memblock_add(start_at, mem_size);
+		break;
+	case '$':
+		start_at = memparse(p + 1, &p);
+		memblock_reserve(start_at, mem_size);
+		break;
+	default:
+		pr_warn("Unrecognized memmap syntax: %s\n", p);
+		break;
+	}
+}
+
+static int __init parse_memmap_opt(char *str)
+{
+	while (str) {
+		char *k = strchr(str, ',');
+
+		if (k)
+			*k++ = 0;
+
+		parse_memmap_one(str);
+		str = k;
+	}
+
+	return 0;
+}
+early_param("memmap", parse_memmap_opt);
+
 void __init arm64_memblock_init(void)
 {
 	memblock_enforce_memory_limit(memory_limit);
@@ -170,6 +391,13 @@ void __init arm64_memblock_init(void)
 	if (initrd_start)
 		memblock_reserve(__virt_to_phys(initrd_start), initrd_end - initrd_start);
 #endif
+#if defined(CONFIG_ARCH_LG1K) && defined(CONFIG_CMA)
+	{
+		extern void __init lg1k_reserve_cma(void);
+		lg1k_reserve_cma();
+	}
+#endif
+	ekp_reserve_memory();
 
 	early_init_fdt_scan_reserved_mem();
 
@@ -178,7 +406,81 @@ void __init arm64_memblock_init(void)
 		arm64_dma_phys_limit = max_zone_dma_phys();
 	else
 		arm64_dma_phys_limit = PHYS_MASK + 1;
+
+	reserve_crashkernel();
+
+	reserve_elfcorehdr();
+
+#ifndef CONFIG_CMA_RTK_ALLOCATOR
 	dma_contiguous_reserve(arm64_dma_phys_limit);
+#else
+   {
+       unsigned long high_start = 0;
+       unsigned long high_size = 0;
+       unsigned long max = memblock_end_of_DRAM();
+       unsigned long high_carvedout_size, high_carvedout_start;
+       high_carvedout_size = carvedout_buf_query(CARVEDOUT_CMA_HIGH, &high_carvedout_start);
+
+       high_start = arm64_dma_phys_limit;
+       high_size = max - high_start;
+
+       if (get_memory_size(GFP_DCU2)) {
+           if (get_memory_size(GFP_DCU2) < high_carvedout_size) {
+               pr_err("[MM] ERROR! HighMem carved-out memory size is larger than DCU2!! \n");
+               BUG();
+           }
+
+#if defined(CONFIG_ZRAM) || defined(CONFIG_DM_CRYPT)
+  #if 0 //deprecated, due to 1.5G/2GB DDR with same layout
+           if (high_size == get_memory_size(GFP_DCU2)) {
+               if (get_memory_size(GFP_DCU2) < (high_carvedout_size + ZRAM_RESERVED_SIZE)) {
+                   cma_high_size = get_memory_size(GFP_DCU2) - high_carvedout_size;
+               } else {
+                   cma_high_size = get_memory_size(GFP_DCU2) - (high_carvedout_size + ZRAM_RESERVED_SIZE);
+               }
+           } else {
+               cma_high_size = get_memory_size(GFP_DCU2) - high_carvedout_size;
+           }
+           cma_high_start = max - cma_high_size;
+  #else
+           cma_high_start = high_carvedout_start;
+           if (high_carvedout_start < 0x0/*phy_offset*/ + 1024*MB)
+               cma_high_size = 512*MB - ZRAM_RESERVED_SIZE - high_carvedout_size;
+           else
+               cma_high_size = 1024*MB - ZRAM_RESERVED_SIZE - high_carvedout_size;
+  #endif
+#else
+           cma_high_size = get_memory_size(GFP_DCU2) - high_carvedout_size;
+           cma_high_start = max - cma_high_size;
+#endif
+           if (cma_high_size) {
+               pr_info("reserve %08lx - %08lx for high memory cma...\n",
+                       cma_high_start, cma_high_start + cma_high_size);
+               memblock_reserve(cma_high_start, cma_high_size);
+           }
+       }
+   }
+#endif
+
+#if 0 //debug
+    {
+        unsigned long size, addr;
+        size = carvedout_buf_query(CARVEDOUT_GAL, (void *)&addr);
+        pr_info("carvedout gal start(%lx), size(%ld_MB))\n", addr, (size/1024/1024));
+        size = carvedout_buf_query(CARVEDOUT_SCALER_MEMC, (void *)&addr);
+        pr_info("carvedout memc start(%lx), size(%ld_MB))\n", addr, (size/1024/1024));
+        size = carvedout_buf_query(CARVEDOUT_SCALER_MDOMAIN, (void *)&addr);
+        pr_info("carvedout mdomain start(%lx), size(%ld_MB))\n", addr, (size/1024/1024));
+        size = carvedout_buf_query(CARVEDOUT_SCALER_VIP, (void *)&addr);
+        pr_info("carvedout vip start(%lx), size(%ld_KB))\n", addr, (size/1024));
+        size = carvedout_buf_query(CARVEDOUT_SCALER_OD, (void *)&addr);
+        pr_info("carvedout od start(%lx), size(%ld_KB))\n", addr, (size/1024));
+        size = carvedout_buf_query(CARVEDOUT_VDEC_VBM, (void *)&addr);
+        pr_info("carvedout vbm start(%lx), size(%ld_MB))\n", addr, (size/1024/1024));
+        size = carvedout_buf_query(CARVEDOUT_TP, (void *)&addr);
+        pr_info("carvedout tp start(%lx), size(%ld_MB))\n", addr, (size/1024/1024));
+    }
+#endif
 
 	memblock_allow_resize();
 	memblock_dump_all();
@@ -281,7 +583,8 @@ static void __init free_unused_memmap(void)
  */
 void __init mem_init(void)
 {
-	swiotlb_init(1);
+	if (swiotlb_force || max_pfn > (arm64_dma_phys_limit >> PAGE_SHIFT))
+		swiotlb_init(1);
 
 	set_max_mapnr(pfn_to_page(max_pfn) - mem_map);
 
@@ -319,8 +622,8 @@ void __init mem_init(void)
 #endif
 		  MLG(VMALLOC_START, VMALLOC_END),
 #ifdef CONFIG_SPARSEMEM_VMEMMAP
-		  MLG((unsigned long)vmemmap,
-		      (unsigned long)vmemmap + VMEMMAP_SIZE),
+		  MLG(VMEMMAP_START,
+		      VMEMMAP_START + VMEMMAP_SIZE),
 		  MLM((unsigned long)virt_to_page(PAGE_OFFSET),
 		      (unsigned long)virt_to_page(high_memory)),
 #endif

@@ -56,4 +56,16 @@ static inline int get_logical_index(u64 mpidr)
 	return -EINVAL;
 }
 
+static inline bool is_smp(void)
+{
+#ifndef CONFIG_SMP
+        return false;
+#elif defined(CONFIG_SMP_ON_UP)
+        extern unsigned int smp_on_up;
+        return !!smp_on_up;
+#else
+        return true;
+#endif
+}
+
 #endif /* __ASM_SMP_PLAT_H */

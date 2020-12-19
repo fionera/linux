@@ -11,6 +11,9 @@
 #include <linux/interrupt.h>
 #include <linux/suspend.h>
 #include <linux/syscore_ops.h>
+#if defined(CONFIG_ARCH_RTK288O)
+#include <mach/platform.h>
+#endif
 
 #include "internals.h"
 
@@ -46,6 +49,9 @@ void irq_pm_install_action(struct irq_desc *desc, struct irqaction *action)
 	else if (action->flags & IRQF_COND_SUSPEND)
 		desc->cond_suspend_depth++;
 
+#if defined(CONFIG_ARCH_RTK288O)
+	if(get_ic_version() >= VERSION_C)
+#endif
 	WARN_ON_ONCE(desc->no_suspend_depth &&
 		     (desc->no_suspend_depth +
 			desc->cond_suspend_depth) != desc->nr_actions);

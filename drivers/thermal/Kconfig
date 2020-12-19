@@ -53,13 +53,6 @@ config THERMAL_WRITABLE_TRIPS
 	  Say 'Y' here if you would like to allow userspace tools to
 	  change trip temperatures.
 
-choice
-	prompt "Default Thermal governor"
-	default THERMAL_DEFAULT_GOV_STEP_WISE
-	help
-	  This option sets which thermal governor shall be loaded at
-	  startup. If in doubt, select 'step_wise'.
-
 config THERMAL_DEFAULT_GOV_STEP_WISE
 	bool "step_wise"
 	select THERMAL_GOV_STEP_WISE
@@ -90,7 +83,7 @@ config THERMAL_DEFAULT_GOV_POWER_ALLOCATOR
 	  system and device power allocation. This governor can only
 	  operate on cooling devices that implement the power API.
 
-endchoice
+
 
 config THERMAL_GOV_FAIR_SHARE
 	bool "Fair-share thermal governor"
@@ -123,6 +116,7 @@ config THERMAL_GOV_POWER_ALLOCATOR
 	help
 	  Enable this to manage platform thermals by dynamically
 	  allocating and limiting power to devices.
+
 
 config CPU_THERMAL
 	bool "generic cpu cooling support"

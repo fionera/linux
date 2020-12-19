@@ -1,0 +1,6 @@
+config RTK_KDRV_DVO
+	bool "Driver for DirectVO"
+	depends on RTK_KDRV_RPC
+	default n
+	help
+	  Driver for DirectVO

@@ -26,6 +26,7 @@
 #include <linux/dma-mapping.h>
 #include <linux/genalloc.h>
 #include <sound/memalloc.h>
+#include <linux/pageremap.h>
 
 /*
  *
@@ -206,6 +207,15 @@ int snd_dma_alloc_pages(int type, struct device *device, size_t size,
 		snd_malloc_sgbuf_pages(device, size, dmab, NULL);
 		break;
 #endif
+	case SNDRV_RTK_DMA_TYPE:
+        //dmab->area = dma_alloc_coherent(NULL, size, &dmab->addr, GFP_KERNEL);
+        dmab->area = (ulong)dvr_malloc_uncached_specific(size, GFP_DCU1, (void **)&dmab->addr);
+        if(!dmab->area)
+        {
+            pr_err("%d:dvr_malloc_uncached_specific failed!\n",__LINE__);
+        }
+        dmab->addr = dvr_to_phys((void *)dmab->area);
+        break;
 	default:
 		pr_err("snd-malloc: invalid device type %d\n", type);
 		dmab->area = NULL;
@@ -283,6 +293,10 @@ void snd_dma_free_pages(struct snd_dma_buffer *dmab)
 		snd_free_sgbuf_pages(dmab);
 		break;
 #endif
+	case SNDRV_RTK_DMA_TYPE:
+		//dma_free_coherent(NULL, dmab->bytes, dmab->area, dmab->addr);
+        dvr_free((void *) dmab->area);
+		break;
 	default:
 		pr_err("snd-malloc: invalid device type %d\n", dmab->dev.type);
 	}

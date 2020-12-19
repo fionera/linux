@@ -2,7 +2,7 @@
 
 menuconfig SND_ARM
 	bool "ARM sound devices"
-	depends on ARM
+	depends on (ARM || ARM64)
 	default y
 	help
 	  Support for sound devices specific to ARM architectures.
@@ -39,6 +39,18 @@ config SND_PXA2XX_AC97
 	help
 	  Say Y or M if you want to support any AC97 codec attached to
 	  the PXA2xx AC97 interface.
+
+config SND_REALTEK
+	tristate "REALTEK ALSA Driver"
+	depends on REALTEK_RPC
+	depends on REALTEK_AUDIO
+	default n
+
+config SND_KDRV_REALTEK
+	tristate "REALTEK ALSA Driver use kdriver"
+	depends on RTK_KDRV_RPC
+	depends on RTK_KDRV_AUDIO
+	default n
 
 endif	# SND_ARM
 

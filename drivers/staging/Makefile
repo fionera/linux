@@ -29,7 +29,11 @@ obj-$(CONFIG_SPEAKUP)		+= speakup/
 obj-$(CONFIG_TOUCHSCREEN_SYNAPTICS_I2C_RMI4)	+= ste_rmi4/
 obj-$(CONFIG_MFD_NVEC)		+= nvec/
 obj-$(CONFIG_STAGING_RDMA)	+= rdma/
-obj-$(CONFIG_ANDROID)		+= android/
+ifeq ($(CONFIG_ANDROID),y)
+	obj-$(CONFIG_ANDROID)		+= android/
+else
+	obj-$(CONFIG_ION)			+= android/
+endif
 obj-$(CONFIG_STAGING_BOARD)	+= board/
 obj-$(CONFIG_WIMAX_GDM72XX)	+= gdm72xx/
 obj-$(CONFIG_LTE_GDM724X)	+= gdm724x/
@@ -47,3 +51,5 @@ obj-$(CONFIG_FB_TFT)		+= fbtft/
 obj-$(CONFIG_FSL_MC_BUS)	+= fsl-mc/
 obj-$(CONFIG_WILC1000)		+= wilc1000/
 obj-$(CONFIG_MOST)		+= most/
+obj-$(CONFIG_WEBOS)		+= webos/
+obj-$(CONFIG_EKP)		+= ekp/

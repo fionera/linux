@@ -68,6 +68,7 @@
 #include <linux/kallsyms.h>
 #include <linux/stacktrace.h>
 #include <linux/resource.h>
+#include <linux/delayacct.h>
 #include <linux/module.h>
 #include <linux/mount.h>
 #include <linux/security.h>
@@ -954,7 +955,8 @@ static ssize_t environ_read(struct file *file, char __user *buf,
 	int ret = 0;
 	struct mm_struct *mm = file->private_data;
 
-	if (!mm)
+	/* Ensure the process spawned far enough to have an environment. */
+	if (!mm || !mm->env_end)
 		return 0;
 
 	page = (char *)__get_free_page(GFP_TEMPORARY);
@@ -1544,18 +1546,13 @@ static const struct file_operations proc_pid_set_comm_operations = {
 static int proc_exe_link(struct dentry *dentry, struct path *exe_path)
 {
 	struct task_struct *task;
-	struct mm_struct *mm;
 	struct file *exe_file;
 
 	task = get_proc_task(d_inode(dentry));
 	if (!task)
 		return -ENOENT;
-	mm = get_task_mm(task);
+	exe_file = get_task_exe_file(task);
 	put_task_struct(task);
-	if (!mm)
-		return -ENOENT;
-	exe_file = get_mm_exe_file(mm);
-	mmput(mm);
 	if (exe_file) {
 		*exe_path = exe_file->f_path;
 		path_get(&exe_file->f_path);
@@ -2723,6 +2720,58 @@ static int proc_pid_personality(struct seq_file *m, struct pid_namespace *ns,
 	return err;
 }
 
+#ifdef CONFIG_TASK_DELAY_ACCT
+static int proc_tgid_delay_accounting(struct seq_file *m,
+				      struct pid_namespace *ns,
+				      struct pid *pid, struct task_struct *task)
+{
+	struct taskstats stats;
+	unsigned long flags;
+	int result;
+
+	result = mutex_lock_killable(&task->signal->cred_guard_mutex);
+	if (result)
+		return result;
+
+	if (!ptrace_may_access(task, PTRACE_MODE_READ_FSCREDS)) {
+		result = -EACCES;
+		goto out_unlock;
+	}
+
+	if (lock_task_sighand(task, &flags)) {
+		struct task_struct *t = task;
+
+		if (t->signal->stats)
+			memcpy(&stats, t->signal->stats, sizeof(stats));
+		else
+			memset(&stats, 0, sizeof(stats));
+
+		do {
+			if (t->exit_state)
+				continue;
+
+			delayacct_add_tsk(&stats, t);
+		} while_each_thread(task, t);
+
+		unlock_task_sighand(task, &flags);
+	}
+	seq_printf(m,
+			"cpu delay total: %llu\n"
+			"blkio delay total: %llu\n"
+			"swapin delay total: %llu\n"
+			"freepages delay total: %llu\n",
+			(unsigned long long)stats.cpu_delay_total,
+			(unsigned long long)stats.blkio_delay_total,
+			(unsigned long long)stats.swapin_delay_total,
+			(unsigned long long)stats.freepages_delay_total);
+	result = 0;
+
+out_unlock:
+	mutex_unlock(&task->signal->cred_guard_mutex);
+	return result;
+}
+#endif /* CONFIG_TASK_IO_ACCOUNTING */
+
 /*
  * Thread groups
  */
@@ -2770,6 +2819,7 @@ static const struct pid_entry tgid_base_stuff[] = {
 #ifdef CONFIG_PROC_PAGE_MONITOR
 	REG("clear_refs", S_IWUSR, proc_clear_refs_operations),
 	REG("smaps",      S_IRUGO, proc_pid_smaps_operations),
+	REG("smaps_rollup", S_IRUGO, proc_pid_smaps_rollup_operations),
 	REG("pagemap",    S_IRUSR, proc_pagemap_operations),
 #endif
 #ifdef CONFIG_SECURITY
@@ -2820,6 +2870,9 @@ static const struct pid_entry tgid_base_stuff[] = {
 #endif
 #ifdef CONFIG_CHECKPOINT_RESTORE
 	REG("timers",	  S_IRUGO, proc_timers_operations),
+#endif
+#ifdef CONFIG_TASK_DELAY_ACCT
+	ONE("delays",      S_IRUSR, proc_tgid_delay_accounting),
 #endif
 };
 
@@ -3062,6 +3115,8 @@ int proc_pid_readdir(struct file *file, struct dir_context *ctx)
 	     iter.tgid += 1, iter = next_tgid(ns, iter)) {
 		char name[PROC_NUMBUF];
 		int len;
+
+		cond_resched();
 		if (!has_pid_permissions(ns, iter.task, 2))
 			continue;
 
@@ -3118,6 +3173,7 @@ static const struct pid_entry tid_base_stuff[] = {
 #ifdef CONFIG_PROC_PAGE_MONITOR
 	REG("clear_refs", S_IWUSR, proc_clear_refs_operations),
 	REG("smaps",     S_IRUGO, proc_tid_smaps_operations),
+	REG("smaps_rollup", S_IRUGO, proc_pid_smaps_rollup_operations),
 	REG("pagemap",    S_IRUSR, proc_pagemap_operations),
 #endif
 #ifdef CONFIG_SECURITY

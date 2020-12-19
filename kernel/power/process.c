@@ -19,11 +19,16 @@
 #include <linux/kmod.h>
 #include <trace/events/power.h>
 
+#ifdef CONFIG_ENABLE_WOV_SUPPORT
+//#include <../../drivers/rtk_kdriver/include/rtk_kdriver/rtk_wov.h>
+#include <rtk_kdriver/rtk_wov.h>
+#endif
+
+extern unsigned int get_vsc_task_running_status(void);
 /* 
  * Timeout for stopping processes
  */
-unsigned int __read_mostly freeze_timeout_msecs = 20 * MSEC_PER_SEC;
-
+unsigned int __read_mostly freeze_timeout_msecs = 5 * MSEC_PER_SEC;
 static int try_to_freeze_tasks(bool user_only)
 {
 	struct task_struct *g, *p;
@@ -85,18 +90,26 @@ static int try_to_freeze_tasks(bool user_only)
 
 	if (todo) {
 		pr_cont("\n");
+		console_loglevel = 7;
+		pr_err("check vsc tsk status:%x\n", get_vsc_task_running_status());//help to print vsc task status
 		pr_err("Freezing of tasks %s after %d.%03d seconds "
 		       "(%d tasks refusing to freeze, wq_busy=%d):\n",
 		       wakeup ? "aborted" : "failed",
 		       elapsed_msecs / 1000, elapsed_msecs % 1000,
 		       todo - wq_busy, wq_busy);
 
+		if (wq_busy)
+			show_workqueue_state();
+
 		if (!wakeup) {
 			read_lock(&tasklist_lock);
 			for_each_process_thread(g, p) {
 				if (p != current && !freezer_should_skip(p)
-				    && freezing(p) && !frozen(p))
-					sched_show_task(p);
+				    && freezing(p) && !frozen(p)) {
+					struct task_struct *t;
+					for_each_thread(p, t)
+						sched_show_task(t);
+				}
 			}
 			read_unlock(&tasklist_lock);
 		}
@@ -180,6 +193,8 @@ int freeze_kernel_threads(void)
 	return error;
 }
 
+extern bool profiling_suspend_disabled;
+
 void thaw_processes(void)
 {
 	struct task_struct *g, *p;
@@ -197,7 +212,12 @@ void thaw_processes(void)
 
 	__usermodehelper_set_disable_depth(UMH_FREEZING);
 	thaw_workqueues();
-
+#ifdef CONFIG_ENABLE_WOV_SUPPORT
+	if(is_wakeup_from_wov(1) == 1){
+		wov_backup_ddr();
+		pr_info("WOV:wakeup from wov\n");
+	}
+#endif
 	read_lock(&tasklist_lock);
 	for_each_process_thread(g, p) {
 		/* No other threads should have PF_SUSPEND_TASK set */
@@ -212,7 +232,12 @@ void thaw_processes(void)
 	usermodehelper_enable();
 
 	schedule();
-	pr_cont("done.\n");
+
+	if ( !profiling_suspend_disabled )
+		pr_cont("done. rtk_profiling\n");
+	else
+		pr_cont("done.\n");
+
 	trace_suspend_resume(TPS("thaw_processes"), 0, false);
 }
 

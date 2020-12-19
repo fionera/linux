@@ -13,6 +13,7 @@ struct reserved_mem {
 	phys_addr_t			base;
 	phys_addr_t			size;
 	void				*priv;
+	int				is_sub_region;
 };
 
 struct reserved_mem_ops {
@@ -34,6 +35,11 @@ void of_reserved_mem_device_release(struct device *dev);
 void fdt_init_reserved_mem(void);
 void fdt_reserved_mem_save_node(unsigned long node, const char *uname,
 			       phys_addr_t base, phys_addr_t size);
+void fdt_reserved_mem_save_node_ext(unsigned long node, const char *uname,
+			       phys_addr_t base, phys_addr_t size, int is_sub_region);
+
+unsigned long fdt_get_carvedout_mem_size_in_highmem(unsigned long high_start, unsigned long high_end);
+unsigned long fdt_get_carvedout_mem_info(const char *reserved_mem_name, void **addr);
 #else
 static inline int of_reserved_mem_device_init(struct device *dev)
 {
@@ -44,6 +50,11 @@ static inline void of_reserved_mem_device_release(struct device *pdev) { }
 static inline void fdt_init_reserved_mem(void) { }
 static inline void fdt_reserved_mem_save_node(unsigned long node,
 		const char *uname, phys_addr_t base, phys_addr_t size) { }
+static inline void fdt_reserved_mem_save_node_ext(unsigned long node,
+		const char *uname, phys_addr_t base, phys_addr_t size, int is_sub_region) { }
+
+static inline unsigned long fdt_get_carvedout_mem_size_in_highmem(unsigned long high_start, unsigned long high_end) { }
+static inline unsigned long fdt_get_carvedout_mem_info(char *reserved_mem_name, void **addr) { }
 #endif
 
 #endif /* __OF_RESERVED_MEM_H */

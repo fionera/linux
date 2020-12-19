@@ -11,6 +11,8 @@ struct cma {
 	struct hlist_head mem_head;
 	spinlock_t mem_head_lock;
 #endif
+	int used;
+	int peak;
 };
 
 extern struct cma cma_areas[MAX_CMA_AREAS];

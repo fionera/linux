@@ -92,6 +92,9 @@ module_param_string(quirks, quirks, sizeof(quirks), S_IRUGO | S_IWUSR);
 MODULE_PARM_DESC(quirks, "supplemental list of device IDs and their quirks");
 
 
+int get_usb_stroage_mount_path_one(char *buf, size_t size);
+static LIST_HEAD(us_list_head);
+
 /*
  * The entries in this table correspond, line for line,
  * with the entries in usb_storage_usb_ids[], defined in usual-tables.c.
@@ -249,6 +252,10 @@ int usb_stor_post_reset(struct usb_interface *iface)
 
 	/* Report the reset to the SCSI core */
 	usb_stor_report_bus_reset(us);
+
+	/* Before device resumes, it's power session might be interrupted */
+	if (us->fflags & US_FL_GO_INITIAL_SLOW)
+		us->initial_reqs = 0xff;
 
 	/* FIXME: Notify the subdrivers that they need to reinitialize
 	 * the device */
@@ -482,7 +489,7 @@ void usb_stor_adjust_quirks(struct usb_device *udev, unsigned long *fflags)
 			US_FL_NO_READ_DISC_INFO | US_FL_NO_READ_CAPACITY_16 |
 			US_FL_INITIAL_READ10 | US_FL_WRITE_CACHE |
 			US_FL_NO_ATA_1X | US_FL_NO_REPORT_OPCODES |
-			US_FL_MAX_SECTORS_240);
+			US_FL_MAX_SECTORS_240 | US_FL_NO_REPORT_LUNS);
 
 	p = quirks;
 	while (*p) {
@@ -531,6 +538,9 @@ void usb_stor_adjust_quirks(struct usb_device *udev, unsigned long *fflags)
 			break;
 		case 'i':
 			f |= US_FL_IGNORE_DEVICE;
+			break;
+		case 'j':
+			f |= US_FL_NO_REPORT_LUNS;
 			break;
 		case 'l':
 			f |= US_FL_NOT_LOCKABLE;
@@ -600,6 +610,13 @@ static int get_device_info(struct us_data *us, const struct usb_device_id *id,
 	 */
 	if (dev->speed != USB_SPEED_HIGH)
 		us->fflags &= ~US_FL_GO_SLOW;
+
+	if (us->fflags & US_FL_GO_INITIAL_SLOW) {
+		if (dev->speed == USB_SPEED_SUPER && !dev->parent->parent)
+			us->initial_reqs = 0xff;
+		else
+			us->fflags &= ~US_FL_GO_INITIAL_SLOW;
+	}
 
 	if (us->fflags)
 		dev_info(pdev, "Quirks match for vid %04x pid %04x: %lx\n",
@@ -880,6 +897,10 @@ static void release_everything(struct us_data *us)
 	scsi_host_put(us_to_host(us));
 }
 
+#ifdef CONFIG_USB_STORAGE_SCAN_HELPER
+unsigned int pusb_dev_off = offsetof(struct us_data, pusb_dev);
+#endif
+
 /* Delayed-work routine to carry out SCSI-device scanning */
 static void usb_stor_scan_dwork(struct work_struct *work)
 {
@@ -1073,6 +1094,7 @@ void usb_stor_disconnect(struct usb_interface *intf)
 
 	quiesce_and_remove_host(us);
 	release_everything(us);
+	list_del(&us->us_data_list);
 }
 EXPORT_SYMBOL_GPL(usb_stor_disconnect);
 
@@ -1126,8 +1148,34 @@ static int storage_probe(struct usb_interface *intf,
 	/* No special transport or protocol settings in the main module */
 
 	result = usb_stor_probe2(us);
+	list_add_tail(&us->us_data_list, &us_list_head);
 	return result;
 }
+
+
+extern int get_disk_mount_path_one(struct scsi_device *sdev, char *buf, size_t size);
+int get_usb_storage_mount_path_one(char *buf, size_t size) {
+	struct us_data *us;
+	struct Scsi_Host *shost;
+	struct scsi_device *sdev;
+	int ret = 0;
+
+	if (!buf)
+		return -ENOMEM;
+
+	list_for_each_entry(us, &us_list_head, us_data_list) {
+		shost = us_to_host(us);
+		shost_for_each_device(sdev, shost) {
+			ret = get_disk_mount_path_one(sdev, buf, size);
+			if (!ret)
+				goto done;
+		}
+	}
+done:
+	return ret;
+}
+EXPORT_SYMBOL(get_usb_storage_mount_path_one);
+
 
 static struct usb_driver usb_storage_driver = {
 	.name =		DRV_NAME,
@@ -1143,4 +1191,20 @@ static struct usb_driver usb_storage_driver = {
 	.soft_unbind =	1,
 };
 
+#ifdef CONFIG_USER_INITCALL_USB
+int usb_storage_driver_init(void)
+{
+        usb_stor_host_template_init(&usb_stor_host_template, DRV_NAME, THIS_MODULE);
+	return usb_register(&usb_storage_driver);
+}
+
+static void __exit usb_storage_driver_exit(void)
+{
+	return usb_deregister(&usb_storage_driver);
+}
+
+user_initcall_grp("USB", usb_storage_driver_init);
+module_exit(usb_storage_driver_exit)
+#else
 module_usb_stor_driver(usb_storage_driver, usb_stor_host_template, DRV_NAME);
+#endif

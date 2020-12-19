@@ -70,6 +70,10 @@ MODULE_ALIAS("mmc:block");
 #define PACKED_CMD_VER	0x01
 #define PACKED_CMD_WR	0x02
 
+#ifdef CONFIG_MMC_RTKEMMC_PLUS
+#define RTK_IOCTL_OPTION
+#endif
+
 static DEFINE_MUTEX(block_mutex);
 
 /*
@@ -114,7 +118,9 @@ struct mmc_blk_data {
 #define MMC_BLK_WRITE		BIT(1)
 #define MMC_BLK_DISCARD		BIT(2)
 #define MMC_BLK_SECDISCARD	BIT(3)
-
+#ifdef CONFIG_MMC_RTKEMMC_PLUS
+	unsigned int	reset_cnt;
+#endif
 	/*
 	 * Only set in main mmc_blk_data associated
 	 * with mmc_card with dev_set_drvdata, and keeps
@@ -578,7 +584,7 @@ static int __mmc_blk_ioctl_cmd(struct mmc_card *card, struct mmc_blk_data *md,
 		 * Ensure RPMB command has completed by polling CMD13
 		 * "Send Status".
 		 */
-		err = ioctl_rpmb_card_status_poll(card, &status, 5);
+		err = ioctl_rpmb_card_status_poll(card, &status, 25);
 		if (err)
 			dev_err(mmc_dev(card->host),
 					"%s: Card Status=0x%08X, error %d\n",
@@ -588,6 +594,236 @@ static int __mmc_blk_ioctl_cmd(struct mmc_card *card, struct mmc_blk_data *md,
 	return err;
 }
 
+#ifdef RTK_IOCTL_OPTION
+extern int export_mmc_poweroff_notify(struct mmc_card *card, unsigned int notify_type);
+extern int export_mmc_can_poweroff_notify(const struct mmc_card *card);
+extern int export_mmc_send_data_cmd(unsigned int hc_cmd,unsigned int cmd_arg,
+                                    unsigned int blk_cnt,unsigned char * buffer );
+
+#define RTK_FLAG_SHT (16) //The flags of struct mmc_command is from bit0 to bit10. Therefore, We use bit16 to bit31.
+#define GET_RTK_IOCTL_FLAG(val) \
+            ((val & 0xffff0000)>>RTK_FLAG_SHT)
+#define GET_CMD_IOCTL_FLAG(val) \
+            (val & 0x0000FFFF)
+
+#define RTK_IOCTL_ERASE         (0x01)
+#define RTK_IOCTL_OPEN          (0x02)
+#define RTK_IOCTL_CLOSE         (0x03)
+#define RTK_IOCTL_PON_SHORT     (0x04)
+#define RTK_IOCTL_PON_LONG      (0x05)
+#define RTK_IOCTL_SMART_REPORT  (0x06)
+#define RTK_IOCTL_GET_CID       (0x07)
+#define RTK_IOCTL_GET_CSD       (0x08)
+
+static
+int mmc_rtk_ioctl_open(
+	struct block_device * bdev,
+	struct mmc_blk_ioc_data *idata )
+{
+	return 1;
+}
+
+static
+int mmc_rtk_ioctl_close(
+	struct block_device * bdev,
+	struct mmc_blk_ioc_data *idata )
+{
+	return 1;
+}
+
+static
+int mmc_rtk_ioctl_power_off_notification(
+	struct block_device * bdev,
+	struct mmc_blk_ioc_data *idata )
+{
+	struct mmc_blk_data *md;
+	struct mmc_card *card;
+	u32 *buf;
+	u8 *emmc_buf = NULL;
+	int err;
+
+	err = -EPERM;
+	md   = mmc_blk_get(bdev->bd_disk);
+	card = md->queue.card;
+	buf  = (unsigned int *)idata->buf;
+	pr_info("%s(%d)PON type is %s\n",
+		__func__,__LINE__,
+		(buf[0]==EXT_CSD_POWER_OFF_SHORT)?
+		"EXT_CSD_POWER_OFF_SHORT":
+		((buf[0]==EXT_CSD_POWER_OFF_LONG)?
+		"EXT_CSD_POWER_OFF_LONG":"Unknow PON Type"));
+
+	if(card &&
+		(buf[0] <= EXT_CSD_SLEEP_NOTIFICATION) &&
+		(card->ext_csd.rev >= 6) )
+    {
+        if (export_mmc_can_poweroff_notify(card)){
+            /* waitting to send poweroff_notify command */
+            pr_info( "Card poweroff-notify-state is EXT_CSD_POWER_ON already.\n");
+        }else{
+            pr_info( "transfer Card poweroff-notify-state to EXT_CSD_POWER_ON.\n");
+            emmc_buf = kmalloc(512, GFP_KERNEL);
+            if(!emmc_buf){
+                err = -ENOMEM;
+                goto ERR_OUT;
+            }else{
+                memset(emmc_buf, 0, 512);
+                //err = mmc_send_ext_csd(card, emmc_buf);
+                err = mmc_get_ext_csd(card, &emmc_buf);
+
+                if(err){
+		            err = -EIO;
+                    goto ERR_OUT;
+		        }
+#if 0
+		        for(i=0; i<512; i++){
+                    pr_err( "    [%03u]=%02x\n",i,*(emmc_buf+i));
+                }
+#endif
+                if(emmc_buf[34] == EXT_CSD_POWER_ON){
+                    card->ext_csd.power_off_notification = EXT_CSD_POWER_ON;
+
+                }else{
+                    err = mmc_switch(card, EXT_CSD_CMD_SET_NORMAL,
+			                EXT_CSD_POWER_OFF_NOTIFICATION,
+			                EXT_CSD_POWER_ON,
+			                card->ext_csd.generic_cmd6_time);
+	                if (err && err != -EBADMSG){
+		                goto ERR_OUT;
+	                }
+
+            		/*
+            		 * The err can be -EBADMSG or 0,
+            		 * so check for success and update the flag
+            		 */
+            		if (!err){
+            			card->ext_csd.power_off_notification = EXT_CSD_POWER_ON;
+            		}
+                }
+            }
+        }
+        pr_info( "perform poweroff-notify.\n");
+		err = export_mmc_poweroff_notify(card, buf[0]);
+		if(err){
+		    err = -EIO;
+            goto ERR_OUT;
+		}
+    }
+ERR_OUT:
+    if(emmc_buf)
+        kfree(emmc_buf);
+
+    return err;
+}
+
+#define IOCTL_GET_CID	1
+#define IOCTL_GET_CSD	2
+#define IOCTL_GET_ECSD	3
+
+static
+int mmc_rtk_ioctl_CXD(
+	struct block_device * bdev,
+	struct mmc_blk_ioc_data *idata,
+	int reg_type )
+{
+	struct mmc_blk_data *md;
+	struct mmc_card *card;
+	int err = 0;
+
+	md = mmc_blk_get(bdev->bd_disk);
+	card = md->queue.card;
+
+	if(card){
+		u8 *pcid;
+
+		if(reg_type == IOCTL_GET_CID)
+			pcid = (u8 *)card->raw_cid;
+		else if(reg_type == IOCTL_GET_CSD)
+			pcid = (u8 *)card->raw_csd;
+		else{
+			WARN_ON(1);
+			err = -EFAULT;
+			goto ERR_OUT;
+		}
+
+		pr_info("0x%02x 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x \n",
+			pcid[3] ,pcid[2] ,pcid[1] ,pcid[0],
+			pcid[7] ,pcid[6] ,pcid[5] ,pcid[4],
+			pcid[11],pcid[10],pcid[9] ,pcid[8],
+			pcid[15],pcid[14],pcid[13],pcid[12]);
+
+		memcpy(idata->buf,pcid,16);
+
+	}
+ERR_OUT:
+	return err;
+}
+
+
+static
+int mmc_rtk_ioctl_cmd(
+	struct block_device * bdev,
+	struct mmc_blk_ioc_data *idata )
+{
+	struct mmc_blk_data *md;
+	struct mmc_card *card;
+
+	u32 rtk_flags;
+	u32 cmd_flags;
+	u32 *buf;
+	int err = 0;
+
+	md = mmc_blk_get(bdev->bd_disk);
+	card = md->queue.card;
+
+	rtk_flags = GET_RTK_IOCTL_FLAG(idata->ic.flags);    //((idata->ic.flags)& 0xffff0000)>>RTK_FLAG_SHT;
+	cmd_flags = GET_CMD_IOCTL_FLAG(idata->ic.flags);    //idata->ic.flags & (0x0000FFFF);
+
+	buf = (unsigned int *)idata->buf;
+
+	switch(rtk_flags){
+	case RTK_IOCTL_OPEN:
+		pr_info("RTK_IOCTL_OPEN\n");
+		mmc_rtk_ioctl_open(bdev,idata);
+		break;
+	case RTK_IOCTL_CLOSE:
+		pr_info("RTK_IOCTL_CLOSE\n");
+		mmc_rtk_ioctl_close(bdev,idata);
+		break;
+	case RTK_IOCTL_ERASE:
+		pr_info("RTK_IOCTL_ERASE\n");
+		err = mmc_erase(card, buf[0], buf[1], MMC_TRIM_ARG);
+		break;
+	case RTK_IOCTL_PON_SHORT:
+		pr_info("RTK_IOCTL_PON_SHORT\n");
+		buf[0] = EXT_CSD_POWER_OFF_SHORT;
+		mmc_rtk_ioctl_power_off_notification(bdev,idata);
+		break;
+	case RTK_IOCTL_PON_LONG:
+		pr_info("RTK_IOCTL_PON_LONG\n");
+		buf[0] = EXT_CSD_POWER_OFF_LONG;
+		mmc_rtk_ioctl_power_off_notification(bdev,idata);
+		break;
+	case RTK_IOCTL_SMART_REPORT:
+		pr_info("RTK_IOCTL_SMART_REPORT have removed to kadp layer!\n");
+		break;
+	case RTK_IOCTL_GET_CID:
+		pr_info("RTK_IOCTL_GET_CID\n");
+		mmc_rtk_ioctl_CXD(bdev,idata,IOCTL_GET_CID);
+		break;
+	case RTK_IOCTL_GET_CSD:
+		pr_info("RTK_IOCTL_GET_CSD\n");
+		mmc_rtk_ioctl_CXD(bdev,idata,IOCTL_GET_CSD);
+		break;
+	default:
+		pr_info("vendor cmd%d no support!\n",rtk_flags);
+		break;
+	}
+
+	return err;
+}
+#endif  //?#ifdef RTK_IOCTL_OPTION
+
 static int mmc_blk_ioctl_cmd(struct block_device *bdev,
 			     struct mmc_ioc_cmd __user *ic_ptr)
 {
@@ -595,6 +831,17 @@ static int mmc_blk_ioctl_cmd(struct block_device *bdev,
 	struct mmc_blk_data *md;
 	struct mmc_card *card;
 	int err = 0, ioc_err = 0;
+#ifdef RTK_IOCTL_OPTION
+	unsigned int rtk_flags;
+#endif
+
+	/*
+	 * The caller must have CAP_SYS_RAWIO, and must be calling this on the
+	 * whole block device, not on a partition.  This prevents overspray
+	 * between sibling partitions.
+	 */
+	if ((!capable(CAP_SYS_RAWIO)) || (bdev != bdev->bd_contains))
+		return -EPERM;
 
 	idata = mmc_blk_ioctl_copy_from_user(ic_ptr);
 	if (IS_ERR(idata))
@@ -611,6 +858,21 @@ static int mmc_blk_ioctl_cmd(struct block_device *bdev,
 		err = PTR_ERR(card);
 		goto cmd_done;
 	}
+
+#ifdef RTK_IOCTL_OPTION
+	rtk_flags = GET_RTK_IOCTL_FLAG(idata->ic.flags);
+
+	if(rtk_flags){
+		pr_info("RTK vendor IOCTL cmd!!\n");
+
+		/* call RTK ioctl HERE */
+		mmc_get_card(card);
+		ioc_err = mmc_rtk_ioctl_cmd(bdev,idata);
+		mmc_put_card(card);
+		err = mmc_blk_ioctl_copy_to_user(ic_ptr, idata);
+		goto cmd_done;
+	}
+#endif
 
 	mmc_get_card(card);
 
@@ -637,6 +899,14 @@ static int mmc_blk_ioctl_multi_cmd(struct block_device *bdev,
 	struct mmc_blk_data *md;
 	int i, err = 0, ioc_err = 0;
 	__u64 num_of_cmds;
+
+	/*
+	 * The caller must have CAP_SYS_RAWIO, and must be calling this on the
+	 * whole block device, not on a partition.  This prevents overspray
+	 * between sibling partitions.
+	 */
+	if ((!capable(CAP_SYS_RAWIO)) || (bdev != bdev->bd_contains))
+		return -EPERM;
 
 	if (copy_from_user(&num_of_cmds, &user->num_of_cmds,
 			   sizeof(num_of_cmds)))
@@ -690,17 +960,252 @@ cmd_err:
 	return ioc_err ? ioc_err : err;
 }
 
+struct mmc_ext_ioctl_header {
+	unsigned int header;
+	unsigned int cmd_count;
+	unsigned int chk_sum;
+	unsigned int reserved;
+} __attribute__((packed));
+
+struct mmc_ext_ioctl_subcommand {
+	unsigned char type;
+	unsigned char mmc_opcode;
+	unsigned char mmc_flags;
+	unsigned char data_rw;
+	unsigned int  mmc_arg;
+	unsigned int  timeout_ms;
+	unsigned int  data_size;
+	unsigned long long  buff;
+	unsigned char reserved[8];
+} __attribute__((packed));
+
+struct mmc_ext_ioctl {
+	struct mmc_ext_ioctl_header header;
+	struct mmc_ext_ioctl_subcommand subcmd[15];
+	unsigned char reserved[16];
+} __attribute__((packed));
+
+static int mmc_blk_ioctl_cmd_extended(struct block_device *bdev,	unsigned int user_cmd, unsigned long user_arg)
+{
+	struct mmc_blk_data *md;
+	struct mmc_card *card;
+	struct mmc_command cmd = {0};
+	struct mmc_data data = {0};
+	struct mmc_request mrq = {0};
+	struct scatterlist sg;
+	struct mmc_ext_ioctl *cmd_buff = NULL;
+	unsigned char *data_buff = NULL;
+	unsigned int data_size = 0;
+	unsigned int rca;
+	unsigned int cid[4];
+	unsigned int cmd13timeout = 0;
+	unsigned int cmd13current = 0;
+
+	int err = 0;
+	int i;
+
+	#define EXTIOCTL_SIG 0x84B
+
+	if ((_IOC_TYPE(user_cmd) != MMC_BLOCK_MAJOR) ||
+		(_IOC_SIZE(user_cmd) != EXTIOCTL_SIG))
+		return -EINVAL;
+
+	if (_IOC_NR(user_cmd) != 'L')
+		return -EINVAL;
+
+#define EMMC_LG_SUB_NORMAL				0
+
+#define EMMC_NO_DATA	0
+#define EMMC_DATA_READ	1
+#define EMMC_DATA_WRITE	2
+
+#define EMMC_CMD13_TIMESLOT				20
+
+	md = mmc_blk_get(bdev->bd_disk);
+	if (!md) {
+		err = -EINVAL;
+		mmc_blk_put(md);
+		return err;
+	}
+
+	card = md->queue.card;
+	if (IS_ERR(card)) {
+		err = PTR_ERR(card);
+		mmc_blk_put(md);
+		return err;
+	}
+
+	cid[0] = card->raw_cid[0];
+	cid[1] = card->raw_cid[1];
+	cid[2] = card->raw_cid[2];
+	cid[3] = card->raw_cid[3];
+
+	rca = card->rca;
+
+	mmc_claim_host(card->host);
+
+	cmd_buff = NULL;
+	cmd_buff = kzalloc(sizeof(struct mmc_ext_ioctl), GFP_KERNEL);
+	if (!cmd_buff) {
+		mmc_release_host(card->host);
+		mmc_blk_put(md);
+
+		err = -ENOMEM;
+		return err;
+	}
+
+	if (copy_from_user((void *)cmd_buff, (void __user *)user_arg, 0x200)) {
+		mmc_release_host(card->host);
+		mmc_blk_put(md);
+
+		err = -ENOMEM;
+		if (cmd_buff)
+			kfree(cmd_buff);
+		return err;
+	}
+
+	if ((cmd_buff->header.cmd_count + cmd_buff->header.header)
+		!= cmd_buff->header.chk_sum) {
+		pr_err("EMMC >> EXT IOCTL CMD HEADER chksum ERROR\n");
+
+		mmc_release_host(card->host);
+		mmc_blk_put(md);
+
+		err = -ENOMEM;
+		if (cmd_buff)
+			kfree(cmd_buff);
+		return err;
+	}
+
+	for (i = 0; i < cmd_buff->header.cmd_count;) {
+		cmd.opcode = cmd_buff->subcmd[i].mmc_opcode;
+		if (cmd_buff->subcmd[i].mmc_opcode == MMC_SEND_STATUS) {
+			cmd.arg = rca << 16;
+
+			if (cmd13timeout == 0) {
+				cmd13current = 0;
+				if (cmd_buff->subcmd[i].timeout_ms == 0) {
+					cmd13timeout = 1000 / EMMC_CMD13_TIMESLOT;
+				} else {
+					cmd13timeout =
+						cmd_buff->subcmd[i].timeout_ms /
+						EMMC_CMD13_TIMESLOT;
+				}
+				cmd13timeout++;
+			}
+		} else {
+			cmd.arg = cmd_buff->subcmd[i].mmc_arg;
+			cmd13timeout = 0;
+			cmd13current = 0;
+		}
+		cmd.flags = cmd_buff->subcmd[i].mmc_flags;
+		cmd.busy_timeout = 0;
+		data_size = cmd_buff->subcmd[i].data_size;
+
+		if (cmd_buff->subcmd[i].data_rw > 0) {
+			if (data_buff == NULL) {
+				data_buff = kzalloc(data_size, GFP_KERNEL);
+				if (!data_buff) {
+					err = -ENOMEM;
+					data_buff = NULL;
+					break;
+				}
+			}
+
+			data.sg = &sg;
+			data.sg_len = 1;
+			data.blksz = 512;
+			data.blocks = data_size / 512;
+
+			sg_init_one(data.sg, data_buff, data_size);
+
+			if (cmd_buff->subcmd[i].data_rw == EMMC_DATA_READ)
+				data.flags = MMC_DATA_READ;
+			else
+				data.flags = MMC_DATA_WRITE;
+			mrq.data = &data;
+		} else {
+			mrq.data = NULL;
+			cmd.data = NULL;
+		}
+
+		mrq.cmd = &cmd;
+
+		/* write the data into the buffer */
+		if (cmd_buff->subcmd[i].data_rw == EMMC_DATA_WRITE) {
+			if (copy_from_user(data_buff,
+				(void __user *)(unsigned long)(cmd_buff->subcmd[i].buff),
+				0x200)) {
+				err = -EFAULT;
+				break;
+			}
+		}
+
+		mmc_wait_for_req(card->host, &mrq);
+
+		if (cmd.error) {
+			dev_err(mmc_dev(card->host), "%s: cmd error %d\n",
+				__func__, cmd.error);
+			err = cmd.error;
+			break;
+		}
+
+		if (cmd_buff->subcmd[i].mmc_opcode == MMC_SEND_STATUS) {
+			if ((cmd.resp[0] & 0xF00) != 0x900) {
+				if (cmd13current > cmd13timeout) {
+					err = -EFAULT;
+					break;
+				}
+
+				cmd13current++;
+				msleep(EMMC_CMD13_TIMESLOT);
+
+				continue;
+			} else {
+				cmd13current = 0;
+				cmd13timeout = 0;
+			}
+		}
+
+		if (data.error) {
+			dev_err(mmc_dev(card->host), "%s: data error %d\n",
+				__func__, data.error);
+			err = data.error;
+			break;
+		}
+
+		if (cmd_buff->subcmd[i].data_rw == EMMC_DATA_READ) {
+			if (copy_to_user(
+				(void __user *)(unsigned long)(cmd_buff->subcmd[i].buff),
+				data_buff, data_size)) {
+				err = -EFAULT;
+				break;
+			}
+		}
+
+		if (data_buff) {
+			kfree(data_buff);
+			data_buff = NULL;
+		}
+
+		i++;
+	}
+
+	mmc_release_host(card->host);
+	mmc_blk_put(md);
+
+	if (cmd_buff)
+		kfree(cmd_buff);
+
+	if (data_buff)
+		kfree(data_buff);
+
+	return err;
+}
+
 static int mmc_blk_ioctl(struct block_device *bdev, fmode_t mode,
 	unsigned int cmd, unsigned long arg)
 {
-	/*
-	 * The caller must have CAP_SYS_RAWIO, and must be calling this on the
-	 * whole block device, not on a partition.  This prevents overspray
-	 * between sibling partitions.
-	 */
-	if ((!capable(CAP_SYS_RAWIO)) || (bdev != bdev->bd_contains))
-		return -EPERM;
-
 	switch (cmd) {
 	case MMC_IOC_CMD:
 		return mmc_blk_ioctl_cmd(bdev,
@@ -709,7 +1214,7 @@ static int mmc_blk_ioctl(struct block_device *bdev, fmode_t mode,
 		return mmc_blk_ioctl_multi_cmd(bdev,
 				(struct mmc_ioc_multi_cmd __user *)arg);
 	default:
-		return -EINVAL;
+		return  mmc_blk_ioctl_cmd_extended(bdev, cmd, arg);
 	}
 }
 
@@ -747,9 +1252,18 @@ static inline int mmc_blk_part_switch(struct mmc_card *card,
 		part_config &= ~EXT_CSD_PART_CONFIG_ACC_MASK;
 		part_config |= md->part_type;
 
+		/*
+		 *  Workaround for samsung eMMC (manfid:0x15)
+		 *  rpmb access problem
+		 */
+		if ((md->part_type == EXT_CSD_PART_CONFIG_ACC_RPMB) &&
+			(card->cid.manfid == 0x15)) {
+			mmc_flush_cache(card);
+		}
+
 		ret = mmc_switch(card, EXT_CSD_CMD_SET_NORMAL,
 				 EXT_CSD_PART_CONFIG, part_config,
-				 card->ext_csd.part_time);
+				 card->ext_csd.part_time*10);
 		if (ret)
 			return ret;
 
@@ -942,11 +1456,15 @@ static int mmc_blk_cmd_error(struct request *req, const char *name, int error,
 	case -ETIMEDOUT:
 		pr_err("%s: %s sending %s command, card status %#x\n",
 			req->rq_disk->disk_name, "timed out", name, status);
-
+#ifdef CONFIG_MMC_RTKEMMC_PLUS
+		/* If the status of pervious cmd is success , retry the r/w cmd */
+		if (status_valid)
+			return ERR_RETRY;
+#else
 		/* If the status cmd initially failed, retry the r/w cmd */
 		if (!status_valid)
 			return ERR_RETRY;
-
+#endif
 		/*
 		 * If it was a r/w cmd crc error, or illegal command
 		 * (eg, issued in wrong state) then retry - we should
@@ -1017,7 +1535,12 @@ static int mmc_blk_cmd_recovery(struct mmc_card *card, struct request *req,
 		/* Check if the card is removed */
 		if (mmc_detect_card_removed(card->host))
 			return ERR_NOMEDIUM;
+#ifdef CONFIG_MMC_RTKEMMC_PLUS
+		/* retry 5 times anyway */
+		return ERR_RETRY;
+#else
 		return ERR_ABORT;
+#endif
 	}
 
 	/* Flag ECC errors */
@@ -1093,10 +1616,32 @@ static int mmc_blk_reset(struct mmc_blk_data *md, struct mmc_host *host,
 			 int type)
 {
 	int err;
-
+#ifdef CONFIG_MMC_RTKEMMC_PLUS
+	if (md->reset_done & type){
+		if(host->card->type == MMC_TYPE_MMC){
+			md->reset_cnt++;
+			pr_alert("%s: reset anyway; reset_cnt=%d\n",
+				mmc_hostname(host),md->reset_cnt);
+			if(md->reset_cnt>2){
+				/* down mode */
+				if(host->caps2 & MMC_CAP2_HS400_1_8V){
+					md->reset_cnt = 0;
+					pr_alert("%s: Disable HS400 mode\n",mmc_hostname(host));
+					host->caps2 &= ~MMC_CAP2_HS400_1_8V;
+				}else if (host->caps2 & MMC_CAP2_HS200_1_8V_SDR){
+					md->reset_cnt = 0;
+					pr_alert("%s: Disable HS200 mode\n",mmc_hostname(host));
+					host->caps2 &= ~MMC_CAP2_HS200_1_8V_SDR;
+				}
+			}
+		}else{
+			return -EEXIST;
+		}
+	}
+#else
 	if (md->reset_done & type)
 		return -EEXIST;
-
+#endif
 	md->reset_done |= type;
 	err = mmc_hw_reset(host);
 	/* Ensure we switch back to the correct partition */
@@ -1121,6 +1666,9 @@ static int mmc_blk_reset(struct mmc_blk_data *md, struct mmc_host *host,
 static inline void mmc_blk_reset_success(struct mmc_blk_data *md, int type)
 {
 	md->reset_done &= ~type;
+#ifdef CONFIG_MMC_RTKEMMC_PLUS
+	md->reset_cnt = 0;
+#endif
 }
 
 int mmc_access_rpmb(struct mmc_queue *mq)
@@ -1747,7 +2295,7 @@ static void mmc_blk_packed_hdr_wrq_prep(struct mmc_queue_req *mqrq,
 	struct mmc_blk_data *md = mq->data;
 	struct mmc_packed *packed = mqrq->packed;
 	bool do_rel_wr, do_data_tag;
-	u32 *packed_cmd_hdr;
+	__le32 *packed_cmd_hdr;
 	u8 hdr_blocks;
 	u8 i = 1;
 
@@ -1759,8 +2307,8 @@ static void mmc_blk_packed_hdr_wrq_prep(struct mmc_queue_req *mqrq,
 
 	packed_cmd_hdr = packed->cmd_hdr;
 	memset(packed_cmd_hdr, 0, sizeof(packed->cmd_hdr));
-	packed_cmd_hdr[0] = (packed->nr_entries << 16) |
-		(PACKED_CMD_WR << 8) | PACKED_CMD_VER;
+	packed_cmd_hdr[0] = cpu_to_le32((packed->nr_entries << 16) |
+		(PACKED_CMD_WR << 8) | PACKED_CMD_VER);
 	hdr_blocks = mmc_large_sector(card) ? 8 : 1;
 
 	/*
@@ -1774,14 +2322,14 @@ static void mmc_blk_packed_hdr_wrq_prep(struct mmc_queue_req *mqrq,
 			((brq->data.blocks * brq->data.blksz) >=
 			 card->ext_csd.data_tag_unit_size);
 		/* Argument of CMD23 */
-		packed_cmd_hdr[(i * 2)] =
+		packed_cmd_hdr[(i * 2)] = cpu_to_le32(
 			(do_rel_wr ? MMC_CMD23_ARG_REL_WR : 0) |
 			(do_data_tag ? MMC_CMD23_ARG_TAG_REQ : 0) |
-			blk_rq_sectors(prq);
+			blk_rq_sectors(prq));
 		/* Argument of CMD18 or CMD25 */
-		packed_cmd_hdr[((i * 2)) + 1] =
+		packed_cmd_hdr[((i * 2)) + 1] = cpu_to_le32(
 			mmc_card_blockaddr(card) ?
-			blk_rq_pos(prq) : blk_rq_pos(prq) << 9;
+			blk_rq_pos(prq) : blk_rq_pos(prq) << 9);
 		packed->blocks += blk_rq_sectors(prq);
 		i++;
 	}
@@ -2271,7 +2819,8 @@ static struct mmc_blk_data *mmc_blk_alloc_req(struct mmc_card *card,
 	set_capacity(md->disk, size);
 
 	if (mmc_host_cmd23(card->host)) {
-		if (mmc_card_mmc(card) ||
+		if ((mmc_card_mmc(card) &&
+		     card->csd.mmca_vsn >= CSD_SPEC_VER_3) ||
 		    (mmc_card_sd(card) &&
 		     card->scr.cmds & SD_SCR_CMD23_SUPPORT))
 			md->flags |= MMC_BLK_CMD23;
@@ -2506,10 +3055,11 @@ static const struct mmc_fixup blk_fixups[] =
 		  MMC_QUIRK_BLK_NO_CMD23),
 
 	/*
-	 * Some Micron MMC cards needs longer data read timeout than
-	 * indicated in CSD.
+	 * Some MMC cards need longer data read timeout than indicated in CSD.
 	 */
 	MMC_FIXUP(CID_NAME_ANY, CID_MANFID_MICRON, 0x200, add_quirk_mmc,
+		  MMC_QUIRK_LONG_READ_TIME),
+	MMC_FIXUP("008GE0", CID_MANFID_TOSHIBA, CID_OEMID_ANY, add_quirk_mmc,
 		  MMC_QUIRK_LONG_READ_TIME),
 
 	/*

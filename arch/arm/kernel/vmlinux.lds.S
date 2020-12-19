@@ -213,6 +213,12 @@ SECTIONS
 #endif
 		INIT_SETUP(16)
 		INIT_CALLS
+#ifdef CONFIG_USER_INITCALL
+		. = ALIGN(16);
+		__user_initcall_start = .;
+		*(.user_initcall.init)
+		__user_initcall_end = .;
+#endif
 		CON_INITCALL
 		SECURITY_INITCALL
 		INIT_RAM_FS

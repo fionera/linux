@@ -173,10 +173,10 @@ static struct gpio_desc *of_parse_own_gpio(struct device_node *np,
 		else
 			return ERR_PTR(-EINVAL);
 	}
-
+	/* fix CID20231 dead_error_line: Execution cannot reach this statement: 
 	if (xlate_flags & OF_GPIO_ACTIVE_LOW)
 		*lflags |= GPIO_ACTIVE_LOW;
-
+	*/
 	if (of_property_read_bool(np, "input"))
 		*dflags |= GPIOD_IN;
 	else if (of_property_read_bool(np, "output-low"))

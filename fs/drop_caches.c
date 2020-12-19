@@ -10,6 +10,15 @@
 #include <linux/gfp.h>
 #include "internal.h"
 
+#ifdef CONFIG_CMA_RTK_ALLOCATOR
+#include <linux/rtkrecord.h>
+#include <linux/rtkblueprint.h>
+#include <linux/pageremap.h>
+#include <linux/auth.h>
+
+void *dma_get_allocator(struct device *dev);
+#endif
+
 /* A global variable is a bit ugly, but it keeps the code simple */
 int sysctl_drop_caches;
 
@@ -58,6 +67,17 @@ int drop_caches_sysctl_handler(struct ctl_table *table, int write,
 			drop_slab();
 			count_vm_event(DROP_SLAB);
 		}
+        if (sysctl_drop_caches & 8) {
+#ifdef CONFIG_CMA_RTK_ALLOCATOR
+            list_all_rtk_memory_allocation_sort(list_mem_generic,NULL,NULL);
+            printk("\n\tDCU1: cache(%08lx)\n", get_page_cache_addr_specific(GFP_DCU1));
+            show_rtkbp((struct mem_bp *)dma_get_allocator(NULL));
+            printk("\n\tDCU2: cache(%08lx)\n", get_page_cache_addr_specific(GFP_DCU2));
+            show_rtkbp((struct mem_bp *)dma_get_allocator(auth_dev));
+            dma_show_bitmap(cma3_dev);
+#endif
+        }
+
 		if (!stfu) {
 			pr_info("%s (%d): drop_caches: %d\n",
 				current->comm, task_pid_nr(current),

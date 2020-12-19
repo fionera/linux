@@ -2,6 +2,11 @@
 # Makefile for MMC/SD host controller drivers
 #
 
+#kdriver support
+ifdef CONFIG_RTK_KDRIVER_SUPPORT
+KBUILD_CPPFLAGS += -Idrivers/rtk_kdriver/include
+endif
+
 obj-$(CONFIG_MMC_ARMMMCI)	+= mmci.o
 obj-$(CONFIG_MMC_QCOM_DML)	+= mmci_qcom_dml.o
 obj-$(CONFIG_MMC_PXA)		+= pxamci.o
@@ -26,6 +31,7 @@ obj-$(CONFIG_MMC_OMAP_HS)	+= omap_hsmmc.o
 obj-$(CONFIG_MMC_ATMELMCI)	+= atmel-mci.o
 obj-$(CONFIG_MMC_TIFM_SD)	+= tifm_sd.o
 obj-$(CONFIG_MMC_MVSDIO)	+= mvsdio.o
+
 obj-$(CONFIG_MMC_DAVINCI)       += davinci_mmc.o
 obj-$(CONFIG_MMC_GOLDFISH)	+= android-goldfish.o
 obj-$(CONFIG_MMC_SPI)		+= mmc_spi.o
@@ -79,3 +85,7 @@ obj-$(CONFIG_MMC_SDHCI_ST)		+= sdhci-st.o
 ifeq ($(CONFIG_CB710_DEBUG),y)
 	CFLAGS-cb710-mmc	+= -DDEBUG
 endif
+
+obj-$(CONFIG_MMC_SDHCI_LG1K)	+= sdhci-lg1k.o \
+				sdhci-lg1k_arasan.o sdhci-lg1k_dwc.o
+obj-$(CONFIG_MMC_DW_LG1K)	+= dw_mmc-lg1k.o

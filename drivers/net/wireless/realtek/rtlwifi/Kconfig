@@ -117,6 +117,69 @@ config RTL8192CU
 
 	If you choose to build it as a module, it will be called rtl8192cu
 
+config RTL8192DU
+	tristate "Realtek 8192D USB WiFi"
+	depends on USB
+	select RTLWIFI
+	select RTLWIFI_USB
+	select WIRELESS_EXT
+	select WEXT_PRIV
+	---help---
+	  Help message of RTL8192DU
+
+config RTL8192EU
+        tristate "Realtek 8192E USB WiFi"
+        depends on USB
+       select RTLWIFI
+       select RTLWIFI_USB
+        ---help---
+          Help message of RTL8192EU
+
+config RTL8188EU
+	tristate "Realtek 8188E USB WiFi"
+	depends on USB
+	select RTLWIFI
+	select RTLWIFI_USB
+	---help---
+	  Help message of RTL8188EU
+
+config RTL8188FU
+	tristate "Realtek 8188F USB WiFi"
+	depends on USB
+	select RTLWIFI
+	select RTLWIFI_USB
+	---help---
+	  Help message of RTL8188FU
+
+config RTL8812AU
+	tristate "Realtek 8812AU/8821AU USB WiFi"
+	depends on USB
+	select RTLWIFI
+	select RTLWIFI_USB
+	---help---
+	  Help message of RTL8821AU
+
+config RTL8814AU
+	tristate "Realtek 8814A USB WiFi"
+	depends on USB
+	select RTLWIFI
+	select RTLWIFI_USB
+	---help---
+	  Help message of RTL8814AU
+
+config RTL8723BU
+    tristate "Realtek 8723B USB WiFi"
+    depends on USB
+    ---help---
+      Help message of RTL8723BU
+config RTL8822BU
+	tristate "Realtek 8822B USB WiFi"
+	depends on USB
+	select RTLWIFI
+	select RTLWIFI_USB
+	---help---
+	  Help message of RTL8822BU
+
 config RTLWIFI
 	tristate
 	select FW_LOADER

@@ -21,6 +21,7 @@
 
 #include <linux/pagemap.h>
 #include <linux/swap.h>
+#include <linux/romempool.h>
 
 #ifdef CONFIG_HAVE_RCU_TABLE_FREE
 
@@ -59,7 +60,11 @@ static inline void __pte_free_tlb(struct mmu_gather *tlb, pgtable_t pte,
 {
 	__flush_tlb_pgtable(tlb->mm, addr);
 	pgtable_page_dtor(pte);
-	tlb_remove_entry(tlb, pte);
+	if (is_romempool_addr((unsigned long)page_address(pte)))
+		romempool_free((unsigned long)page_address(pte),
+			       RMP_PTE_USER, 0);
+	else
+		tlb_remove_entry(tlb, pte);
 }
 
 #if CONFIG_PGTABLE_LEVELS > 2
@@ -67,7 +72,10 @@ static inline void __pmd_free_tlb(struct mmu_gather *tlb, pmd_t *pmdp,
 				  unsigned long addr)
 {
 	__flush_tlb_pgtable(tlb->mm, addr);
-	tlb_remove_entry(tlb, virt_to_page(pmdp));
+	if (is_romempool_addr((unsigned long)pmdp))
+		romempool_free((unsigned long)pmdp, RMP_PMD, 0);
+	else
+		tlb_remove_entry(tlb, virt_to_page(pmdp));
 }
 #endif
 

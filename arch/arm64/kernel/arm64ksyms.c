@@ -26,8 +26,12 @@
 #include <linux/syscalls.h>
 #include <linux/uaccess.h>
 #include <linux/io.h>
+#include <linux/module.h>
+#include <linux/init.h>
+#include <linux/arm-smccc.h>
 
 #include <asm/checksum.h>
+#include <asm/cacheflush.h>
 
 EXPORT_SYMBOL(copy_page);
 EXPORT_SYMBOL(clear_page);
@@ -68,3 +72,15 @@ EXPORT_SYMBOL(test_and_change_bit);
 #ifdef CONFIG_FUNCTION_TRACER
 EXPORT_SYMBOL(_mcount);
 #endif
+
+	/* arm-smccc */
+EXPORT_SYMBOL(__arm_smccc_smc);
+EXPORT_SYMBOL(__arm_smccc_hvc);
+
+	/* cache maintenance */
+EXPORT_SYMBOL(__dma_flush_range);
+EXPORT_SYMBOL(__dma_map_area);
+EXPORT_SYMBOL(__dma_unmap_area);
+
+	/* Exporting a symbol from /init/main.c */
+EXPORT_SYMBOL(saved_command_line);

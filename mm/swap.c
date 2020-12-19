@@ -41,6 +41,9 @@
 
 /* How many pages do we try to swap or page in/out together? */
 int page_cluster;
+#ifdef CONFIG_SWAP
+int swap_full_const = 2;
+#endif
 
 static DEFINE_PER_CPU(struct pagevec, lru_add_pvec);
 static DEFINE_PER_CPU(struct pagevec, lru_rotate_pvecs);

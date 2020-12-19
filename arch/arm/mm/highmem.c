@@ -147,3 +147,18 @@ void *kmap_atomic_pfn(unsigned long pfn)
 
 	return (void *)vaddr;
 }
+
+struct page *kmap_atomic_to_page(const void *ptr)
+{
+	unsigned long vaddr = (unsigned long)ptr;
+
+	if (vaddr >= PKMAP_ADDR(0) && vaddr < PKMAP_ADDR(LAST_PKMAP)) {
+		int i = PKMAP_NR(vaddr);
+		return pte_page(pkmap_page_table[i]);
+	}
+
+	if (vaddr >= FIXADDR_START)
+		return pte_page(get_fixmap_pte(vaddr));
+
+	return virt_to_page(ptr);
+}

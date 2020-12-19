@@ -134,6 +134,11 @@ static void jfs_destroy_inode(struct inode *inode)
 {
 	struct jfs_inode_info *ji = JFS_IP(inode);
 
+#ifdef CONFIG_LG_JFS_USB_PULLOUT
+ 	if (inode->i_sb && inode->i_sb->s_flags & MS_RDONLY) {
+ 		list_del_init(&ji->anon_inode_list);
+ 	}
+#endif
 	BUG_ON(!list_empty(&ji->anon_inode_list));
 
 	spin_lock_irq(&ji->ag_lock);
@@ -758,7 +763,7 @@ static ssize_t jfs_quota_read(struct super_block *sb, int type, char *data,
 				sb->s_blocksize - offset : toread;
 
 		tmp_bh.b_state = 0;
-		tmp_bh.b_size = 1 << inode->i_blkbits;
+		tmp_bh.b_size = i_blocksize(inode);
 		err = jfs_get_block(inode, blk, &tmp_bh, 0);
 		if (err)
 			return err;
@@ -798,7 +803,7 @@ static ssize_t jfs_quota_write(struct super_block *sb, int type,
 				sb->s_blocksize - offset : towrite;
 
 		tmp_bh.b_state = 0;
-		tmp_bh.b_size = 1 << inode->i_blkbits;
+		tmp_bh.b_size = i_blocksize(inode);
 		err = jfs_get_block(inode, blk, &tmp_bh, 1);
 		if (err)
 			goto out;

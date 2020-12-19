@@ -20,6 +20,7 @@
 #include <linux/seq_file.h>
 #include <linux/memblock.h>
 
+#include <asm/setup.h>
 #include <asm-generic/sections.h>
 #include <linux/io.h>
 
@@ -617,6 +618,7 @@ static int __init_memblock memblock_add_region(phys_addr_t base,
 {
 	struct memblock_type *type = &memblock.memory;
 
+    pr_info("mem=%lldMB@0x%08llx\n", (long long)(size / 1024 / 1024), (long long)base); // RTK_patch: print memory info
 	memblock_dbg("memblock_add: [%#016llx-%#016llx] flags %#02lx %pF\n",
 		     (unsigned long long)base,
 		     (unsigned long long)base + size - 1,
@@ -627,7 +629,18 @@ static int __init_memblock memblock_add_region(phys_addr_t base,
 
 int __init_memblock memblock_add(phys_addr_t base, phys_addr_t size)
 {
-	return memblock_add_region(base, size, MAX_NUMNODES, 0);
+	struct membank *bank = &meminfo.bank[meminfo.nr_banks];
+	int ret = 0;
+
+	ret = memblock_add_region(base, size, MAX_NUMNODES, 0);
+
+	if (!ret) {
+		bank->start = base;
+		bank->size = size;
+		bank->highmem = 0;
+		meminfo.nr_banks++;
+	}
+	return ret;
 }
 
 /**
@@ -1632,6 +1645,30 @@ static void __init_memblock memblock_dump(struct memblock_type *type, char *name
 		pr_info(" %s[%#x]\t[%#016llx-%#016llx], %#llx bytes%s flags: %#lx\n",
 			name, i, base, base + size - 1, size, nid_buf, flags);
 	}
+}
+
+extern unsigned long __init_memblock
+memblock_reserved_memory_within(phys_addr_t start_addr, phys_addr_t end_addr)
+{
+	struct memblock_type *type = &memblock.reserved;
+	unsigned long size = 0;
+	int idx;
+
+	for (idx = 0; idx < type->cnt; idx++) {
+		struct memblock_region *rgn = &type->regions[idx];
+		phys_addr_t start, end;
+
+		if (rgn->base + rgn->size < start_addr)
+			continue;
+		if (rgn->base > end_addr)
+			continue;
+
+		start = rgn->base;
+		end = start + rgn->size;
+		size += end - start;
+	}
+
+	return size;
 }
 
 void __init_memblock __memblock_dump_all(void)

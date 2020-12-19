@@ -32,6 +32,15 @@ config FAT_FS
 	  cannot compile any of the FAT-based file systems into the kernel
 	  -- they will have to be modules as well.
 
+config FAT_LOW_FREQUENCY_FOR_ERR_MSG
+	bool "Decrease the frquency of printing error log for FAT io error"
+	depends on FAT_FS
+	default y
+	help
+	   This config decrease the frequency of printing error log for FAT IO error.
+	   Once the mess of message print out to console, user cannot do any operation on shell.
+	   This is not convenient.
+
 config MSDOS_FS
 	tristate "MSDOS fs support"
 	select FAT_FS

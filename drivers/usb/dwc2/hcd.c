@@ -268,15 +268,33 @@ static void dwc2_hcd_cleanup_channels(struct dwc2_hsotg *hsotg)
 }
 
 /**
- * dwc2_hcd_disconnect() - Handles disconnect of the HCD
+ * dwc2_hcd_connect() - Handles connect of the HCD
  *
  * @hsotg: Pointer to struct dwc2_hsotg
  *
  * Must be called with interrupt disabled and spinlock held
  */
-void dwc2_hcd_disconnect(struct dwc2_hsotg *hsotg)
+void dwc2_hcd_connect(struct dwc2_hsotg *hsotg)
+{
+	if (hsotg->lx_state != DWC2_L0)
+		usb_hcd_resume_root_hub(hsotg->priv);
+
+	hsotg->flags.b.port_connect_status_change = 1;
+	hsotg->flags.b.port_connect_status = 1;
+}
+
+/**
+ * dwc2_hcd_disconnect() - Handles disconnect of the HCD
+ *
+ * @hsotg: Pointer to struct dwc2_hsotg
+ * @force: If true, we won't try to reconnect even if we see device connected.
+ *
+ * Must be called with interrupt disabled and spinlock held
+ */
+void dwc2_hcd_disconnect(struct dwc2_hsotg *hsotg, bool force)
 {
 	u32 intr;
+	u32 hprt0;
 
 	/* Set status flags for the hub driver */
 	hsotg->flags.b.port_connect_status_change = 1;
@@ -315,6 +333,24 @@ void dwc2_hcd_disconnect(struct dwc2_hsotg *hsotg)
 		dwc2_hcd_cleanup_channels(hsotg);
 
 	dwc2_host_disconnect(hsotg);
+
+	/*
+	 * Add an extra check here to see if we're actually connected but
+	 * we don't have a detection interrupt pending.  This can happen if:
+	 *   1. hardware sees connect
+	 *   2. hardware sees disconnect
+	 *   3. hardware sees connect
+	 *   4. dwc2_port_intr() - clears connect interrupt
+	 *   5. dwc2_handle_common_intr() - calls here
+	 *
+	 * Without the extra check here we will end calling disconnect
+	 * and won't get any future interrupts to handle the connect.
+	 */
+	if (!force) {
+		hprt0 = dwc2_readl(hsotg->regs + HPRT0);
+		if (!(hprt0 & HPRT0_CONNDET) && (hprt0 & HPRT0_CONNSTS))
+			dwc2_hcd_connect(hsotg);
+	}
 }
 
 /**
@@ -1382,7 +1418,7 @@ static void dwc2_conn_id_status_change(struct work_struct *work)
 			dev_err(hsotg->dev,
 				"Connection id status change timed out\n");
 		hsotg->op_state = OTG_STATE_B_PERIPHERAL;
-		dwc2_core_init(hsotg, false, -1);
+		dwc2_core_init(hsotg, false);
 		dwc2_enable_global_interrupts(hsotg);
 		spin_lock_irqsave(&hsotg->lock, flags);
 		dwc2_hsotg_core_init_disconnected(hsotg, false);
@@ -1405,7 +1441,7 @@ static void dwc2_conn_id_status_change(struct work_struct *work)
 		hsotg->op_state = OTG_STATE_A_HOST;
 
 		/* Initialize the Core for Host mode */
-		dwc2_core_init(hsotg, false, -1);
+		dwc2_core_init(hsotg, false);
 		dwc2_enable_global_interrupts(hsotg);
 		dwc2_hcd_start(hsotg);
 	}
@@ -2366,7 +2402,7 @@ static void _dwc2_hcd_stop(struct usb_hcd *hcd)
 
 	spin_lock_irqsave(&hsotg->lock, flags);
 	/* Ensure hcd is disconnected */
-	dwc2_hcd_disconnect(hsotg);
+	dwc2_hcd_disconnect(hsotg, true);
 	dwc2_hcd_stop(hsotg);
 	hsotg->lx_state = DWC2_L3;
 	hcd->state = HC_STATE_HALT;
@@ -3054,7 +3090,7 @@ int dwc2_hcd_init(struct dwc2_hsotg *hsotg, int irq)
 	dwc2_disable_global_interrupts(hsotg);
 
 	/* Initialize the DWC_otg core, and select the Phy type */
-	retval = dwc2_core_init(hsotg, true, irq);
+	retval = dwc2_core_init(hsotg, true);
 	if (retval)
 		goto error2;
 
@@ -3203,3 +3239,142 @@ void dwc2_hcd_remove(struct dwc2_hsotg *hsotg)
 	kfree(hsotg->frame_num_array);
 #endif
 }
+
+#ifdef CONFIG_PM_SLEEP
+int dwc2_hcd_suspend(struct dwc2_hsotg *hsotg)
+{
+	struct usb_hcd *hcd = dwc2_hsotg_to_hcd(hsotg);
+	unsigned long flags;
+	int ret = 0;
+	u32 hprt0;
+
+	dev_dbg(hsotg->dev, "DWC OTG HCD SUSPEND state=%d\n", hsotg->lx_state);
+
+	spin_lock_irqsave(&hsotg->lock, flags);
+
+	if (hsotg->lx_state != DWC2_L2)
+		goto unlock;
+
+	if (!HCD_HW_ACCESSIBLE(hcd))
+		goto unlock;
+
+	if (hsotg->core_params->hibernation)
+		goto skip_power_saving;
+	/*
+	 * Drive USB suspend and disable port Power
+	 * if usb bus is not suspended.
+	 */
+	if (!hsotg->bus_suspended) {
+		hprt0 = dwc2_read_hprt0(hsotg);
+		hprt0 |= HPRT0_SUSP;
+		hprt0 &= ~HPRT0_PWR;
+		dwc2_writel(hprt0, hsotg->regs + HPRT0);
+	}
+
+	/* Enter hibernation */
+	hsotg->core_params->hibernation = 1;
+	ret = dwc2_enter_hibernation(hsotg);
+	hsotg->core_params->hibernation = 0;
+	if (ret) {
+		if (ret != -ENOTSUPP)
+			dev_err(hsotg->dev,
+					"enter hibernation failed\n");
+		goto skip_power_saving;
+	}
+
+	/* Ask phy to be suspended */
+	if (!IS_ERR_OR_NULL(hsotg->uphy)) {
+		spin_unlock_irqrestore(&hsotg->lock, flags);
+		usb_phy_set_suspend(hsotg->uphy, true);
+		spin_lock_irqsave(&hsotg->lock, flags);
+	}
+
+	/* After entering hibernation, hardware is no more accessible */
+	clear_bit(HCD_FLAG_HW_ACCESSIBLE, &hcd->flags);
+
+skip_power_saving:
+	hsotg->lx_state = DWC2_L3;
+unlock:
+	spin_unlock_irqrestore(&hsotg->lock, flags);
+
+	return ret;
+}
+
+int dwc2_hcd_resume(struct dwc2_hsotg *hsotg)
+{
+	struct usb_hcd *hcd = dwc2_hsotg_to_hcd(hsotg);
+	unsigned long flags;
+	int ret = 0;
+
+	dev_dbg(hsotg->dev, "DWC OTG HCD RESUME  state=%d\n", hsotg->lx_state);
+
+	usb_root_hub_lost_power(hcd->self.root_hub);
+
+	spin_lock_irqsave(&hsotg->lock, flags);
+
+	/*
+	 * Normally lx_state is DWC2_L3,
+	 * but it could be DWC2_L0 due to wakeup detected interrupt
+	 */
+	if (hsotg->lx_state != DWC2_L3 && hsotg->lx_state != DWC2_L0)
+		goto unlock;
+
+	if (hsotg->core_params->hibernation) {
+		hsotg->lx_state = DWC2_L2;
+		goto unlock;
+	}
+
+	/*
+	 * Set HW accessible bit before powering on the controller
+	 * since an interrupt may rise.
+	 */
+	set_bit(HCD_FLAG_HW_ACCESSIBLE, &hcd->flags);
+
+	/*
+	 * Enable power if not already done.
+	 * This must not be spinlocked since duration
+	 * of this call is unknown.
+	 */
+	if (!IS_ERR_OR_NULL(hsotg->uphy)) {
+		spin_unlock_irqrestore(&hsotg->lock, flags);
+		usb_phy_set_suspend(hsotg->uphy, false);
+		spin_lock_irqsave(&hsotg->lock, flags);
+	}
+
+	/* Exit hibernation */
+	hsotg->core_params->hibernation = 1;
+	ret = dwc2_exit_hibernation(hsotg, true);
+	hsotg->core_params->hibernation = 0;
+	if (ret && (ret != -ENOTSUPP))
+		dev_err(hsotg->dev, "exit hibernation failed\n");
+
+	hsotg->lx_state = DWC2_L2;
+
+	spin_unlock_irqrestore(&hsotg->lock, flags);
+
+	if (hsotg->bus_suspended) {
+		spin_lock_irqsave(&hsotg->lock, flags);
+		hsotg->flags.b.port_suspend_change = 1;
+		spin_unlock_irqrestore(&hsotg->lock, flags);
+		dwc2_port_resume(hsotg);
+	} else {
+		/* Wait for controller to correctly update D+/D- level */
+		usleep_range(3000, 5000);
+
+		/*
+		 * Clear Port Enable and Port Status changes.
+		 * Enable Port Power.
+		 */
+		dwc2_writel(HPRT0_PWR | HPRT0_CONNDET |
+				HPRT0_ENACHG, hsotg->regs + HPRT0);
+		/* Wait for controller to detect Port Connect */
+		usleep_range(5000, 7000);
+	}
+
+	return ret;
+unlock:
+	spin_unlock_irqrestore(&hsotg->lock, flags);
+
+	return ret;
+}
+#endif	/* CONFIG_PM_SLEEP */
